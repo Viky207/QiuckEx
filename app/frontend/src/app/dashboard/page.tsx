@@ -59,6 +59,9 @@ function formatCurrency(val: number): string {
 function DashboardContent() {
   const searchParams = useSearchParams();
   const { data, error, loading, callApi } = useApi<DashboardResponse>();
+  const [activitySearch, setActivitySearch] = useState("");
+  const [activityStatus, setActivityStatus] = useState<"All" | ActivityFeedItem["status"]>("All");
+  const [activityAsset, setActivityAsset] = useState("All");
   const [userBids, setUserBids] = useState<UserBid[]>([]);
   const [userListings, setUserListings] = useState<UserListing[]>([]);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
@@ -171,6 +174,31 @@ function DashboardContent() {
 
     return null;
   }, [highlightedBid, highlightedListing, highlightedTransaction]);
+
+  const activityAssets = useMemo(
+    () => Array.from(new Set((data?.items ?? []).map((item) => item.asset))).sort(),
+    [data?.items],
+  );
+
+  const filteredActivityItems = useMemo(() => {
+    const query = activitySearch.trim().toLowerCase();
+
+    return (data?.items ?? []).filter((item) => {
+      const matchesSearch = !query || [
+        item.id,
+        item.amount,
+        item.asset,
+        item.memo ?? "",
+        item.source,
+        item.destination,
+        item.status,
+      ].some((value) => value.toLowerCase().includes(query));
+      const matchesStatus = activityStatus === "All" || item.status === activityStatus;
+      const matchesAsset = activityAsset === "All" || item.asset === activityAsset;
+
+      return matchesSearch && matchesStatus && matchesAsset;
+    });
+  }, [activityAsset, activitySearch, activityStatus, data?.items]);
 
   const handleRetry = () => {
     setFeedRetryCount((prev) => prev + 1);
@@ -412,15 +440,59 @@ function DashboardContent() {
               </p>
             </div>
 
-            <button
-              type="button"
-              onClick={handleRetry}
-              disabled={loading}
-              className={`rounded-xl border border-border bg-surface px-4 py-2 text-sm font-semibold text-muted transition hover:border-indigo-300/40 hover:text-foreground disabled:opacity-50 ${FOCUS_RING_CLASS}`}
-              aria-label="Refresh activity feed"
-            >
-              {loading ? "Refreshing…" : "Refresh"}
-            </button>
+            <div className="flex flex-col gap-3 sm:items-end">
+              <button
+                type="button"
+                onClick={handleRetry}
+                disabled={loading}
+                className={`rounded-xl border border-border bg-surface px-4 py-2 text-sm font-semibold text-muted transition hover:border-indigo-300/40 hover:text-foreground disabled:opacity-50 ${FOCUS_RING_CLASS}`}
+                aria-label="Refresh activity feed"
+              >
+                {loading ? "Refreshing..." : "Refresh"}
+              </button>
+              <div className="flex flex-col gap-2 sm:flex-row">
+                <label className="sr-only" htmlFor="activity-search">
+                  Search transactions
+                </label>
+                <input
+                  id="activity-search"
+                  type="search"
+                  value={activitySearch}
+                  onChange={(event) => setActivitySearch(event.target.value)}
+                  placeholder="Search transactions"
+                  className={`min-w-0 rounded-xl border border-border bg-surface px-3 py-2 text-sm text-foreground placeholder:text-subtle sm:w-56 ${FOCUS_RING_CLASS}`}
+                />
+                <label className="sr-only" htmlFor="activity-status">
+                  Filter by status
+                </label>
+                <select
+                  id="activity-status"
+                  value={activityStatus}
+                  onChange={(event) => setActivityStatus(event.target.value as "All" | ActivityFeedItem["status"])}
+                  className={`rounded-xl border border-border bg-surface px-3 py-2 text-sm text-foreground ${FOCUS_RING_CLASS}`}
+                >
+                  <option value="All">All statuses</option>
+                  <option value="Settled">Settled</option>
+                  <option value="Pending">Pending</option>
+                </select>
+                <label className="sr-only" htmlFor="activity-asset">
+                  Filter by asset
+                </label>
+                <select
+                  id="activity-asset"
+                  value={activityAsset}
+                  onChange={(event) => setActivityAsset(event.target.value)}
+                  className={`rounded-xl border border-border bg-surface px-3 py-2 text-sm text-foreground ${FOCUS_RING_CLASS}`}
+                >
+                  <option value="All">All assets</option>
+                  {activityAssets.map((asset) => (
+                    <option key={asset} value={asset}>
+                      {asset}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
           </div>
 
           {data?.degraded ? (
@@ -472,6 +544,26 @@ function DashboardContent() {
                 Create payment link
               </Link>
             </div>
+          ) : filteredActivityItems.length === 0 ? (
+            <div className="flex flex-col items-center justify-center px-6 py-16 text-center sm:px-10">
+              <h3 className="text-lg font-semibold text-foreground">
+                No matching transactions
+              </h3>
+              <p className="mt-2 text-sm text-muted">
+                Try a different search term or clear the filters.
+              </p>
+              <button
+                type="button"
+                onClick={() => {
+                  setActivitySearch("");
+                  setActivityStatus("All");
+                  setActivityAsset("All");
+                }}
+                className={`mt-6 rounded-xl border border-border bg-surface px-4 py-2.5 text-sm font-semibold text-muted transition hover:text-foreground ${FOCUS_RING_CLASS}`}
+              >
+                Clear filters
+              </button>
+            </div>
           ) : (
             <>
               <div className="overflow-x-auto">
@@ -490,7 +582,7 @@ function DashboardContent() {
                   </thead>
 
                   <tbody className="divide-y divide-border">
-                    {(data?.items ?? []).map((item, index) => {
+                    {filteredActivityItems.map((item, index) => {
                       const isHighlighted =
                         item.id === highlightedTransaction;
 

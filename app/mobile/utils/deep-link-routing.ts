@@ -20,9 +20,7 @@ export function parseTransactionDeepLink(
     const url = new URL(raw);
 
     if (url.protocol === `${QUICKEX_SCHEME}:`) {
-      const segments = url.pathname
-        .replace(/^\/+/, '')
-        .split('/')
+      const segments = [url.hostname, ...url.pathname.replace(/^\/+/, '').split('/')]
         .filter(Boolean);
       if (segments.length >= 2 && segments[0] === 'transaction') {
         const params: Record<string, string> = {};
@@ -73,7 +71,8 @@ function looksLikePaymentLink(raw: string): boolean {
     const url = new URL(raw);
 
     if (url.protocol === `${QUICKEX_SCHEME}:`) {
-      const segments = url.pathname.replace(/^\/+/, '').split('/').filter(Boolean);
+      const segments = [url.hostname, ...url.pathname.replace(/^\/+/, '').split('/')]
+        .filter(Boolean);
       return segments.length === 0 || segments[0] !== 'transaction';
     }
 
