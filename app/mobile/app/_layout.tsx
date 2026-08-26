@@ -20,7 +20,7 @@ import { NotificationProvider } from "../components/notifications/NotificationCo
 import ToastNotification from "../components/notifications/ToastNotification";
 import { usePaymentListener } from "../hooks/usePaymentListener";
 import { useOnboarding } from "../hooks/useOnboarding";
-import { WalletProvider } from "../hooks/useWalletContext";
+import { useWalletContext, WalletProvider } from "../hooks/useWalletContext";
 import { NetworkGuardProvider } from "../contexts/NetworkGuardContext";
 import { EnvironmentProvider } from "../contexts/EnvironmentContext";
 import { SessionProvider } from "../contexts/SessionContext";
@@ -37,6 +37,10 @@ import {
 // ── Theme System v2 ──────────────────────────────────────────────────────────
 import { QuickExThemeProvider, useTheme } from "../src/theme/ThemeContext";
 import { invalidateOldCache } from "../services/cache";
+import {
+  configurePushNotifications,
+  registerForPushNotifications,
+} from "../services/push-notifications";
 
 function useDeepLinkHandler(
   onRoute: (route: DeepLinkRoute) => void,
@@ -165,12 +169,25 @@ function ThemeBridge() {
 
 function AppShell() {
   const router = useRouter();
+  const { wallet } = useWalletContext();
   const { isAppLocked, isReady, settings, unlockApp, getSessionExplanation } = useSecurity();
   const { isLoading: onboardingLoading, hasCompletedOnboarding } = useOnboarding();
   const [pendingDeepLink, setPendingDeepLink] = useState<DeepLinkRoute | null>(null);
   const [pendingLinkError, setPendingLinkError] = useState<{ message: string; url: string } | null>(null);
 
   const canRouteDeepLink = !onboardingLoading && hasCompletedOnboarding;
+
+  useEffect(() => {
+    configurePushNotifications();
+  }, []);
+
+  useEffect(() => {
+    if (!wallet.publicKey || wallet.isRestoring) return;
+
+    void registerForPushNotifications(wallet.publicKey).catch((error) => {
+      console.warn("Push notification registration unavailable:", error);
+    });
+  }, [wallet.isRestoring, wallet.publicKey]);
 
   useEffect(() => {
     if (!canRouteDeepLink) return;

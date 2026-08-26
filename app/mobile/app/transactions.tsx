@@ -16,6 +16,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { FlashList, type ListRenderItemInfo } from "@shopify/flash-list";
 import * as FileSystem from "expo-file-system";
 import * as Sharing from "expo-sharing";
+import * as Haptics from "expo-haptics";
 import { Ionicons } from "@expo/vector-icons";
 
 import TransactionItem from "../components/transaction-item";
@@ -69,6 +70,10 @@ function escapeCsvValue(value: string): string {
     return `"${value.replace(/"/g, '""')}"`;
   }
   return value;
+}
+
+function triggerSelectionHaptic() {
+  void Haptics.selectionAsync();
 }
 
 // ─── Loading Skeleton ────────────────────────────────────────────────────────
@@ -368,7 +373,10 @@ export default function TransactionsScreen() {
               return (
                 <Pressable
                   key={option}
-                  onPress={() => setAssetFilter(option)}
+                  onPress={() => {
+                    triggerSelectionHaptic();
+                    setAssetFilter(option);
+                  }}
                   style={[
                     styles.chip,
                     {
@@ -407,7 +415,10 @@ export default function TransactionsScreen() {
             return (
               <Pressable
                 key={option}
-                onPress={() => setStatusFilter(option)}
+                onPress={() => {
+                  triggerSelectionHaptic();
+                  setStatusFilter(option);
+                }}
                 style={[
                   styles.chip,
                   { backgroundColor: theme.chipBg, borderColor: theme.border },
@@ -489,7 +500,13 @@ export default function TransactionsScreen() {
 
       <View style={styles.actionRow}>
         {filtersActive ? (
-          <Pressable onPress={handleClearFilters} style={styles.ghostButton}>
+          <Pressable
+            onPress={() => {
+              triggerSelectionHaptic();
+              handleClearFilters();
+            }}
+            style={styles.ghostButton}
+          >
             <Text style={[styles.ghostButtonText, { color: theme.textMuted }]}>
               Clear Filters
             </Text>
@@ -498,7 +515,10 @@ export default function TransactionsScreen() {
           <View />
         )}
         <Pressable
-          onPress={handleExport}
+          onPress={() => {
+            triggerSelectionHaptic();
+            void handleExport();
+          }}
           style={[
             styles.exportButton,
             { backgroundColor: theme.buttonPrimaryBg },
@@ -558,7 +578,10 @@ export default function TransactionsScreen() {
         ]}
       >
         <TouchableOpacity
-          onPress={() => router.back()}
+          onPress={() => {
+            triggerSelectionHaptic();
+            router.back();
+          }}
           style={styles.backBtn}
           hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
         >

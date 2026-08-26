@@ -9,6 +9,7 @@ import {
 import { useTranslation } from "react-i18next";
 import type { TransactionItem as TransactionItemType } from "../types/transaction";
 import { useRouter } from "expo-router";
+import * as Haptics from "expo-haptics";
 import { Ionicons } from "@expo/vector-icons";
 import { useTheme } from "../src/theme/ThemeContext";
 
@@ -64,6 +65,7 @@ export default function TransactionItem({ item }: Props) {
   const isSent = item.direction === "sent";
 
   const handlePress = () => {
+    void Haptics.selectionAsync();
     router.push({
       pathname: `/transaction/${item.pagingToken}`,
       params: {

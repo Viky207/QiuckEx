@@ -18,6 +18,13 @@ describe('deep link routing', () => {
     });
   });
 
+  it('parses custom-scheme transaction links', () => {
+    expect(parseTransactionDeepLink('quickex://transaction/abc-123')).toEqual({
+      id: 'abc-123',
+      params: {},
+    });
+  });
+
   it('resolves payment confirmation links to the payment confirmation route', () => {
     const result = resolveDeepLink('https://quickex.to/jordan?amount=12.5&asset=XLM');
     expect(result).toEqual({
