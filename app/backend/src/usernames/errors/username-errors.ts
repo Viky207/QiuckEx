@@ -11,6 +11,8 @@ export enum UsernameErrorCode {
   INVALID_FORMAT = 'USERNAME_INVALID_FORMAT',
   /** Username not found. */
   NOT_FOUND = 'USERNAME_NOT_FOUND',
+  /** Claim signature is invalid, expired, or not backed by a Stellar account. */
+  CLAIM_INVALID = 'USERNAME_CLAIM_INVALID',
 }
 
 export class UsernameConflictError extends Error {
@@ -45,5 +47,12 @@ export class UsernameValidationError extends Error {
   ) {
     super(message);
     this.name = 'UsernameValidationError';
+  }
+}
+
+export class UsernameClaimInvalidError extends Error {
+  constructor(message = 'Username claim signature is invalid or expired') {
+    super(message);
+    this.name = 'UsernameClaimInvalidError';
   }
 }
