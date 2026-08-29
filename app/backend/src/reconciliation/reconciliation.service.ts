@@ -6,6 +6,7 @@ import { AppConfigService } from '../config/app-config.service';
 import { SupabaseService } from '../supabase/supabase.service';
 import { MetricsService } from '../metrics/metrics.service';
 import {
+  DivergenceRecord,
   EscrowDbStatus,
   EscrowRecord,
   EscrowReconciliationResult,
@@ -15,6 +16,7 @@ import {
   PaymentReconciliationResult,
   ReconciliationAction,
   ReconciliationReport,
+  ReconciliationMetrics,
 } from './types/reconciliation.types';
 
 @Injectable()
@@ -76,6 +78,12 @@ export class ReconciliationService {
       escrows: this.summarise(escrowResults),
       payments: this.summarise(paymentResults),
     };
+
+    const divergences = await this.detectDivergences(runId, batchSize);
+    report.divergences = divergences;
+    report.metrics = this.buildMetrics(report, divergences.length);
+    report.divergence_rate = report.metrics.divergence_rate;
+    report.auto_match_rate = report.metrics.auto_match_rate;
 
     // Add totals comparison for payments
     report.totalsComparison = await this.comparePaymentTotals(runId);
@@ -383,6 +391,181 @@ export class ReconciliationService {
     };
   }
 
+  private normalizeAmountToBaseUnits(amount: string): bigint {
+    const trimmed = amount.trim();
+    if (!trimmed || trimmed === '0') {
+      return 0n;
+    }
+
+    const [whole, fraction = ''] = trimmed.split('.');
+    const sign = whole.startsWith('-') ? '-' : '';
+    const normalizedWhole = sign ? whole.slice(1) : whole;
+    const normalizedFraction = fraction.padEnd(7, '0').slice(0, 7);
+    const digits = `${normalizedWhole || '0'}${normalizedFraction}`;
+    return BigInt(`${sign}${digits}`);
+  }
+
+  private buildMetrics(report: ReconciliationReport, divergenceCount: number): ReconciliationMetrics {
+    const processedTotal = (report.escrows.processed ?? 0) + (report.payments.processed ?? 0);
+    const totalReviewed = Math.max(0, processedTotal - divergenceCount);
+    const autoMatched = Math.max(0, (report.escrows.updated ?? 0) + (report.payments.updated ?? 0));
+
+    return {
+      divergence_rate: processedTotal > 0 ? divergenceCount / processedTotal : 0,
+      auto_match_rate: processedTotal > 0 ? autoMatched / processedTotal : 0,
+      total_divergences: divergenceCount,
+      auto_matched: autoMatched,
+      reviewed: totalReviewed,
+    };
+  }
+
+  private async detectDivergences(runId: string, batchSize: number): Promise<DivergenceRecord[]> {
+    const divergences: DivergenceRecord[] = [];
+
+    try {
+      const dbEscrows = await this.supabase.fetchAllEscrows();
+      const dbPayments = await this.supabase.fetchAllPayments();
+      const onChainEscrows = await Promise.all(
+        dbEscrows.map(async (escrow) => {
+          try {
+            const account = await this.server.loadAccount(escrow.contract_address);
+            const nativeLine = (account.balances as Horizon.HorizonApi.BalanceLine[]).find(
+              (b) => b.asset_type === 'native',
+            );
+            const balance = nativeLine ? this.normalizeAmountToBaseUnits(nativeLine.balance) : 0n;
+            return {
+              contractAddress: escrow.contract_address,
+              amount: escrow.amount,
+              exists: true,
+              balance,
+              status: nativeLine && Number.parseFloat(nativeLine.balance) > 0 ? 'active' : 'claimed',
+            };
+          } catch (error) {
+            const status = (error as { response?: { status?: number } })?.response?.status === 404 ? 'missing' : 'unknown';
+            return {
+              contractAddress: escrow.contract_address,
+              amount: escrow.amount,
+              exists: status !== 'missing',
+              balance: 0n,
+              status,
+            };
+          }
+        }),
+      );
+
+      const escrowByAddress = new Map<string, EscrowRecord[]>();
+      for (const escrow of dbEscrows) {
+        const list = escrowByAddress.get(escrow.contract_address) ?? [];
+        list.push(escrow);
+        escrowByAddress.set(escrow.contract_address, list);
+      }
+
+      for (const [address, rows] of escrowByAddress) {
+        if (rows.length > 1) {
+          divergences.push({
+            entity: 'escrow',
+            type: 'duplicate',
+            contractAddress: address,
+            details: `Duplicate escrow records found for ${address}: ${rows.length} rows`,
+          });
+        }
+
+        const expected = rows[0];
+        const observed = onChainEscrows.find((record) => record.contractAddress === address);
+
+        if (!observed) {
+          if (rows.length > 0) {
+            divergences.push({
+              entity: 'escrow',
+              type: 'missing',
+              contractAddress: address,
+              expectedAmount: expected.amount,
+              details: `Escrow ${address} is missing from Horizon`,
+            });
+          }
+          continue;
+        }
+
+        if (observed.status === 'missing') {
+          divergences.push({
+            entity: 'escrow',
+            type: 'missing',
+            contractAddress: address,
+            expectedAmount: expected.amount,
+            details: `Escrow ${address} is absent on-chain`,
+          });
+        }
+
+        const dbAmount = this.normalizeAmountToBaseUnits(expected.amount);
+        const onChainAmount = observed.balance;
+        if (dbAmount !== onChainAmount) {
+          divergences.push({
+            entity: 'escrow',
+            type: 'amount_mismatch',
+            contractAddress: address,
+            expectedAmount: expected.amount,
+            observedAmount: onChainAmount.toString(),
+            details: `Escrow ${address} amount mismatch: DB=${expected.amount}, Horizon=${onChainAmount.toString()}`,
+          });
+        }
+      }
+
+      const paymentByHash = new Map<string, PaymentRecord[]>();
+      for (const payment of dbPayments) {
+        const list = paymentByHash.get(payment.stellar_tx_hash) ?? [];
+        list.push(payment);
+        paymentByHash.set(payment.stellar_tx_hash, list);
+      }
+
+      for (const [txHash, rows] of paymentByHash) {
+        if (rows.length > 1) {
+          divergences.push({
+            entity: 'payment',
+            type: 'duplicate',
+            txHash,
+            details: `Duplicate payment rows for tx ${txHash}: ${rows.length} rows`,
+          });
+        }
+      }
+
+      const txHashes = new Set(dbPayments.map((p) => p.stellar_tx_hash));
+      for (const payment of dbPayments) {
+        try {
+          const tx = await this.server.transactions().transaction(payment.stellar_tx_hash).call();
+          const onChainStatus = tx.successful ? 'confirmed' : 'failed';
+          if (payment.status === PaymentDbStatus.Paid && onChainStatus !== 'confirmed') {
+            divergences.push({
+              entity: 'payment',
+              type: 'status_mismatch',
+              txHash: payment.stellar_tx_hash,
+              expectedStatus: payment.status,
+              observedStatus: onChainStatus,
+              details: `Payment ${payment.stellar_tx_hash} expected paid but Horizon reports ${onChainStatus}`,
+            });
+          }
+        } catch (error) {
+          const status = (error as { response?: { status?: number } })?.response?.status === 404 ? 'missing' : 'unknown';
+          if (payment.status === PaymentDbStatus.Paid || payment.status === PaymentDbStatus.Pending) {
+            divergences.push({
+              entity: 'payment',
+              type: 'missing',
+              txHash: payment.stellar_tx_hash,
+              expectedStatus: payment.status,
+              observedStatus: status,
+              details: `Payment ${payment.stellar_tx_hash} missing from Horizon`,
+            });
+          }
+        }
+      }
+
+      this.logger.log(`[${runId}] Detected ${divergences.length} divergence(s) against Horizon (batchSize=${batchSize})`);
+      return divergences;
+    } catch (error) {
+      this.logger.warn(`[${runId}] Horizon divergence scan failed: ${error instanceof Error ? error.message : String(error)}`);
+      return [];
+    }
+  }
+
   /**
    * Compare expected vs observed payment totals to detect discrepancies.
    * Expected: Count and sum of payments in 'paid' status in DB
@@ -390,26 +573,46 @@ export class ReconciliationService {
    */
   private async comparePaymentTotals(runId: string) {
     try {
-      // Get expected totals from database (paid payments)
       const dbPayments = await this.supabase.fetchPaidPayments();
       const expectedCount = dbPayments.length;
       const expectedTotalAmount = dbPayments.reduce(
-        (sum, p) => sum + BigInt(p.amount),
+        (sum, p) => sum + this.normalizeAmountToBaseUnits(p.amount),
         0n,
       ).toString();
 
-      // Get observed totals from on-chain (this is a simplified version)
-      // In production, you would query Horizon for all transactions in a time range
-      const observedCount = expectedCount; // Placeholder - would be from Horizon
-      const observedTotalAmount = expectedTotalAmount; // Placeholder - would be from Horizon
+      const observedRecords = await Promise.all(
+        dbPayments.map(async (payment) => {
+          try {
+            const tx = await this.server.transactions().transaction(payment.stellar_tx_hash).call();
+            if (!tx.successful) {
+              return null;
+            }
+            return {
+              txHash: payment.stellar_tx_hash,
+              amount: payment.amount,
+            };
+          } catch (error) {
+            const status = (error as { response?: { status?: number } })?.response?.status;
+            if (status === 404) {
+              return null;
+            }
+            throw error;
+          }
+        }),
+      );
+
+      const observedPayments = observedRecords.filter((entry): entry is { txHash: string; amount: string } => entry !== null);
+      const observedCount = observedPayments.length;
+      const observedTotalAmount = observedPayments.reduce(
+        (sum, payment) => sum + this.normalizeAmountToBaseUnits(payment.amount),
+        0n,
+      ).toString();
 
       const countDiscrepancy = Math.abs(expectedCount - observedCount);
       const amountDiscrepancy = (
         BigInt(expectedTotalAmount) - BigInt(observedTotalAmount)
       ).toString();
-
-      // Threshold: alert if count discrepancy > 5 or amount discrepancy > 0
-      const exceedsThreshold = countDiscrepancy > 5 || amountDiscrepancy !== '0';
+      const exceedsThreshold = countDiscrepancy > 0 || amountDiscrepancy !== '0';
 
       this.logger.log(
         `[${runId}] Payment totals comparison: expected=${expectedCount}/${expectedTotalAmount}, observed=${observedCount}/${observedTotalAmount}, exceedsThreshold=${exceedsThreshold}`,
