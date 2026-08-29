@@ -21,4 +21,5 @@ export {
   ExportGenerationPayload,
   ReconciliationPayload,
   StellarReconnectPayload,
+  TemplateExecutionPayload,
 } from './job-payloads.types';
