@@ -3,6 +3,10 @@ import { createClient, SupabaseClient } from "@supabase/supabase-js";
 
 import { AppConfigService } from "../config";
 import {
+  CORRELATION_ID_HEADER,
+  getCurrentCorrelationId,
+} from "../common/context/correlation.context";
+import {
   EscrowDbStatus,
   EscrowRecord,
   PaymentDbStatus,
@@ -93,9 +97,33 @@ export class SupabaseService {
       auth: {
         persistSession: false,
       },
+      global: {
+        fetch: this.correlatingFetch.bind(this),
+      },
     });
 
     this.logger.log("Supabase client initialized successfully");
+  }
+
+  /**
+   * Wrap the global fetch used by the Supabase client so every outbound request
+   * to Supabase carries the current request correlation ID header. Falls back
+   * to the native fetch when the correlation ID is unavailable.
+   */
+  private correlatingFetch(
+    input: RequestInfo | URL,
+    init?: RequestInit,
+  ): Promise<Response> {
+    const correlationId = getCurrentCorrelationId();
+    if (!correlationId) return fetch(input, init);
+
+    const headers = new Headers(init?.headers);
+    headers.set(CORRELATION_ID_HEADER, correlationId);
+
+    return fetch(input, {
+      ...init,
+      headers,
+    });
   }
 
   /**
