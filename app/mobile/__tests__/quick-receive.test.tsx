@@ -146,4 +146,24 @@ describe("<QuickReceiveScreen />", () => {
     });
     expect(treeConnected!.toJSON()).toMatchSnapshot("quick-receive-connected-dark");
   });
+
+  it("exposes accessibility labels on all interactive controls", () => {
+    mockWalletContext = {
+      connected: true,
+      publicKey: "GAMOSFOKEYHFDGMXIEFEYBUYK3ZMFYN3PFLOTBRXFGBFGRKBKLQSLGLP",
+      network: "testnet",
+      walletType: "freighter",
+    };
+
+    const tree = renderer.create(<QuickReceiveScreen />);
+    const buttons = tree.root.findAll((node) => {
+      const props = node.props as Record<string, unknown>;
+      return typeof props.onPress === "function";
+    });
+
+    expect(buttons.length).toBeGreaterThan(0);
+    expect(buttons.some((node) => (node.props as Record<string, unknown>).accessibilityLabel === "Copy payment link")).toBe(true);
+    expect(buttons.some((node) => (node.props as Record<string, unknown>).accessibilityLabel === "Copy wallet address")).toBe(true);
+    expect(buttons.some((node) => (node.props as Record<string, unknown>).accessibilityLabel === "Share payment link")).toBe(true);
+  });
 });
