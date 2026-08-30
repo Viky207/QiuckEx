@@ -106,5 +106,6 @@ pub fn invoke_hooks(
 
 fn log_hook_event(env: &Env, event_type: &str, hook_contract: &Address, _is_success: bool) {
     let event_symbol = Symbol::new(env, event_type);
-    env.log().info(&event_symbol, &hook_contract);
+    env.events().publish((Symbol::new(env, "HookEvent"), event_symbol), hook_contract.clone());
+    let _ = _is_success;
 }

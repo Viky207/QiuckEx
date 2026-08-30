@@ -211,6 +211,40 @@ pub struct FeeConfig {
     pub fee_bps: u32,
 }
 
+/// Snapshot of the global and per-feature pause state.
+#[contracttype]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PauseStatus {
+    pub is_globally_paused: bool,
+    pub global_pause_reason: u32,
+    pub feature_pause_flags: u64,
+}
+
+/// A single fee collector rotation record for audit/history purposes.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FeeCollectorRotationEntry {
+    pub rotation_index: u32,
+    pub collector: Address,
+    pub previous_collector: Option<Address>,
+    pub rotated_at: u64,
+}
+
+/// Fee model for escrow TTL extensions.
+///
+/// A single extension is charged proportionally to the duration being added, with
+/// a floor/ceiling guard to keep the model predictable and bounded.
+#[contracttype]
+#[derive(Clone, Copy, Debug)]
+pub struct TtlExtensionFeeConfig {
+    /// Fee charged per second of requested extension duration.
+    pub fee_per_second: i128,
+    /// Minimum total fee for any extension request.
+    pub min_fee: i128,
+    /// Maximum total fee for a single extension request.
+    pub max_fee: i128,
+}
+
 /// Per-asset fee configuration (Fee Router v2 — Issue #305).
 ///
 /// Stored under [`DataKey::PerAssetFee`](crate::storage::DataKey::PerAssetFee)`(token)` in
