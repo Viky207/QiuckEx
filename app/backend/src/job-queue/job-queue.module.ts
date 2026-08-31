@@ -29,6 +29,7 @@ import {
   ExportGenerationHandler,
   ReconciliationHandler,
   StellarReconnectHandler,
+  TemplateExecutionHandler,
 } from "./handlers";
 
 /**
@@ -75,6 +76,7 @@ import {
     ExportGenerationHandler,
     ReconciliationHandler,
     StellarReconnectHandler,
+    TemplateExecutionHandler,
   ],
   exports: [
     JobQueueService,
@@ -87,6 +89,7 @@ import {
     ExportGenerationHandler,
     ReconciliationHandler,
     StellarReconnectHandler,
+    TemplateExecutionHandler,
   ],
 })
 export class JobQueueModule {}
