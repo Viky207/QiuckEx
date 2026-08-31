@@ -72,8 +72,10 @@ use crate::{
         get_escrow_id_mapping, has_dispute_vote, has_escrow, put_dispute_vote, put_escrow,
         put_escrow_id_mapping, remove_escrow,
     },
-    storage,
-    types::{DisputeVote, EscrowEntry, EscrowStatus, HookEventKind, Role},
+    types::{
+        DisputeVote, EscrowEntry, EscrowStatus, HookEventKind, RefundEligibility,
+        RefundEligibilityReason, Role,
+    },
 };
 
 // ---------------------------------------------------------------------------
@@ -820,25 +822,42 @@ pub fn finalize_expired_escrow(env: &Env, commitment: BytesN<32>) -> Result<(), 
     Ok(())
 }
 
-/// Read-only check for whether an escrow is currently eligible for refund
-/// finalization, without submitting a state-changing transaction.
+/// Read-only refund eligibility view.
 ///
-/// Intended for dapps/keepers to poll before calling [`finalize_expired_escrow`],
-/// and for indexers reconstructing refund availability off-chain (though note
-/// [`events::publish_escrow_deposited`] already carries `expires_at`, so most
-/// indexers can compute this themselves from the original deposit event).
-///
-/// Returns `false` (rather than erroring) once the escrow has already left
-/// `Pending` — including after it has already been refunded — since it is no
-/// longer eligible, not because eligibility couldn't be computed.
-///
-/// # Errors
-/// - [`CommitmentNotFound`] – no escrow for the given commitment.
-pub fn is_refund_eligible(env: &Env, commitment: BytesN<32>) -> Result<bool, QuickexError> {
+/// Returns whether the escrow is eligible to be finalized and a normalized
+/// machine-readable reason without mutating state or emitting events.
+pub fn is_refund_eligible(env: &Env, commitment: BytesN<32>) -> RefundEligibility {
     let commitment_bytes: Bytes = commitment.into();
-    let entry: EscrowEntry =
-        get_escrow(env, &commitment_bytes).ok_or(QuickexError::CommitmentNotFound)?;
-    Ok(entry.status == EscrowStatus::Pending && is_expired(env, &entry))
+    let Some(entry) = get_escrow(env, &commitment_bytes) else {
+        return RefundEligibility {
+            eligible: false,
+            reason: RefundEligibilityReason::CommitmentNotFound,
+        };
+    };
+
+    if entry.status == EscrowStatus::Pending && is_expired(env, &entry) {
+        return RefundEligibility {
+            eligible: true,
+            reason: RefundEligibilityReason::Eligible,
+        };
+    }
+
+    let reason = match entry.status {
+        EscrowStatus::Disputed => RefundEligibilityReason::InvalidDisputeState,
+        EscrowStatus::Pending => RefundEligibilityReason::EscrowNotExpired,
+        _ => RefundEligibilityReason::AlreadySpent,
+    };
+
+    RefundEligibility {
+        eligible: false,
+        reason,
+    }
+}
+
+/// Alias for the read-only eligibility view; keepers and backends can call either
+/// name depending on their preferred API style.
+pub fn get_refund_eligibility(env: &Env, commitment: BytesN<32>) -> RefundEligibility {
+    is_refund_eligible(env, commitment)
 }
 
 // ---------------------------------------------------------------------------

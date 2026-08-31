@@ -1,4 +1,5 @@
 import * as winston from 'winston';
+import { getCurrentCorrelationId } from '../context/correlation.context';
 
 /**
  * Structured logging format for Winston.
@@ -8,12 +9,20 @@ import * as winston from 'winston';
  *   - level (error, warn, info, debug)
  *   - message
  *   - service name
+ *   - correlationId (when a request scope is active)
  *   - any additional metadata
  *
  * File transports use JSON format for machine parsing.
  * Console transport uses colourised simple format for dev readability.
  */
+const withCorrelationId = winston.format((info) => {
+  const correlationId = getCurrentCorrelationId();
+  if (correlationId) info.correlationId = correlationId;
+  return info;
+});
+
 const structuredFormat = winston.format.combine(
+  withCorrelationId(),
   winston.format.timestamp({ format: 'YYYY-MM-DD HH:mm:ss.SSS' }),
   winston.format.errors({ stack: true }),
   winston.format.json(),

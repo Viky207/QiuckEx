@@ -2136,7 +2136,7 @@ fn test_finalize_expired_escrow_fails_just_before_expiry() {
 
     env.ledger().set_timestamp(expires_at - 1);
 
-    assert!(!client.is_refund_eligible(&commitment));
+    assert!(!client.is_refund_eligible(&commitment).eligible);
 
     let res = client.try_finalize_expired_escrow(&commitment);
     assert_eq!(res, Err(Ok(crate::errors::QuickexError::EscrowNotExpired)));
@@ -2170,7 +2170,7 @@ fn test_finalize_expired_escrow_succeeds_exactly_at_expiry() {
 
     env.ledger().set_timestamp(expires_at);
 
-    assert!(client.is_refund_eligible(&commitment));
+    assert!(client.is_refund_eligible(&commitment).eligible);
 
     // `keeper` never authorized anything — permissionless call.
     let _ = &keeper;
@@ -2254,7 +2254,7 @@ fn test_finalize_expired_escrow_fails_if_already_spent() {
     let expires_at = env.ledger().timestamp() + timeout;
     env.ledger().set_timestamp(expires_at + 1);
 
-    assert!(!client.is_refund_eligible(&commitment));
+    assert!(!client.is_refund_eligible(&commitment).eligible);
 
     let res = client.try_finalize_expired_escrow(&commitment);
     assert_eq!(res, Err(Ok(crate::errors::QuickexError::AlreadySpent)));
@@ -2345,22 +2345,56 @@ fn test_finalize_expired_escrow_never_eligible_when_no_timeout_set() {
     env.ledger()
         .set_timestamp(env.ledger().timestamp() + 1_000_000);
 
-    assert!(!client.is_refund_eligible(&commitment));
+    assert!(!client.is_refund_eligible(&commitment).eligible);
 
     let res = client.try_finalize_expired_escrow(&commitment);
     assert_eq!(res, Err(Ok(crate::errors::QuickexError::EscrowNotExpired)));
 }
 
-/// is_refund_eligible on an unknown commitment must error, not panic
-/// or silently return false.
+/// Read-only refund eligibility should explain why a refund is or is not allowed.
 #[test]
-fn test_is_refund_eligible_fails_for_unknown_commitment() {
+fn test_get_refund_eligibility_returns_eligible_and_reason() {
+    let (env, client) = setup();
+    let token = create_test_token(&env);
+    let owner = Address::generate(&env);
+    let amount: i128 = 1000;
+    let salt = Bytes::from_slice(&env, b"refund_view_reason");
+
+    token::StellarAssetClient::new(&env, &token).mint(&owner, &amount);
+    let commitment = client.deposit(
+        &token,
+        &amount,
+        &owner,
+        &salt,
+        &100,
+        &None,
+        &0u64,
+        &u64::MAX,
+    );
+
+    let before_expiry = client.is_refund_eligible(&commitment);
+    assert!(!before_expiry.eligible);
+    assert_eq!(before_expiry.reason, crate::types::RefundEligibilityReason::EscrowNotExpired);
+
+    env.ledger().set_timestamp(env.ledger().timestamp() + 101);
+    let after_expiry = client.is_refund_eligible(&commitment);
+    assert!(after_expiry.eligible);
+    assert_eq!(after_expiry.reason, crate::types::RefundEligibilityReason::Eligible);
+}
+
+/// Unknown commitments should return a structured not-eligible result with a
+/// reason rather than panicking or mutating state.
+#[test]
+fn test_is_refund_eligible_reports_unknown_commitment_reason() {
     let (env, client) = setup();
     let bogus = BytesN::from_array(&env, &[7u8; 32]);
-    let res = client.try_is_refund_eligible(&bogus);
+    let result = client.is_refund_eligible(&bogus);
     assert_eq!(
-        res,
-        Err(Ok(crate::errors::QuickexError::CommitmentNotFound))
+        result,
+        crate::types::RefundEligibility {
+            eligible: false,
+            reason: crate::types::RefundEligibilityReason::CommitmentNotFound,
+        }
     );
 }
 

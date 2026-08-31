@@ -64,8 +64,11 @@ export default function HomeScreen() {
               onPress={() => {
                 void syncNow();
               }}
+              accessibilityRole="button"
+              accessibilityLabel="Sync notifications"
+              accessibilityHint="Refreshes recent activity and notification data"
             >
-              <Text style={[styles.syncButtonText, { color: theme.buttonPrimaryText }]}> 
+              <Text style={[styles.syncButtonText, { color: theme.buttonPrimaryText }]} allowFontScaling> 
                 {t("syncNow")}
               </Text>
             </Pressable>
@@ -82,8 +85,12 @@ export default function HomeScreen() {
               }}
               asChild
             >
-              <Pressable>
-                <Text style={[styles.linkText, { color: theme.link }]}>{t("viewAll")}</Text>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="View all transactions"
+                accessibilityHint="Opens the full transaction list"
+              >
+                <Text style={[styles.linkText, { color: theme.link }]} allowFontScaling>{t("viewAll")}</Text>
               </Pressable>
             </Link>
           </View>
@@ -148,6 +155,9 @@ function NavButton({
               }
             : { backgroundColor: theme.buttonPrimaryBg },
         ]}
+        accessibilityRole="button"
+        accessibilityLabel={label}
+        accessibilityHint={`Opens the ${label.toLowerCase()} screen`}
       >
         <Text
           style={[

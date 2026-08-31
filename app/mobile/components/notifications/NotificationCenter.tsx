@@ -56,7 +56,13 @@ export const NotificationCenter: React.FC = () => {
 
   return (
     <>
-      <Pressable style={styles.bell} onPress={openCenter}>
+      <Pressable
+        style={styles.bell}
+        onPress={openCenter}
+        accessibilityRole="button"
+        accessibilityLabel={unreadCount > 0 ? `Open notifications, ${unreadCount} unread` : "Open notifications"}
+        accessibilityHint="Opens the notification center"
+      >
         <Ionicons
           name="notifications-outline"
           size={24}
@@ -90,14 +96,24 @@ export const NotificationCenter: React.FC = () => {
             {t("notificationsTitle")}
           </Text>
           {unreadCount > 0 ? (
-            <Pressable onPress={handleMarkAllRead}>
-              <Text style={[styles.close, { color: theme.link }]}>
+            <Pressable
+              onPress={handleMarkAllRead}
+              accessibilityRole="button"
+              accessibilityLabel="Mark all notifications as read"
+              accessibilityHint="Marks all notifications as read"
+            >
+              <Text style={[styles.close, { color: theme.link }]} allowFontScaling>
                 {t("markAllRead", { defaultValue: "Mark all read" })}
               </Text>
             </Pressable>
           ) : (
-            <Pressable onPress={() => setOpen(false)}>
-              <Text style={[styles.close, { color: theme.link }]}>
+            <Pressable
+              onPress={() => setOpen(false)}
+              accessibilityRole="button"
+              accessibilityLabel="Close notifications"
+              accessibilityHint="Closes the notification center"
+            >
+              <Text style={[styles.close, { color: theme.link }]} allowFontScaling>
                 {t("close")}
               </Text>
             </Pressable>
@@ -111,6 +127,10 @@ export const NotificationCenter: React.FC = () => {
               key={value}
               onPress={() => setFilter(value)}
               style={[styles.filter, { borderColor: theme.border }, filter === value && { backgroundColor: theme.primary }]}
+              accessibilityRole="button"
+              accessibilityLabel={`Filter notifications by ${value}`}
+              accessibilityHint={`Shows only ${value} notifications`}
+              accessibilityState={{ selected: filter === value }}
             >
               <Text style={{ color: filter === value ? theme.buttonPrimaryText : theme.textSecondary }}>
                 {value[0].toUpperCase() + value.slice(1)}
@@ -132,6 +152,11 @@ export const NotificationCenter: React.FC = () => {
                 { borderColor: theme.borderLight },
                 !item.read && { backgroundColor: theme.surfaceElevated },
               ]}
+              accessibilityRole="button"
+              accessibilityLabel={
+                `${item.direction === "outgoing" ? "Sent" : "Received"} ${item.amount} ${item.asset ?? ""} notification`
+              }
+              accessibilityHint="Opens the corresponding transaction details"
             >
               <Text style={[styles.itemTitle, { color: theme.textPrimary }]}>
                 {item.direction === "outgoing" ? "Sent" : "Received"}{" "}

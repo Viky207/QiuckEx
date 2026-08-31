@@ -1281,17 +1281,20 @@ impl QuickexContract {
     /// Check whether an escrow is currently eligible for `finalize_expired_escrow`,
     /// without submitting a state-changing transaction (read-only).
     ///
-    /// Intended for keepers/dapps to poll before calling `finalize_expired_escrow`,
-    /// and for indexers reconstructing refund availability off-chain.
+    /// Returns a normalized result containing both the boolean eligibility flag and
+    /// a machine-readable reason so backends can decide whether to call the refund
+    /// finalizer without emitting any events or mutating storage.
     ///
     /// # Arguments
     /// * `env` - The contract environment
     /// * `commitment` - 32-byte commitment hash identifying the escrow
-    ///
-    /// # Errors
-    /// * `CommitmentNotFound` - No escrow exists for the commitment
-    pub fn is_refund_eligible(env: Env, commitment: BytesN<32>) -> Result<bool, QuickexError> {
+    pub fn is_refund_eligible(env: Env, commitment: BytesN<32>) -> types::RefundEligibility {
         escrow::is_refund_eligible(&env, commitment)
+    }
+
+    /// Alias for the read-only refund eligibility view.
+    pub fn get_refund_eligibility(env: Env, commitment: BytesN<32>) -> types::RefundEligibility {
+        escrow::get_refund_eligibility(&env, commitment)
     }
 
     /// Verify withdrawal parameters without submitting a transaction (read-only).

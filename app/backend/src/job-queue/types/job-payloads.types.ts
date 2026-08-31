@@ -109,3 +109,30 @@ export interface StellarReconnectPayload {
   /** Last cursor position before disconnection */
   lastCursor: string;
 }
+
+/**
+ * Template execution job payload
+ * Used for processing recurring link template executions
+ */
+export interface TemplateExecutionPayload {
+  /** ID of the template execution record */
+  executionId: string;
+  
+  /** ID of the template being executed */
+  templateId: string;
+  
+  /** Template version ID to use (optional, uses active if not provided) */
+  versionId?: string;
+  
+  /** Variable data for template substitution */
+  variableData: Record<string, any>;
+  
+  /** When this execution was scheduled */
+  scheduledAt: string;
+  
+  /** Timezone for the execution */
+  timezone: string;
+  
+  /** Preview scope (optional) */
+  previewScope?: string;
+}

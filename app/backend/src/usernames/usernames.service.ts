@@ -1,4 +1,5 @@
 import { Injectable } from "@nestjs/common";
+import { Horizon, Keypair } from "@stellar/stellar-sdk";
 import {
   SupabaseService,
   SearchProfileResult,
@@ -21,7 +22,11 @@ import {
   UsernameLimitExceededError,
   UsernameValidationError,
   UsernameErrorCode,
+  UsernameClaimInvalidError,
 } from "./errors";
+
+const CLAIM_TOLERANCE_MS = 5 * 60 * 1000;
+const CLAIM_PREFIX = "QuickEx username claim";
 
 export interface UsernameRow {
   id: string;
@@ -92,6 +97,51 @@ export class UsernamesService {
     }
 
     return { ok: true };
+  }
+
+  async verifyAndCreateClaim(
+    username: string,
+    signature: string,
+    publicKey: string,
+  ): Promise<{ ok: true }> {
+    const normalized = this.normalizeUsername(username);
+    this.validateFormat(username);
+
+    const separator = signature.indexOf(".");
+    if (separator <= 0 || separator === signature.length - 1) {
+      throw new UsernameClaimInvalidError();
+    }
+
+    const timestamp = signature.slice(0, separator);
+    const encodedSignature = signature.slice(separator + 1);
+    const timestampMs = Number(timestamp);
+    if (!Number.isSafeInteger(timestampMs) || Math.abs(Date.now() - timestampMs) > CLAIM_TOLERANCE_MS) {
+      throw new UsernameClaimInvalidError("Username claim signature has expired");
+    }
+
+    let verified = false;
+    try {
+      const keypair = Keypair.fromPublicKey(publicKey);
+      verified = keypair.verify(
+        Buffer.from(`${CLAIM_PREFIX}\n${normalized}\n${timestamp}`, "utf8"),
+        Buffer.from(encodedSignature, "base64"),
+      );
+    } catch {
+      throw new UsernameClaimInvalidError();
+    }
+    if (!verified) throw new UsernameClaimInvalidError();
+
+    try {
+      const horizonUrl = this.config.horizonUrl ??
+        (this.config.network === "mainnet"
+          ? "https://horizon.stellar.org"
+          : "https://horizon-testnet.stellar.org");
+      await new Horizon.Server(horizonUrl).loadAccount(publicKey);
+    } catch {
+      throw new UsernameClaimInvalidError("Claiming account was not found on the Stellar network");
+    }
+
+    return this.create(normalized, publicKey);
   }
 
   /**
