@@ -1,4 +1,4 @@
-use soroban_sdk::{contractevent, Address, BytesN, Env};
+use soroban_sdk::{contractevent, Address, BytesN, Env, Symbol};
 
 /// Canonical event schema version.
 ///
@@ -307,10 +307,30 @@ pub const EVENT_SCHEMAS: &[EventSchema] = &[
         topics: &[EVENT_TOPIC_ESCROW, "EscrowExtensionApplied", "escrow_id"],
         payload_keys: &[
             "extension_count",
+            "extension_secs",
+            "fee",
             "new_expires_at",
             "schema_version",
             "timestamp",
         ],
+        schema_version: EVENT_SCHEMA_VERSION,
+    },
+    EventSchema {
+        name: "EscrowExtensionFeeCharged",
+        topics: &[EVENT_TOPIC_ESCROW, "EscrowExtensionFeeCharged", "escrow_id"],
+        payload_keys: &["extension_secs", "fee", "schema_version", "timestamp"],
+        schema_version: EVENT_SCHEMA_VERSION,
+    },
+    EventSchema {
+        name: "EscrowExtensionFeeRefunded",
+        topics: &[EVENT_TOPIC_ESCROW, "EscrowExtensionFeeRefunded", "escrow_id"],
+        payload_keys: &["fee", "reason", "schema_version", "timestamp"],
+        schema_version: EVENT_SCHEMA_VERSION,
+    },
+    EventSchema {
+        name: "TtlExtensionFeeConfigChanged",
+        topics: &[EVENT_TOPIC_ADMIN, "TtlExtensionFeeConfigChanged"],
+        payload_keys: &["fee_per_second", "max_fee", "min_fee", "schema_version", "timestamp"],
         schema_version: EVENT_SCHEMA_VERSION,
     },
     EventSchema {
@@ -1107,6 +1127,56 @@ pub(crate) fn publish_fee_config_changed(env: &Env, old_fee_bps: u32, fee_bps: u
     .publish(env);
 }
 
+#[contractevent(topics = ["TOPIC_ADMIN", "TtlExtensionFeeConfigChanged"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TtlFeeConfigChangedEvent {
+    pub fee_per_second: i128,
+    pub min_fee: i128,
+    pub max_fee: i128,
+    pub schema_version: u32,
+    pub timestamp: u64,
+}
+
+pub type TtlExtensionFeeConfigChangedEvent = TtlFeeConfigChangedEvent;
+
+pub(crate) fn publish_ttl_extension_fee_config_changed(
+    env: &Env,
+    fee_per_second: i128,
+    min_fee: i128,
+    max_fee: i128,
+) {
+    TtlFeeConfigChangedEvent {
+        fee_per_second,
+        min_fee,
+        max_fee,
+        schema_version: EVENT_SCHEMA_VERSION,
+        timestamp: env.ledger().timestamp(),
+    }
+    .publish(env);
+}
+
+#[contractevent(topics = ["TOPIC_ADMIN", "UpgradeWindowChanged"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpgradeWindowChangedEvent {
+    #[topic]
+    pub admin: Address,
+    pub start: u64,
+    pub end: u64,
+    pub schema_version: u32,
+    pub timestamp: u64,
+}
+
+pub(crate) fn publish_upgrade_window_changed(env: &Env, admin: &Address, start: u64, end: u64) {
+    UpgradeWindowChangedEvent {
+        admin: admin.clone(),
+        start,
+        end,
+        schema_version: EVENT_SCHEMA_VERSION,
+        timestamp: env.ledger().timestamp(),
+    }
+    .publish(env);
+}
+
 #[contractevent(topics = ["TOPIC_ADMIN", "PlatformWalletChanged"])]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PlatformWalletChangedEvent {
@@ -1310,6 +1380,8 @@ pub struct EscrowExtensionAppliedEvent {
 
     pub schema_version: u32,
     pub extension_count: u32,
+    pub extension_secs: u64,
+    pub fee: i128,
     pub new_expires_at: u64,
     pub timestamp: u64,
 }
@@ -1318,13 +1390,73 @@ pub(crate) fn publish_escrow_extension_applied(
     env: &Env,
     commitment: BytesN<32>,
     extension_count: u32,
+    extension_secs: u64,
+    fee: i128,
     new_expires_at: u64,
 ) {
     EscrowExtensionAppliedEvent {
         escrow_id: commitment,
         schema_version: EVENT_SCHEMA_VERSION,
         extension_count,
+        extension_secs,
+        fee,
         new_expires_at,
+        timestamp: env.ledger().timestamp(),
+    }
+    .publish(env);
+}
+
+#[contractevent(topics = ["TOPIC_ESCROW", "EscrowExtensionFeeCharged"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EscrowExtensionFeeChargedEvent {
+    #[topic]
+    pub escrow_id: BytesN<32>,
+
+    pub fee: i128,
+    pub extension_secs: u64,
+    pub schema_version: u32,
+    pub timestamp: u64,
+}
+
+pub(crate) fn publish_escrow_extension_fee_charged(
+    env: &Env,
+    commitment: BytesN<32>,
+    fee: i128,
+    extension_secs: u64,
+) {
+    EscrowExtensionFeeChargedEvent {
+        escrow_id: commitment,
+        fee,
+        extension_secs,
+        schema_version: EVENT_SCHEMA_VERSION,
+        timestamp: env.ledger().timestamp(),
+    }
+    .publish(env);
+}
+
+#[contractevent(topics = ["TOPIC_ESCROW", "EscrowExtensionFeeRefunded"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EscrowExtensionFeeRefundedEvent {
+    #[topic]
+    pub escrow_id: BytesN<32>,
+
+    pub fee: i128,
+    pub reason: Symbol,
+    pub schema_version: u32,
+    pub timestamp: u64,
+}
+
+pub(crate) fn publish_escrow_extension_fee_refunded(
+    env: &Env,
+    commitment: BytesN<32>,
+    fee: i128,
+    reason: Symbol,
+) {
+    EscrowExtensionFeeRefundedEvent {
+        escrow_id: commitment,
+        fee,
+        reason,
+        schema_version: EVENT_SCHEMA_VERSION,
         timestamp: env.ledger().timestamp(),
     }
     .publish(env);

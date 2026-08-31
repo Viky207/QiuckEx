@@ -1,6 +1,6 @@
 #![no_std]
 #![allow(clippy::too_many_arguments)]
-use soroban_sdk::{contract, contractimpl, Address, Bytes, BytesN, Env, Symbol, Vec};
+use soroban_sdk::{contract, contractimpl, Address, Bytes, BytesN, Env, String, Symbol, Vec};
 
 mod admin;
 #[cfg(test)]
@@ -60,7 +60,7 @@ use pause_policy::{EntryPoint, PauseChangeReason};
 use storage::*;
 use types::{
     DeploymentMetadata, EscrowEntry, EscrowStatus, FeeConfig, OracleFeeConfig, PerAssetFeeConfig,
-    PrivacyAwareEscrowView, Role, StealthDepositParams,
+    PrivacyAwareEscrowView, Role, StealthDepositParams, TtlExtensionFeeConfig,
 };
 
 /// QuickEx Privacy Contract
@@ -1098,6 +1098,22 @@ impl QuickexContract {
         storage::get_fee_config(&env)
     }
 
+    /// Get the current TTL extension fee model (read-only).
+    pub fn get_ttl_extension_fee_config(env: Env) -> TtlExtensionFeeConfig {
+        storage::get_ttl_extension_fee_config(&env)
+    }
+
+    /// Set the TTL extension fee model (**Admin or Operator only**).
+    pub fn set_ttl_extension_fee_config(
+        env: Env,
+        caller: Address,
+        config: TtlExtensionFeeConfig,
+    ) -> Result<(), QuickexError> {
+        pause_policy::require_admin_entry_allowed(&env)?;
+        hook::assert_not_reentrant(&env)?;
+        admin::set_ttl_extension_fee_config(&env, &caller, config)
+    }
+
     /// Register an external hook contract to receive escrow lifecycle callbacks.
     pub fn register_hook(env: Env, hook_contract: Address) -> Result<(), QuickexError> {
         admin::require_initialized(&env)?;
@@ -1232,7 +1248,7 @@ impl QuickexContract {
     ///
     /// Returns a chronological list of all fee collector rotations, including
     /// when each rotation occurred, the new collector, and the previous collector.
-    pub fn get_fee_collector_rotation_history(env: Env) -> Vec<types::FeeCollectorRotationEntry> {
+    pub fn get_fee_collector_history(env: Env) -> Vec<types::FeeCollectorRotationEntry> {
         storage::get_fee_collector_rotation_history(&env)
     }
 

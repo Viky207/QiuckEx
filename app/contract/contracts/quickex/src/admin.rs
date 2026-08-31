@@ -7,7 +7,7 @@ use crate::events::{
 use crate::fee;
 use crate::fee_router;
 use crate::storage;
-use crate::types::{FeeConfig, PerAssetFeeConfig, Role};
+use crate::types::{FeeConfig, PerAssetFeeConfig, Role, TtlExtensionFeeConfig};
 use soroban_sdk::{Address, Env, Vec};
 
 /// Initialize the contract with an admin address.
@@ -119,7 +119,7 @@ fn validate_signers(
     }
     let mut seen = Vec::new(env);
     for signer in signers.iter() {
-        if seen.contains(signer) {
+        if seen.contains(&signer) {
             return Err(QuickexError::InvalidAmount);
         }
         seen.push_back(signer);
@@ -559,6 +559,31 @@ pub fn set_fee_config(env: &Env, caller: &Address, config: FeeConfig) -> Result<
     let old_fee_bps = storage::get_fee_config(env).fee_bps;
     storage::set_fee_config(env, &config);
     crate::events::publish_fee_config_changed(env, old_fee_bps, config.fee_bps);
+    Ok(())
+}
+
+/// Set the TTL extension fee model (**Admin or Operator only**).
+pub fn set_ttl_extension_fee_config(
+    env: &Env,
+    caller: &Address,
+    config: TtlExtensionFeeConfig,
+) -> Result<(), QuickexError> {
+    require_any_role(env, caller, &[Role::Admin, Role::Operator])?;
+
+    if config.fee_per_second < 0 || config.min_fee < 0 || config.max_fee < 0 {
+        return Err(QuickexError::InvalidAmount);
+    }
+    if config.max_fee < config.min_fee {
+        return Err(QuickexError::InvalidAmount);
+    }
+
+    storage::set_ttl_extension_fee_config(env, &config);
+    crate::events::publish_ttl_extension_fee_config_changed(
+        env,
+        config.fee_per_second,
+        config.min_fee,
+        config.max_fee,
+    );
     Ok(())
 }
 
