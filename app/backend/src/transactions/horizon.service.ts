@@ -4,6 +4,10 @@ import { LRUCache } from 'lru-cache';
 import { AppConfigService } from '../config/app-config.service';
 import { TransactionItemDto, TransactionResponseDto } from './dto/transaction.dto';
 import { throwMappedStellarException } from '../common/stellar-errors';
+import {
+  CORRELATION_ID_HEADER,
+  getCurrentCorrelationId,
+} from '../common/context/correlation.context';
 
 @Injectable()
 export class HorizonService {
@@ -194,6 +198,7 @@ export class HorizonService {
                     query = query.cursor(cursor);
                 }
 
+                this.propagateCorrelationId();
                 const response = await query.call();
                 const records = response.records;
 
@@ -288,6 +293,18 @@ export class HorizonService {
 
     private sleep(ms: number): Promise<void> {
         return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    /**
+     * Attach the current request correlation ID to every Horizon request before
+     * it is issued. Unset when no request scope is active (e.g. background jobs).
+     */
+    private propagateCorrelationId(): void {
+        const correlationId = getCurrentCorrelationId();
+        if (!correlationId) return;
+        // `httpClient` may be unavailable when the SDK is partially stubbed.
+        if (!this.server.httpClient?.defaults?.headers) return;
+        this.server.httpClient.defaults.headers[CORRELATION_ID_HEADER] = correlationId;
     }
 
     private handleHorizonError(error: unknown, traceId?: string): never {
