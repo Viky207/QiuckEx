@@ -4,6 +4,8 @@ import { useEffect, useMemo, useState } from "react";
 import { AlertTriangle, Search, ShieldCheck } from "lucide-react";
 
 import { getQuickexApiBase } from "@/lib/api";
+import { useAdminAuth } from "@/hooks/useAdminAuth";
+import { AdminKeyPrompt } from "./AdminKeyPrompt";
 
 type Flag = {
   key: string;
@@ -25,12 +27,14 @@ type FlagsResponse = {
 
 export function FeatureFlags() {
   const apiBase = useMemo(() => getQuickexApiBase(), []);
+  const { apiKey, isPrompting, setIsPrompting, saveApiKey, getHeaders } = useAdminAuth();
   const [flags, setFlags] = useState<Flag[]>([]);
   const [search, setSearch] = useState("");
   const [source, setSource] = useState("cache");
   const [storeAvailable, setStoreAvailable] = useState(true);
   const [savingKey, setSavingKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     let cancelled = false;
@@ -38,9 +42,21 @@ export function FeatureFlags() {
     const load = async () => {
       try {
         setError(null);
+        setLoading(true);
         const response = await fetch(`${apiBase}/admin/feature-flags`, {
           cache: "no-store",
+          headers: getHeaders(),
         });
+        
+        // Handle 401 - prompt for API key
+        if (response.status === 401) {
+          if (!cancelled) {
+            setIsPrompting(true);
+            setLoading(false);
+          }
+          return;
+        }
+        
         if (!response.ok) {
           throw new Error(`Flag fetch failed (${response.status})`);
         }
@@ -49,10 +65,12 @@ export function FeatureFlags() {
           setFlags(payload.flags ?? []);
           setSource(payload.source ?? "cache");
           setStoreAvailable(payload.storeAvailable ?? true);
+          setLoading(false);
         }
       } catch (fetchError) {
         if (!cancelled) {
           setError(fetchError instanceof Error ? fetchError.message : "Unable to load flags.");
+          setLoading(false);
         }
       }
     };
@@ -61,7 +79,7 @@ export function FeatureFlags() {
     return () => {
       cancelled = true;
     };
-  }, [apiBase]);
+  }, [apiBase, getHeaders, setIsPrompting]);
 
   const filteredFlags = flags.filter((flag) =>
     `${flag.name} ${flag.description} ${flag.key}`
@@ -81,10 +99,18 @@ export function FeatureFlags() {
         method: "PATCH",
         headers: {
           "Content-Type": "application/json",
-          "x-admin-actor": "admin-dashboard",
+          ...getHeaders(),
         },
         body: JSON.stringify({ [field]: !flag[field] }),
       });
+
+      // Handle 401 - prompt for API key
+      if (response.status === 401) {
+        setFlags(flags);
+        setIsPrompting(true);
+        setError("Admin API key expired or invalid. Please provide a new one.");
+        return;
+      }
 
       if (!response.ok) {
         throw new Error(`Flag update failed (${response.status})`);
@@ -109,45 +135,58 @@ export function FeatureFlags() {
   };
 
   return (
-    <div className="bg-card p-6 rounded-lg shadow-sm border border-border">
-      <div className="flex flex-col gap-4 mb-5">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h2 className="text-lg font-semibold text-foreground">Safety Controls</h2>
-            <p className="text-sm text-subtle">
-              Source: <span className="font-medium text-muted">{source}</span>
-            </p>
-          </div>
-          <div
-            className={`inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-semibold ${
-              storeAvailable
-                ? "bg-success-soft text-success"
-                : "bg-warning-soft text-warning"
-            }`}
-          >
-            {storeAvailable ? <ShieldCheck className="h-3.5 w-3.5" /> : <AlertTriangle className="h-3.5 w-3.5" />}
-            {storeAvailable ? "Persistent store healthy" : "Bootstrap fallback active"}
-          </div>
-        </div>
-        <div className="relative">
-          <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-subtle" />
-          <input
-            type="text"
-            placeholder="Search flags..."
-            className="pl-9 pr-4 py-2 text-sm border border-border rounded-md focus:outline-none focus:ring-2 focus:ring-brand w-full"
-            value={search}
-            onChange={(event) => setSearch(event.target.value)}
-          />
-        </div>
-      </div>
-
-      {error && (
-        <p className="mb-4 rounded-md border border-warning-soft bg-warning-soft px-3 py-2 text-sm text-warning">
-          {error}
-        </p>
+    <>
+      {isPrompting && (
+        <AdminKeyPrompt 
+          onKeySubmit={saveApiKey}
+          onClose={() => setIsPrompting(false)}
+        />
       )}
+      
+      <div className="bg-card p-6 rounded-lg shadow-sm border border-border">
+        <div className="flex flex-col gap-4 mb-5">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h2 className="text-lg font-semibold text-foreground">Safety Controls</h2>
+              <p className="text-sm text-subtle">
+                Source: <span className="font-medium text-muted">{source}</span>
+              </p>
+            </div>
+            <div
+              className={`inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-semibold ${
+                storeAvailable
+                  ? "bg-success-soft text-success"
+                  : "bg-warning-soft text-warning"
+              }`}
+            >
+              {storeAvailable ? <ShieldCheck className="h-3.5 w-3.5" /> : <AlertTriangle className="h-3.5 w-3.5" />}
+              {storeAvailable ? "Persistent store healthy" : "Bootstrap fallback active"}
+            </div>
+          </div>
+          <div className="relative">
+            <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-subtle" />
+            <input
+              type="text"
+              placeholder="Search flags..."
+              className="pl-9 pr-4 py-2 text-sm border border-border rounded-md focus:outline-none focus:ring-2 focus:ring-brand w-full"
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+            />
+          </div>
+        </div>
 
-      <div className="space-y-4">
+        {error && (
+          <p className="mb-4 rounded-md border border-warning-soft bg-warning-soft px-3 py-2 text-sm text-warning">
+            {error}
+          </p>
+        )}
+
+        {loading && (
+          <p className="text-sm text-subtle text-center py-8">Loading feature flags...</p>
+        )}
+
+        {!loading && (
+          <div className="space-y-4">
         {filteredFlags.map((flag) => (
           <div
             key={flag.key}
@@ -202,7 +241,9 @@ export function FeatureFlags() {
         {filteredFlags.length === 0 && (
           <p className="text-sm text-subtle text-center py-4">No flags found.</p>
         )}
+          </div>
+        )}
       </div>
-    </div>
+    </>
   );
 }
