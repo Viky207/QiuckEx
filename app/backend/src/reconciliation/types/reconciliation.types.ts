@@ -92,6 +92,35 @@ export interface PaymentReconciliationResult {
   irreconcilableReason?: string;
 }
 
+export type DivergenceEntity = 'escrow' | 'payment';
+export type DivergenceType =
+  | 'missing'
+  | 'duplicate'
+  | 'amount_mismatch'
+  | 'status_mismatch'
+  | 'extra_on_chain';
+
+export interface DivergenceRecord {
+  entity: DivergenceEntity;
+  type: DivergenceType;
+  id?: string;
+  contractAddress?: string;
+  txHash?: string;
+  expectedAmount?: string;
+  observedAmount?: string;
+  expectedStatus?: string;
+  observedStatus?: string;
+  details: string;
+}
+
+export interface ReconciliationMetrics {
+  divergence_rate: number;
+  auto_match_rate: number;
+  total_divergences: number;
+  auto_matched: number;
+  reviewed: number;
+}
+
 export enum ReconciliationAction {
   /** DB and chain agree — no change needed. */
   NoOp = 'no_op',
@@ -125,6 +154,10 @@ export interface ReconciliationReport {
     irreconcilable: number;
     results: PaymentReconciliationResult[];
   };
+  divergences?: DivergenceRecord[];
+  metrics?: ReconciliationMetrics;
+  divergence_rate?: number;
+  auto_match_rate?: number;
   /** Comparison of expected vs observed totals for discrepancy detection */
   totalsComparison?: {
     payments: {

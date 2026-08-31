@@ -175,6 +175,15 @@ export class SupabaseService {
   // Reconciliation helpers
   // ---------------------------------------------------------------------------
 
+  async fetchAllEscrows(): Promise<EscrowRecord[]> {
+    const { data, error } = await this.client
+      .from("escrow_records")
+      .select("*")
+      .order("updated_at", { ascending: true });
+    if (error) this.handleError(error);
+    return (data as EscrowRecord[]) ?? [];
+  }
+
   async fetchPendingEscrows(
     statuses: EscrowDbStatus[],
     limit: number,
@@ -187,6 +196,15 @@ export class SupabaseService {
       .limit(limit);
     if (error) this.handleError(error);
     return (data as EscrowRecord[]) ?? [];
+  }
+
+  async fetchAllPayments(): Promise<PaymentRecord[]> {
+    const { data, error } = await this.client
+      .from("payment_records")
+      .select("*")
+      .order("updated_at", { ascending: true });
+    if (error) this.handleError(error);
+    return (data as PaymentRecord[]) ?? [];
   }
 
   async fetchPendingPayments(
