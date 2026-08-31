@@ -14,13 +14,7 @@ const PUBLIC_KEY_STORAGE_CANDIDATES = [
   "publicKey",
 ];
 
-/**
- * Resolve the user's Stellar public key from available sources:
- * 1. localStorage (browser wallets store the key under known keys)
- * 2. Environment variable (NEXT_PUBLIC_QUICKEX_ANALYTICS_PUBLIC_KEY)
- * 3. Fallback to a zero-value default key
- */
-export function resolvePublicKey(): string {
+export function resolveAuthenticatedPublicKey(): string | null {
   if (typeof window !== "undefined") {
     for (const key of PUBLIC_KEY_STORAGE_CANDIDATES) {
       const value = window.localStorage.getItem(key)?.trim();
@@ -31,10 +25,21 @@ export function resolvePublicKey(): string {
   }
 
   const fromEnv =
+    process.env.NEXT_PUBLIC_QUICKEX_API_PUBLIC_KEY?.trim() ||
     process.env.NEXT_PUBLIC_QUICKEX_ANALYTICS_PUBLIC_KEY?.trim();
-  if (fromEnv && PUBLIC_KEY_REGEX.test(fromEnv)) {
-    return fromEnv;
-  }
+
+  return fromEnv && PUBLIC_KEY_REGEX.test(fromEnv) ? fromEnv : null;
+}
+
+/**
+ * Resolve the user's Stellar public key from available sources:
+ * 1. localStorage (browser wallets store the key under known keys)
+ * 2. Environment variable (NEXT_PUBLIC_QUICKEX_ANALYTICS_PUBLIC_KEY)
+ * 3. Fallback to a zero-value default key
+ */
+export function resolvePublicKey(): string {
+  const authenticatedPublicKey = resolveAuthenticatedPublicKey();
+  if (authenticatedPublicKey) return authenticatedPublicKey;
 
   return DEFAULT_PUBLIC_KEY;
 }
