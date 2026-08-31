@@ -1,3 +1,5 @@
+import { getQuickexApiBase } from "@/lib/api";
+
 export type NotificationCategory = "payments" | "escrows" | "system";
 export type NotificationReadState = "all" | "unread" | "read";
 
@@ -13,6 +15,119 @@ export type StoredNotification = {
 };
 
 export const NOTIFICATION_STORAGE_KEY = "quickex.notification-center.v2";
+
+type InAppNotificationRow = {
+  id: string;
+  eventType?: string;
+  title: string;
+  body: string;
+  createdAt: string;
+  read?: boolean;
+  readAt?: string | null;
+  metadata?: Record<string, unknown> | null;
+};
+
+type NotificationListResponse = {
+  data?: InAppNotificationRow[];
+  unreadCount?: number;
+};
+
+export type NotificationReadResponse = {
+  unreadCount: number;
+};
+
+function getNotificationCategory(eventType = ""): NotificationCategory {
+  const normalizedEventType = eventType.toLowerCase();
+
+  if (normalizedEventType.includes("escrow")) {
+    return "escrows";
+  }
+
+  if (
+    normalizedEventType.includes("payment") ||
+    normalizedEventType.includes("recurring")
+  ) {
+    return "payments";
+  }
+
+  return "system";
+}
+
+function mapNotification(row: InAppNotificationRow): StoredNotification {
+  const metadataHref = row.metadata?.href;
+
+  return {
+    id: row.id,
+    category: getNotificationCategory(row.eventType),
+    title: row.title,
+    description: row.body,
+    href: typeof metadataHref === "string" ? metadataHref : "/notifications",
+    actionLabel: "Open notification",
+    createdAt: row.createdAt,
+    readAt: row.readAt ?? (row.read ? row.createdAt : null),
+  };
+}
+
+async function notificationRequest<T>(
+  publicKey: string,
+  path: string,
+  init: RequestInit = {},
+): Promise<T> {
+  const response = await fetch(`${getQuickexApiBase()}${path}`, {
+    ...init,
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${publicKey}`,
+      ...init.headers,
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Notification request failed: ${response.status}`);
+  }
+
+  return response.json() as Promise<T>;
+}
+
+export async function fetchInAppNotifications(
+  publicKey: string,
+): Promise<{ notifications: StoredNotification[]; unreadCount: number }> {
+  const response = await notificationRequest<
+    NotificationListResponse | InAppNotificationRow[]
+  >(publicKey, "/notifications/in-app?limit=100");
+  const rows = Array.isArray(response) ? response : response.data ?? [];
+  const notifications = sortNotifications(rows.map(mapNotification));
+
+  return {
+    notifications,
+    unreadCount: Array.isArray(response)
+      ? notifications.filter((notification) => !notification.readAt).length
+      : response.unreadCount ??
+        notifications.filter((notification) => !notification.readAt).length,
+  };
+}
+
+export function markInAppNotificationAsRead(
+  publicKey: string,
+  id: string,
+): Promise<NotificationReadResponse> {
+  return notificationRequest<NotificationReadResponse>(
+    publicKey,
+    `/notifications/in-app/${encodeURIComponent(id)}/read`,
+    { method: "POST" },
+  );
+}
+
+export function markAllInAppNotificationsAsRead(
+  publicKey: string,
+): Promise<NotificationReadResponse> {
+  return notificationRequest<NotificationReadResponse>(
+    publicKey,
+    "/notifications/in-app/read-all",
+    { method: "POST" },
+  );
+}
 
 export const CATEGORY_LABELS: Record<NotificationCategory, string> = {
   payments: "Payments",
