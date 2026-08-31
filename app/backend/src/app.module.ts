@@ -26,6 +26,7 @@ import { PaymentsModule } from "./payments/payments.module";
 import { ReconciliationModule } from "./reconciliation/reconciliation.module";
 import { MetricsMiddleware } from "./metrics/metrics.middleware";
 import { MetricsInterceptor } from "./metrics/metrics.interceptor";
+import { BulkOperationsModule } from "./bulk-operations/bulk-operations.module";
 import { CorrelationIdMiddleware } from "./common/middleware/correlation-id.middleware";
 import { OrganizationContextMiddleware } from "./common/middleware/organization-context.middleware";
 import { ShadowTrafficMiddleware } from "./environment-parity/shadow-traffic.middleware";
@@ -61,6 +62,7 @@ import { TransactionTimelineModule } from "./transaction-timeline/transaction-ti
 import { DashboardFeedModule } from "./dashboard-feed/dashboard-feed.module";
 import { ContactsModule } from "./contacts/contacts.module";
 import { TeamsModule } from "./teams/teams.module";
+import { BulkOperationsModule } from "./bulk-operations/bulk-operations.module";
 
 type AppImport =
 | Type<unknown>
@@ -78,6 +80,7 @@ EventEmitterModule.forRoot({
 wildcard: true,
 delimiter: ".",
 }),
+    BulkOperationsModule,
   ThrottlerModule.forRootAsync({
     inject: [RateLimitConfigService],
     useFactory: (rateLimitConfig: RateLimitConfigService) =>

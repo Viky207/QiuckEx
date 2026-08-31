@@ -109,3 +109,7 @@ export interface StellarReconnectPayload {
   /** Last cursor position before disconnection */
   lastCursor: string;
 }
+
+export interface BulkOperationPayload {
+  operationId: string;
+}
