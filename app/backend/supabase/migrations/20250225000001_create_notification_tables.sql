@@ -6,14 +6,14 @@
 -- notification_preferences
 -- ---------------------------------------------------------------------------
 -- One row per (public_key, channel) combination.
--- Channels: 'email' | 'push' | 'webhook'
+-- Channels: 'email' | 'telegram' | 'push' | 'webhook'
 
 CREATE TABLE IF NOT EXISTS notification_preferences (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 
   public_key TEXT NOT NULL,                -- Stellar public key of the user
-  channel TEXT NOT NULL                    -- 'email' | 'push' | 'webhook'
-    CHECK (channel IN ('email', 'push', 'webhook')),
+  channel TEXT NOT NULL                    -- 'email' | 'telegram' | 'push' | 'webhook'
+    CHECK (channel IN ('email', 'telegram', 'push', 'webhook')),
 
   -- Channel-specific destination
   email TEXT,                              -- required when channel = 'email'

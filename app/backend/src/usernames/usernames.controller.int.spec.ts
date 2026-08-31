@@ -6,6 +6,7 @@ import { UsernamesService } from './usernames.service';
 import {
   UsernameConflictError,
   UsernameLimitExceededError,
+  UsernameClaimInvalidError,
 } from './errors';
 
 describe('UsernamesController', () => {
@@ -17,6 +18,7 @@ describe('UsernamesController', () => {
 
   beforeEach(async () => {
     const mockCreate = jest.fn().mockResolvedValue({ ok: true });
+    const mockVerifyAndCreateClaim = jest.fn().mockResolvedValue({ ok: true });
     const mockListByPublicKey = jest.fn().mockResolvedValue([]);
     const mockGetTrendingCreators = jest.fn().mockResolvedValue({ data: [], next_cursor: null, has_more: false });
     const mockGetRecentlyActiveUsers = jest.fn().mockResolvedValue({ data: [], next_cursor: null, has_more: false });
@@ -30,6 +32,7 @@ describe('UsernamesController', () => {
           provide: UsernamesService,
           useValue: {
             create: mockCreate,
+            verifyAndCreateClaim: mockVerifyAndCreateClaim,
             listByPublicKey: mockListByPublicKey,
             getTrendingCreators: mockGetTrendingCreators,
             getRecentlyActiveUsers: mockGetRecentlyActiveUsers,
@@ -88,6 +91,58 @@ describe('UsernamesController', () => {
       const err = await controller.createUsername(body).catch((e) => e);
       expect(err).toBeInstanceOf(ForbiddenException);
       expect(err.response).toMatchObject({ code: 'USERNAME_LIMIT_EXCEEDED' });
+    });
+  });
+
+  describe('claimUsername', () => {
+    it('verifies and creates a claim, then emits username.claimed', async () => {
+      const body = {
+        username: 'alice_123',
+        signature: `${Date.now()}.base64-signature`,
+        publicKey: validPublicKey,
+      };
+
+      await expect(controller.claimUsername(body)).resolves.toEqual({ ok: true });
+      expect(usernamesService.verifyAndCreateClaim).toHaveBeenCalledWith(
+        body.username,
+        body.signature,
+        body.publicKey,
+      );
+      expect(eventEmitter.emit).toHaveBeenCalledWith(
+        'username.claimed',
+        expect.objectContaining({ username: body.username, publicKey: body.publicKey }),
+      );
+    });
+
+    it('rejects an invalid claim signature', async () => {
+      usernamesService.verifyAndCreateClaim.mockRejectedValueOnce(
+        new UsernameClaimInvalidError(),
+      );
+
+      const err = await controller.claimUsername({
+        username: 'alice_123',
+        signature: 'expired.signature',
+        publicKey: validPublicKey,
+      }).catch((error) => error);
+
+      expect(err).toBeInstanceOf(BadRequestException);
+      expect(err.response).toMatchObject({ code: 'USERNAME_CLAIM_INVALID' });
+      expect(eventEmitter.emit).not.toHaveBeenCalled();
+    });
+
+    it('rejects a taken username', async () => {
+      usernamesService.verifyAndCreateClaim.mockRejectedValueOnce(
+        new UsernameConflictError('alice_123'),
+      );
+
+      const err = await controller.claimUsername({
+        username: 'alice_123',
+        signature: `${Date.now()}.base64-signature`,
+        publicKey: validPublicKey,
+      }).catch((error) => error);
+
+      expect(err).toBeInstanceOf(ConflictException);
+      expect(err.response).toMatchObject({ code: 'USERNAME_CONFLICT' });
     });
   });
 

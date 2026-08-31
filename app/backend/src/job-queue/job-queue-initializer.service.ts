@@ -17,6 +17,7 @@ import {
   ExportGenerationHandler,
   ReconciliationHandler,
   StellarReconnectHandler,
+  TemplateExecutionHandler,
 } from './handlers';
 
 /**
@@ -37,6 +38,7 @@ export class JobQueueInitializer implements OnModuleInit {
     private readonly exportGenerationHandler: ExportGenerationHandler,
     private readonly reconciliationHandler: ReconciliationHandler,
     private readonly stellarReconnectHandler: StellarReconnectHandler,
+    private readonly templateExecutionHandler: TemplateExecutionHandler,
   ) {}
 
   /**
@@ -117,6 +119,20 @@ export class JobQueueInitializer implements OnModuleInit {
         initialDelayMs: 1000,         // 1 second
         maxDelayMs: 60000,            // 1 minute
         visibilityTimeoutMs: 120000,  // 2 minutes
+      },
+    );
+
+    // Register template_execution handler
+    // Template execution with variable substitution and recurring link generation
+    this.registry.registerHandler(
+      JobType.TEMPLATE_EXECUTION,
+      this.templateExecutionHandler,
+      {
+        maxAttempts: 3,
+        backoffStrategy: 'exponential',
+        initialDelayMs: 5000,         // 5 seconds
+        maxDelayMs: 300000,           // 5 minutes
+        visibilityTimeoutMs: 600000,  // 10 minutes (template processing can take time)
       },
     );
 

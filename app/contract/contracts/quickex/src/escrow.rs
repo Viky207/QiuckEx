@@ -72,7 +72,10 @@ use crate::{
         get_escrow_id_mapping, has_dispute_vote, has_escrow, put_dispute_vote, put_escrow,
         put_escrow_id_mapping, remove_escrow,
     },
-    types::{DisputeVote, EscrowEntry, EscrowStatus, HookEventKind, Role},
+    types::{
+        DisputeVote, EscrowEntry, EscrowStatus, HookEventKind, RefundEligibility,
+        RefundEligibilityReason, Role,
+    },
 };
 
 // ---------------------------------------------------------------------------
@@ -500,16 +503,20 @@ pub fn partial_payment(
     entry.amount_paid = entry.amount_paid.saturating_add(payment_amount);
 
     // Track milestone completion
-    for milestone in entry.milestones.iter_mut() {
-        if !milestone.completed && entry.amount_paid >= milestone.amount {
-            milestone.completed = true;
-            events::publish_milestone_completed(
-                env,
-                commitment.clone(),
-                milestone.id,
-                milestone.amount,
-                entry.amount_paid,
-            );
+    let milestone_count = entry.milestones.len();
+    for idx in 0..milestone_count {
+        if let Some(mut milestone) = entry.milestones.get(idx) {
+            if !milestone.completed && entry.amount_paid >= milestone.amount {
+                milestone.completed = true;
+                entry.milestones.set(idx, milestone.clone());
+                events::publish_milestone_completed(
+                    env,
+                    commitment.clone(),
+                    milestone.id,
+                    milestone.amount,
+                    entry.amount_paid,
+                );
+            }
         }
     }
 
@@ -815,25 +822,42 @@ pub fn finalize_expired_escrow(env: &Env, commitment: BytesN<32>) -> Result<(), 
     Ok(())
 }
 
-/// Read-only check for whether an escrow is currently eligible for refund
-/// finalization, without submitting a state-changing transaction.
+/// Read-only refund eligibility view.
 ///
-/// Intended for dapps/keepers to poll before calling [`finalize_expired_escrow`],
-/// and for indexers reconstructing refund availability off-chain (though note
-/// [`events::publish_escrow_deposited`] already carries `expires_at`, so most
-/// indexers can compute this themselves from the original deposit event).
-///
-/// Returns `false` (rather than erroring) once the escrow has already left
-/// `Pending` — including after it has already been refunded — since it is no
-/// longer eligible, not because eligibility couldn't be computed.
-///
-/// # Errors
-/// - [`CommitmentNotFound`] – no escrow for the given commitment.
-pub fn is_refund_eligible(env: &Env, commitment: BytesN<32>) -> Result<bool, QuickexError> {
+/// Returns whether the escrow is eligible to be finalized and a normalized
+/// machine-readable reason without mutating state or emitting events.
+pub fn is_refund_eligible(env: &Env, commitment: BytesN<32>) -> RefundEligibility {
     let commitment_bytes: Bytes = commitment.into();
-    let entry: EscrowEntry =
-        get_escrow(env, &commitment_bytes).ok_or(QuickexError::CommitmentNotFound)?;
-    Ok(entry.status == EscrowStatus::Pending && is_expired(env, &entry))
+    let Some(entry) = get_escrow(env, &commitment_bytes) else {
+        return RefundEligibility {
+            eligible: false,
+            reason: RefundEligibilityReason::CommitmentNotFound,
+        };
+    };
+
+    if entry.status == EscrowStatus::Pending && is_expired(env, &entry) {
+        return RefundEligibility {
+            eligible: true,
+            reason: RefundEligibilityReason::Eligible,
+        };
+    }
+
+    let reason = match entry.status {
+        EscrowStatus::Disputed => RefundEligibilityReason::InvalidDisputeState,
+        EscrowStatus::Pending => RefundEligibilityReason::EscrowNotExpired,
+        _ => RefundEligibilityReason::AlreadySpent,
+    };
+
+    RefundEligibility {
+        eligible: false,
+        reason,
+    }
+}
+
+/// Alias for the read-only eligibility view; keepers and backends can call either
+/// name depending on their preferred API style.
+pub fn get_refund_eligibility(env: &Env, commitment: BytesN<32>) -> RefundEligibility {
+    is_refund_eligible(env, commitment)
 }
 
 // ---------------------------------------------------------------------------
@@ -876,12 +900,23 @@ pub fn extend_escrow_expiry(
     let mut entry: EscrowEntry =
         get_escrow(env, &commitment_bytes).ok_or(QuickexError::CommitmentNotFound)?;
 
-    // Only extend if escrow is pending or disputed (not already spent/refunded)
     if entry.status != EscrowStatus::Pending && entry.status != EscrowStatus::Disputed {
         return Err(QuickexError::AlreadySpent);
     }
 
-    // Check extension count
+    let extension_cfg = storage::get_ttl_extension_fee_config(env);
+    let fee = if extension_secs == 0 {
+        0
+    } else {
+        let raw = (extension_secs as i128).saturating_mul(extension_cfg.fee_per_second);
+        let bounded = raw.max(extension_cfg.min_fee).min(extension_cfg.max_fee);
+        if extension_cfg.max_fee > 0 {
+            bounded
+        } else {
+            raw.max(extension_cfg.min_fee)
+        }
+    };
+
     let mut extension_record = storage::get_escrow_extension(env, &commitment_bytes)
         .unwrap_or(crate::types::EscrowExtension {
             commitment: commitment.clone(),
@@ -894,7 +929,6 @@ pub fn extend_escrow_expiry(
         return Err(QuickexError::MaxExtensionsReached);
     }
 
-    // Calculate new expiry time
     let current_expires_at = if entry.expires_at > 0 {
         entry.expires_at
     } else {
@@ -906,28 +940,38 @@ pub fn extend_escrow_expiry(
         return Err(QuickexError::InvalidTimeout);
     }
 
-    // Check against max lifetime
     let creation_time = entry.created_at;
     let max_expires_at = creation_time.saturating_add(max_lifetime_secs);
     if new_expires_at > max_expires_at {
         return Err(QuickexError::ExtensionExceedsMaxLifetime);
     }
 
-    // Update escrow with new expiry
+    let token_client = token::Client::new(env, &entry.token);
+    let platform_wallet = storage::get_platform_wallet(env).unwrap_or_else(|| env.current_contract_address());
+
+    if fee > 0 {
+        let contract_balance = token_client.balance(&env.current_contract_address());
+        let charge = fee.min(contract_balance.max(0));
+        if charge > 0 {
+            token_client.transfer(&env.current_contract_address(), &platform_wallet, &charge);
+        }
+    }
+
     entry.expires_at = new_expires_at;
     put_escrow(env, &commitment_bytes, &entry);
 
-    // Update extension record
     extension_record.extension_count += 1;
     extension_record.last_extended_at = env.ledger().timestamp();
     extension_record.new_expires_at = new_expires_at;
     storage::put_escrow_extension(env, &commitment_bytes, &extension_record);
 
-    // Publish event
+    events::publish_escrow_extension_fee_charged(env, commitment.clone(), fee, extension_secs);
     events::publish_escrow_extension_applied(
         env,
-        commitment,
+        commitment.clone(),
         extension_record.extension_count,
+        extension_secs,
+        fee,
         new_expires_at,
     );
 

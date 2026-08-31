@@ -51,6 +51,7 @@ use soroban_sdk::xdr::ToXdr;
 
 use crate::types::{
     CachedOraclePrice, DisputeVote, EscrowEntry, FeeConfig, Role, StealthEscrowEntry,
+    TtlExtensionFeeConfig,
 };
 
 /// Record type for TTL policy selection.
@@ -147,6 +148,8 @@ pub enum DataKey {
     EscrowDispute(Bytes),
     /// Global escrow counter (singleton).
     EscrowCounter,
+    /// TTL extension fee config (singleton).
+    TtlExtensionFeeConfig,
     /// Current contract schema version (singleton).
     ContractVersion,
     /// Admin address (singleton).
@@ -258,7 +261,7 @@ impl CompactEscrowEntry {
         }
     }
 
-    fn into_public(self, dispute: EscrowDisputeConfig) -> EscrowEntry {
+    fn into_public(self, env: &Env, dispute: EscrowDisputeConfig) -> EscrowEntry {
         EscrowEntry {
             token: self.token,
             amount_due: self.amount_due,
@@ -270,6 +273,8 @@ impl CompactEscrowEntry {
             arbiter: dispute.arbiter,
             arbiters: dispute.arbiters,
             arbiter_threshold: dispute.arbiter_threshold,
+            memo: None,
+            milestones: Vec::new(env),
         }
     }
 }
@@ -531,7 +536,7 @@ pub fn get_escrow(env: &Env, commitment: &Bytes) -> Option<EscrowEntry> {
     if let Some(compact_entry) = compact_result {
         set_or_extend_ttl(env, &compact_key, RecordType::Escrow);
         let dispute = get_escrow_dispute_config(env, commitment);
-        return Some(compact_entry.into_public(dispute));
+        return Some(compact_entry.into_public(env, dispute));
     }
 
     let legacy_key = legacy_escrow_key(commitment);
@@ -890,6 +895,25 @@ pub fn get_fee_config(env: &Env) -> FeeConfig {
 
 pub fn set_fee_config(env: &Env, config: &FeeConfig) {
     let key = DataKey::FeeConfig;
+    env.storage().persistent().set(&key, config);
+    set_or_extend_ttl(env, &key, RecordType::FeeConfig);
+}
+
+pub fn get_ttl_extension_fee_config(env: &Env) -> TtlExtensionFeeConfig {
+    let key = DataKey::TtlExtensionFeeConfig;
+    let result = env.storage().persistent().get(&key);
+    if result.is_some() {
+        set_or_extend_ttl(env, &key, RecordType::FeeConfig);
+    }
+    result.unwrap_or(TtlExtensionFeeConfig {
+        fee_per_second: 0,
+        min_fee: 0,
+        max_fee: 0,
+    })
+}
+
+pub fn set_ttl_extension_fee_config(env: &Env, config: &TtlExtensionFeeConfig) {
+    let key = DataKey::TtlExtensionFeeConfig;
     env.storage().persistent().set(&key, config);
     set_or_extend_ttl(env, &key, RecordType::FeeConfig);
 }

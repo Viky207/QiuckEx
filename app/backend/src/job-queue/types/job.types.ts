@@ -14,7 +14,7 @@ export enum JobType {
   EXPORT_GENERATION = 'export_generation',
   RECONCILIATION = 'reconciliation',
   STELLAR_RECONNECT = 'stellar_reconnect',
-  BULK_OPERATION = 'bulk_operation',
+  TEMPLATE_EXECUTION = 'template_execution',
 }
 
 /**

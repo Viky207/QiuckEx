@@ -1,4 +1,4 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { BadRequestException, Injectable, Logger } from "@nestjs/common";
 import { SupabaseService } from "../supabase/supabase.service";
 import {
   NotificationPreference,
@@ -61,6 +61,66 @@ export class NotificationPreferencesRepository {
     }
 
     return (data ?? []).map(mapRow);
+  }
+
+  async getPreferences(publicKey: string): Promise<NotificationPreference[]> {
+    const { data, error } = await this.supabase
+      .getClient()
+      .from("notification_preferences")
+      .select("*")
+      .eq("public_key", publicKey);
+
+    if (error) throw error;
+    return (data ?? []).map(mapRow);
+  }
+
+  async updatePreferences(
+    publicKey: string,
+    preferences: Array<{
+      channel: NotificationChannel;
+      email?: string;
+      pushToken?: string;
+      webhookUrl?: string;
+      webhookSecret?: string;
+      events?: NotificationEventType[] | null;
+      minAmountStroops?: bigint;
+      enabled?: boolean;
+    }>,
+  ): Promise<NotificationPreference[]> {
+    const current = await this.getPreferences(publicKey);
+    const byChannel = new Map(
+      current.map((preference) => [preference.channel, preference]),
+    );
+    const merged = preferences.map((preference) => {
+      const existing = byChannel.get(preference.channel);
+      return { ...existing, ...preference, channel: preference.channel };
+    });
+    const latestByChannel = new Map(
+      [...byChannel.values(), ...merged].map((preference) => [
+        preference.channel,
+        preference,
+      ]),
+    );
+
+    if (![...latestByChannel.values()].some((preference) => preference.enabled !== false)) {
+      throw new BadRequestException(
+        "At least one notification channel must be enabled",
+      );
+    }
+
+    for (const preference of merged) {
+      await this.upsertPreference(publicKey, preference.channel, {
+        email: preference.email,
+        pushToken: preference.pushToken,
+        webhookUrl: preference.webhookUrl,
+        webhookSecret: preference.webhookSecret,
+        events: preference.events,
+        minAmountStroops: preference.minAmountStroops,
+        enabled: preference.enabled,
+      });
+    }
+
+    return this.getPreferences(publicKey);
   }
 
   /** Upsert a preference row (creates or updates). */

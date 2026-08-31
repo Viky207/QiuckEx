@@ -8,6 +8,7 @@ import {
   IsIn,
   IsNumber,
   Min,
+  ValidateNested,
 } from "class-validator";
 import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
 import { Transform, Type } from "class-transformer";
@@ -17,7 +18,12 @@ import type {
   NotificationEventType,
 } from "../types/notification.types";
 
-const VALID_CHANNELS: NotificationChannel[] = ["email", "push", "webhook"];
+export const VALID_CHANNELS: NotificationChannel[] = [
+  "email",
+  "telegram",
+  "push",
+  "webhook",
+];
 const VALID_EVENTS: NotificationEventType[] = [
   "EscrowDeposited",
   "EscrowWithdrawn",
@@ -33,6 +39,8 @@ const VALID_EVENTS: NotificationEventType[] = [
   "recurring.link.paused",
   "recurring.link.resumed",
   "recurring.link.completed",
+  "auto_reconciliation.succeeded",
+  "payment.link.expired",
 ];
 
 export class UpsertNotificationPreferenceDto {
@@ -93,6 +101,14 @@ export class UpsertNotificationPreferenceDto {
   @IsBoolean()
   @Transform(({ value }) => value ?? true)
   enabled?: boolean;
+}
+
+export class UpdateNotificationPreferencesDto {
+  @ApiProperty({ type: [UpsertNotificationPreferenceDto] })
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => UpsertNotificationPreferenceDto)
+  preferences!: UpsertNotificationPreferenceDto[];
 }
 
 export class DisableChannelDto {

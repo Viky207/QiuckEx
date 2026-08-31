@@ -1313,6 +1313,43 @@ paths:
               schema:
                 $ref: "#/components/schemas/NotificationPreference"
 
+  /notifications/preferences:
+    get:
+      tags: [Notifications]
+      operationId: getCurrentPreferences
+      summary: Get notification preferences for the authenticated user
+      responses:
+        "200":
+          description: Current notification preferences
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/NotificationPreference"
+
+    patch:
+      tags: [Notifications]
+      operationId: updateCurrentPreferences
+      summary: Update notification preferences for the authenticated user
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateNotificationPreferences"
+      responses:
+        "200":
+          description: Updated notification preferences
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/NotificationPreference"
+        "400":
+          description: At least one channel must remain enabled
+
   /notifications/preferences/{publicKey}/{channel}:
     delete:
       tags: [Notifications]
@@ -1329,7 +1366,7 @@ paths:
           required: true
           schema:
             type: string
-            enum: [email, push, webhook]
+            enum: [email, telegram, push, webhook]
       responses:
         "204":
           description: Channel disabled
@@ -3386,7 +3423,7 @@ components:
           type: string
         channel:
           type: string
-          enum: [email, push, webhook]
+          enum: [email, telegram, push, webhook]
         email:
           type: string
         pushToken:
@@ -3411,7 +3448,7 @@ components:
       properties:
         channel:
           type: string
-          enum: [email, push, webhook]
+          enum: [email, telegram, push, webhook]
         email:
           type: string
         pushToken:
@@ -3429,6 +3466,15 @@ components:
           type: number
         enabled:
           type: boolean
+
+    UpdateNotificationPreferences:
+      type: object
+      required: [preferences]
+      properties:
+        preferences:
+          type: array
+          items:
+            $ref: "#/components/schemas/UpsertNotificationPreference"
 
     # --- Marketplace ---
     ListUsernameRequest:

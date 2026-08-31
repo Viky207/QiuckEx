@@ -1,5 +1,6 @@
 import React, { useMemo } from "react";
 import {
+  AccessibilityInfo,
   View,
   Text,
   StyleSheet,
@@ -35,18 +36,21 @@ export default function QuickReceiveScreen() {
   const handleCopyLink = async () => {
     if (!receiveLink) return;
     await Clipboard.setStringAsync(receiveLink);
+    AccessibilityInfo.announceForAccessibility("Payment link copied to clipboard");
     Alert.alert("Copied", "Link copied to clipboard");
   };
 
   const handleCopyAddress = async () => {
     if (!accountIdentifier) return;
     await Clipboard.setStringAsync(accountIdentifier);
+    AccessibilityInfo.announceForAccessibility("Wallet address copied to clipboard");
     Alert.alert("Copied", "Public key copied to clipboard");
   };
 
   const handleShare = async () => {
     if (!receiveLink) return;
 
+    AccessibilityInfo.announceForAccessibility("Opening share sheet for payment link");
     await Share.share({
       message: `Send me payment via QuickEx:\n${receiveLink}`,
     });
@@ -74,8 +78,11 @@ export default function QuickReceiveScreen() {
           <TouchableOpacity
             style={[styles.primaryButton, { backgroundColor: theme.status.info, marginTop: 24 }]}
             onPress={handleConnectWallet}
+            accessibilityRole="button"
+            accessibilityLabel="Connect wallet"
+            accessibilityHint="Opens the wallet connection screen to connect your Stellar wallet"
           >
-            <Text style={[styles.buttonText, { color: theme.buttonPrimaryText }]}>
+            <Text style={[styles.buttonText, { color: theme.buttonPrimaryText }]} allowFontScaling>
               Connect Wallet
             </Text>
           </TouchableOpacity>
@@ -90,8 +97,14 @@ export default function QuickReceiveScreen() {
             ) : null}
           </View>
 
-          <TouchableOpacity onPress={handleCopyAddress} activeOpacity={0.7}>
-            <Text style={[styles.username, { color: theme.textPrimary }]}>
+          <TouchableOpacity
+            onPress={handleCopyAddress}
+            activeOpacity={0.7}
+            accessibilityRole="button"
+            accessibilityLabel={`Wallet address ${truncatedAddress}`}
+            accessibilityHint="Copies the public wallet address to the clipboard"
+          >
+            <Text style={[styles.username, { color: theme.textPrimary }]} allowFontScaling>
               {truncatedAddress}
             </Text>
           </TouchableOpacity>
@@ -109,22 +122,31 @@ export default function QuickReceiveScreen() {
           <TouchableOpacity
             style={[styles.primaryButton, { backgroundColor: theme.status.info }]}
             onPress={handleCopyLink}
+            accessibilityRole="button"
+            accessibilityLabel="Copy payment link"
+            accessibilityHint="Copies the shareable payment link for this wallet"
           >
-            <Text style={[styles.buttonText, { color: theme.buttonPrimaryText }]}>Copy Link</Text>
+            <Text style={[styles.buttonText, { color: theme.buttonPrimaryText }]} allowFontScaling>Copy Link</Text>
           </TouchableOpacity>
 
           <TouchableOpacity
             style={[styles.secondaryButton, { backgroundColor: theme.chipBg, marginBottom: 12 }]}
             onPress={handleCopyAddress}
+            accessibilityRole="button"
+            accessibilityLabel="Copy wallet address"
+            accessibilityHint="Copies the public wallet address for this account"
           >
-            <Text style={[styles.buttonText, { color: theme.textPrimary }]}>Copy Address</Text>
+            <Text style={[styles.buttonText, { color: theme.textPrimary }]} allowFontScaling>Copy Address</Text>
           </TouchableOpacity>
 
           <TouchableOpacity
             style={[styles.secondaryButton, { backgroundColor: theme.status.success }]}
             onPress={handleShare}
+            accessibilityRole="button"
+            accessibilityLabel="Share payment link"
+            accessibilityHint="Shares the payment link with another app"
           >
-            <Text style={[styles.buttonText, { color: theme.buttonPrimaryText }]}>Share</Text>
+            <Text style={[styles.buttonText, { color: theme.buttonPrimaryText }]} allowFontScaling>Share</Text>
           </TouchableOpacity>
         </>
       )}

@@ -8,6 +8,9 @@ import { RecurringPaymentsService } from "./recurring-payments.service";
 import { RecurringPaymentsScheduler } from "./recurring-payments.scheduler";
 import { RecurringPaymentsRepository } from "./recurring-payments.repository";
 import { RecurringPaymentProcessor } from "../stellar/recurring-payment-processor";
+import { RecurringLinkTemplateService } from "./recurring-link-template.service";
+import { RecurringLinkTemplateRepository } from "./recurring-link-template.repository";
+import { RecurringLinkTemplateScheduler } from "./recurring-link-template.scheduler";
 import { PaymentLinkController } from "./payment-link.controller";
 import { PaymentLinkService } from "./payment-link.service";
 import { PaymentLinkExpiryService } from './payment-link-expiry.service';
@@ -36,6 +39,9 @@ import { MetricsModule } from "../metrics/metrics.module";
     RecurringPaymentsScheduler,
     RecurringPaymentsRepository,
     RecurringPaymentProcessor,
+    RecurringLinkTemplateService,
+    RecurringLinkTemplateRepository,
+    RecurringLinkTemplateScheduler,
     PaymentLinkService,
   ],
   exports: [
@@ -45,6 +51,9 @@ import { MetricsModule } from "../metrics/metrics.module";
     BulkPaymentLinksService,
     RecurringPaymentsRepository,
     RecurringPaymentProcessor,
+    RecurringLinkTemplateService,
+    RecurringLinkTemplateRepository,
+    RecurringLinkTemplateScheduler,
     PaymentLinkService,
   ],
   imports: [
