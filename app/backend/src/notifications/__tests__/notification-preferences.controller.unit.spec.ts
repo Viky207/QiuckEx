@@ -23,6 +23,8 @@ function makePref(
 const mockRepo = (): jest.Mocked<NotificationPreferencesRepository> =>
   ({
     getEnabledPreferences: jest.fn().mockResolvedValue([makePref()]),
+    getPreferences: jest.fn().mockResolvedValue([makePref()]),
+    updatePreferences: jest.fn().mockResolvedValue([makePref()]),
     upsertPreference: jest.fn().mockResolvedValue(makePref()),
     disableChannel: jest.fn().mockResolvedValue(undefined),
   }) as unknown as jest.Mocked<NotificationPreferencesRepository>;
@@ -98,6 +100,49 @@ describe("NotificationPreferencesController", () => {
         PUBLIC_KEY,
         "email",
         expect.objectContaining({ events: null }),
+      );
+    });
+  });
+
+  describe("collection routes", () => {
+    it("gets preferences for the authenticated public key", async () => {
+      const result = await controller.getCurrentPreferences({
+        user: { publicKey: PUBLIC_KEY },
+      });
+
+      expect(repo.getPreferences).toHaveBeenCalledWith(PUBLIC_KEY);
+      expect(result[0].minAmountStroops).toBe("0");
+    });
+
+    it("updates per-event preferences and emits the domain event", async () => {
+      const emitter = { emit: jest.fn() };
+      const controllerWithEvents = new NotificationPreferencesController(
+        repo,
+        emitter as never,
+      );
+
+      await controllerWithEvents.updateCurrentPreferences(
+        { user: { publicKey: PUBLIC_KEY } },
+        {
+          preferences: [
+            {
+              channel: "telegram",
+              events: ["payment.received"],
+              enabled: true,
+            },
+          ],
+        },
+      );
+
+      expect(repo.updatePreferences).toHaveBeenCalledWith(PUBLIC_KEY, [
+        expect.objectContaining({
+          channel: "telegram",
+          events: ["payment.received"],
+        }),
+      ]);
+      expect(emitter.emit).toHaveBeenCalledWith(
+        "notification.preference.updated",
+        expect.objectContaining({ publicKey: PUBLIC_KEY }),
       );
     });
   });
