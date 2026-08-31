@@ -2,6 +2,7 @@ import { CameraView, useCameraPermissions } from 'expo-camera';
 import { useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
+  AccessibilityInfo,
   ActivityIndicator,
   Alert,
   Pressable,
@@ -56,6 +57,7 @@ export default function ScanToPayScreen() {
 
       if (result.valid) {
         await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+        AccessibilityInfo.announceForAccessibility('Payment link scanned successfully');
 
         const { username, amount, asset, memo, privacy } = result.data;
         router.replace({
@@ -72,7 +74,9 @@ export default function ScanToPayScreen() {
       }
 
       await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
-      setError(result.error || 'Invalid QR code');
+      const errorMessage = result.error || 'Invalid QR code';
+      AccessibilityInfo.announceForAccessibility(errorMessage);
+      setError(errorMessage);
       resetTimerRef.current = setTimeout(() => {
         processingRef.current = false;
         setScanned(false);
@@ -153,10 +157,22 @@ export default function ScanToPayScreen() {
         <Text style={[styles.permBody, { color: theme.textSecondary }]}>
           QuickEx needs camera access to scan QR payment codes.
         </Text>
-        <Pressable style={[styles.primaryBtn, { backgroundColor: theme.buttonPrimaryBg }]} onPress={requestPermission}>
+        <Pressable
+          style={[styles.primaryBtn, { backgroundColor: theme.buttonPrimaryBg }]}
+          onPress={requestPermission}
+          accessibilityRole="button"
+          accessibilityLabel="Grant camera access"
+          accessibilityHint="Requests permission to use the camera for scanning payment QR codes"
+        >
           <Text style={[styles.primaryBtnText, { color: theme.buttonPrimaryText }]}>Grant Access</Text>
         </Pressable>
-        <Pressable style={styles.secondaryBtn} onPress={() => router.back()}>
+        <Pressable
+          style={styles.secondaryBtn}
+          onPress={() => router.back()}
+          accessibilityRole="button"
+          accessibilityLabel="Go back"
+          accessibilityHint="Returns to the previous screen"
+        >
           <Text style={[styles.secondaryBtnText, { color: theme.textSecondary }]}>Go Back</Text>
         </Pressable>
       </SafeAreaView>
@@ -194,6 +210,7 @@ export default function ScanToPayScreen() {
             style={styles.controlButton}
             accessibilityRole="button"
             accessibilityLabel={flashEnabled ? 'Turn flash off' : 'Turn flash on'}
+            accessibilityHint={flashEnabled ? 'Disables the camera flash for scanning in low light' : 'Enables the camera flash for scanning in low light'}
           >
             <Ionicons
               name={flashEnabled ? 'flash' : 'flash-off'}
@@ -205,14 +222,27 @@ export default function ScanToPayScreen() {
 
         {/* Error banner */}
         {error && (
-          <Pressable style={styles.errorBanner} onPress={dismissError}>
+          <Pressable
+            style={styles.errorBanner}
+            onPress={dismissError}
+            accessibilityRole="alert"
+            accessibilityLiveRegion="polite"
+            accessibilityLabel={`Scanner error: ${error}`}
+            accessibilityHint="Dismisses the QR scan error banner"
+          >
             <Text style={styles.errorBannerText}>{error}</Text>
             <Text style={styles.errorDismiss}>Tap to dismiss</Text>
           </Pressable>
         )}
 
         <View style={styles.footer}>
-          <Pressable style={styles.closeBtn} onPress={() => router.back()}>
+          <Pressable
+            style={styles.closeBtn}
+            onPress={() => router.back()}
+            accessibilityRole="button"
+            accessibilityLabel="Close scanner"
+            accessibilityHint="Closes the scan-to-pay screen and returns to the previous screen"
+          >
             <Text style={styles.closeBtnText}>Close</Text>
           </Pressable>
         </View>
@@ -222,7 +252,13 @@ export default function ScanToPayScreen() {
       <Modal visible={showConfirmation} transparent animationType="slide" onRequestClose={handleRejectPayment}>
         <SafeAreaView style={[styles.modalContainer, { backgroundColor: theme.background }]}>
           <View style={styles.modalHeader}>
-            <Pressable onPress={handleRejectPayment} hitSlop={8}>
+            <Pressable
+              onPress={handleRejectPayment}
+              hitSlop={8}
+              accessibilityRole="button"
+              accessibilityLabel="Cancel payment confirmation"
+              accessibilityHint="Closes the confirmation dialog without sending payment"
+            >
               <Ionicons name="close" size={24} color={theme.textPrimary} />
             </Pressable>
             <Text style={[styles.modalTitle, { color: theme.textPrimary }]}>Confirm Payment</Text>
@@ -284,6 +320,9 @@ export default function ScanToPayScreen() {
               onPress={handleConfirmPayment}
               disabled={isProcessing}
               android_ripple={{ color: 'rgba(0,0,0,0.2)' }}
+              accessibilityRole="button"
+              accessibilityLabel="Confirm and sign payment"
+              accessibilityHint="Confirms the payment and signs the transaction"
             >
               {isProcessing ? (
                 <ActivityIndicator color={theme.buttonPrimaryText} />
@@ -300,6 +339,9 @@ export default function ScanToPayScreen() {
               onPress={handleRejectPayment}
               disabled={isProcessing}
               android_ripple={{ color: 'rgba(0,0,0,0.1)' }}
+              accessibilityRole="button"
+              accessibilityLabel="Cancel payment"
+              accessibilityHint="Cancels the payment confirmation and returns to the scanner"
             >
               <Text style={[styles.buttonText, { color: theme.textSecondary }]}>Cancel</Text>
             </Pressable>

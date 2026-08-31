@@ -4,6 +4,7 @@ import Constants from "expo-constants";
 import React, { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
+    AccessibilityInfo,
     ActivityIndicator,
     Alert,
     ScrollView,
@@ -113,10 +114,14 @@ export default function LinkGeneratorScreen() {
 
   const handleGenerate = async () => {
     if (isConnected === false) {
+      const message = "Offline mode: you cannot generate payment links while offline.";
+      AccessibilityInfo.announceForAccessibility(message);
       Alert.alert("Offline Mode", "You cannot generate payment links while offline.");
       return;
     }
     if (!isValidAmount || !isValidDestination) {
+      const message = "Invalid input: please check your amount and destination.";
+      AccessibilityInfo.announceForAccessibility(message);
       Alert.alert("Invalid Input", "Please check your amount and destination.");
       return;
     }
@@ -142,8 +147,10 @@ export default function LinkGeneratorScreen() {
       const result = json as LinkMetadataSuccess;
       if (result.success) {
         setCanonicalData(result.data.canonical);
+        AccessibilityInfo.announceForAccessibility("Payment link generated successfully");
       }
     } catch (e: any) {
+      AccessibilityInfo.announceForAccessibility(`Error generating payment link: ${e.message}`);
       Alert.alert("Error", e.message);
     } finally {
       setLoading(false);
@@ -155,10 +162,12 @@ export default function LinkGeneratorScreen() {
       canonicalData ||
       `https://quickex.to/${form.destination}/${form.amount}?asset=${recipientAssetCode}${form.memo ? `&memo=${encodeURIComponent(form.memo)}` : ""}`;
     try {
+      AccessibilityInfo.announceForAccessibility("Opening share sheet for payment link");
       await Share.share({
         message: `Pay me via QuickEx:\n${url}`,
       });
     } catch (error: any) {
+      AccessibilityInfo.announceForAccessibility(`Error sharing payment link: ${error.message}`);
       Alert.alert("Error sharing", error.message);
     }
   };
@@ -168,6 +177,7 @@ export default function LinkGeneratorScreen() {
       canonicalData ||
       `https://quickex.to/${form.destination}/${form.amount}?asset=${recipientAssetCode}${form.memo ? `&memo=${encodeURIComponent(form.memo)}` : ""}`;
     await Clipboard.setStringAsync(url);
+    AccessibilityInfo.announceForAccessibility("Payment link copied to clipboard");
     Alert.alert("Copied", "Payment link copied to clipboard");
   };
 
@@ -199,6 +209,9 @@ export default function LinkGeneratorScreen() {
               keyboardType="numeric"
               value={form.amount}
               onChangeText={(val) => setForm({ ...form, amount: val })}
+              accessibilityLabel="Payment amount"
+              accessibilityHint="Enter the amount to request from the recipient"
+              allowFontScaling
             />
             {assetsLoading ? (
               <ActivityIndicator
@@ -223,6 +236,10 @@ export default function LinkGeneratorScreen() {
                       },
                     ]}
                     onPress={() => setRecipientAssetCode(a.code)}
+                    accessibilityRole="button"
+                    accessibilityLabel={recipientAssetCode === a.code ? `${a.code} asset selected` : `Select ${a.code} asset`}
+                    accessibilityHint={`Switches the payment asset to ${a.code}`}
+                    accessibilityState={{ selected: recipientAssetCode === a.code }}
                   >
                     <Text
                       style={[
@@ -258,6 +275,9 @@ export default function LinkGeneratorScreen() {
             onChangeText={(val) => setForm({ ...form, destination: val })}
             autoCapitalize="none"
             autoCorrect={false}
+            accessibilityLabel="Destination wallet address"
+            accessibilityHint="Enter the Stellar public key of the recipient"
+            allowFontScaling
           />
           {form.destination !== "" && !isValidDestination && (
             <Text style={[styles.errorText, { color: theme.status.error }]}>
@@ -280,6 +300,9 @@ export default function LinkGeneratorScreen() {
             placeholderTextColor={theme.inputPlaceholder}
             value={form.memo}
             onChangeText={(val) => setForm({ ...form, memo: val })}
+            accessibilityLabel="Memo"
+            accessibilityHint="Optional payment memo for the recipient"
+            allowFontScaling
           />
         </View>
 
@@ -291,6 +314,9 @@ export default function LinkGeneratorScreen() {
           ]}
           onPress={handleGenerate}
           disabled={loading || !isValidAmount || !isValidDestination}
+          accessibilityRole="button"
+          accessibilityLabel="Generate payment link"
+          accessibilityHint="Creates a shareable payment link for the entered amount and destination"
         >
           {loading ? (
             <ActivityIndicator color={theme.primaryForeground} />
@@ -324,6 +350,9 @@ export default function LinkGeneratorScreen() {
                   { backgroundColor: theme.status.success },
                 ]}
                 onPress={handleShare}
+                accessibilityRole="button"
+                accessibilityLabel="Share payment link"
+                accessibilityHint="Shares the generated payment link using an available app"
               >
                 <Text
                   style={[
@@ -341,6 +370,9 @@ export default function LinkGeneratorScreen() {
                   { backgroundColor: theme.chipBg },
                 ]}
                 onPress={handleCopy}
+                accessibilityRole="button"
+                accessibilityLabel="Copy payment link"
+                accessibilityHint="Copies the generated payment link to the clipboard"
               >
                 <Text
                   style={[
@@ -359,6 +391,9 @@ export default function LinkGeneratorScreen() {
                 { borderColor: theme.buttonSecondaryBorder },
               ]}
               onPress={() => setQrModalVisible(true)}
+              accessibilityRole="button"
+              accessibilityLabel="Preview QR code"
+              accessibilityHint="Opens the QR code preview for the generated payment link"
             >
               <Text
                 style={[
