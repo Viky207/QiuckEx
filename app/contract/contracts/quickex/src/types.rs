@@ -55,6 +55,25 @@ pub enum EscrowStatus {
     Disputed,
 }
 
+/// Read-only refund eligibility result returned by a contract view.
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RefundEligibilityReason {
+    Eligible,
+    CommitmentNotFound,
+    EscrowNotExpired,
+    AlreadySpent,
+    InvalidDisputeState,
+}
+
+/// Read-only refund eligibility result with a normalized boolean and reason.
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct RefundEligibility {
+    pub eligible: bool,
+    pub reason: RefundEligibilityReason,
+}
+
 /// Escrow entry structure.
 ///
 /// Stored under [`DataKey::Escrow`](crate::storage::DataKey::Escrow)(commitment) in persistent storage.
