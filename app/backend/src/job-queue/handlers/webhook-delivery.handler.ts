@@ -12,6 +12,7 @@ import { JobHandler, Job, CancellationToken } from '../types';
 import { WebhookDeliveryPayload } from '../types/job-payloads.types';
 import { NotificationLogRepository } from '../../notifications/notification-log.repository';
 import { NotificationEventType } from '../../notifications/types/notification.types';
+import { redactResponseBody } from '../../notifications/webhook-payload-redaction';
 
 /**
  * Error thrown for permanent job failures (no retry)
@@ -92,13 +93,15 @@ export class WebhookDeliveryHandler implements JobHandler<WebhookDeliveryPayload
       clearTimeout(timeoutId);
 
       // Read response body (truncate if too long)
+      //
+      // The body is redacted before it is stored (issue #277): it comes from a
+      // subscriber endpoint we do not control, and the delivery log is readable
+      // through the delivery-status API by the owning tenant. A secret echoed
+      // back by the endpoint must not be persisted or surfaced.
       let responseBody: string | undefined;
       try {
         const text = await response.text();
-        responseBody =
-          text.length > this.maxResponseBodyLength
-            ? text.slice(0, this.maxResponseBodyLength) + '...'
-            : text;
+        responseBody = redactResponseBody(text, this.maxResponseBodyLength);
       } catch {
         // Ignore response body read errors
         responseBody = undefined;

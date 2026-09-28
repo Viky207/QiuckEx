@@ -2,12 +2,138 @@ import * as crypto from "crypto";
 
 import { WebhooksController } from "./webhooks.controller";
 import { WebhookService } from "./webhook.service";
+import { WebhookProvider } from "./providers/notification-provider.interface";
 
 function sign(body: string, timestamp: string, secret: string): string {
   const hmac = crypto.createHmac("sha256", secret);
   hmac.update(`${timestamp}.${body}`);
   return `sha256=${hmac.digest("hex")}`;
 }
+
+/**
+ * Issue #277: secret rotation must not break in-flight deliveries, and the
+ * overlap window must close on schedule.
+ */
+describe("WebhookProvider#verifySignatureWithRotation", () => {
+  const body = JSON.stringify({ eventType: "payment.received" });
+  const currentSecret = "whsec_current";
+  const previousSecret = "whsec_previous";
+
+  it("accepts a signature made with the current secret", () => {
+    const timestamp = new Date().toISOString();
+
+    const result = WebhookProvider.verifySignatureWithRotation(
+      body,
+      sign(body, timestamp, currentSecret),
+      timestamp,
+      currentSecret,
+      { previousSecret },
+    );
+
+    expect(result).toEqual({ valid: true, reason: "VALID" });
+  });
+
+  it("accepts the previous secret during the overlap window", () => {
+    const timestamp = new Date().toISOString();
+
+    const result = WebhookProvider.verifySignatureWithRotation(
+      body,
+      sign(body, timestamp, previousSecret),
+      timestamp,
+      currentSecret,
+      {
+        previousSecret,
+        previousSecretExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+      },
+    );
+
+    expect(result).toEqual({ valid: true, reason: "VALID" });
+  });
+
+  it("rejects the previous secret once the window has closed", () => {
+    const timestamp = new Date().toISOString();
+
+    const result = WebhookProvider.verifySignatureWithRotation(
+      body,
+      sign(body, timestamp, previousSecret),
+      timestamp,
+      currentSecret,
+      {
+        previousSecret,
+        previousSecretExpiresAt: new Date(Date.now() - 1_000).toISOString(),
+      },
+    );
+
+    expect(result).toEqual({
+      valid: false,
+      reason: "SIGNATURE_MISMATCH",
+    });
+  });
+
+  it("rejects the previous secret when no overlap was granted", () => {
+    const timestamp = new Date().toISOString();
+
+    const result = WebhookProvider.verifySignatureWithRotation(
+      body,
+      sign(body, timestamp, previousSecret),
+      timestamp,
+      currentSecret,
+    );
+
+    expect(result.valid).toBe(false);
+  });
+
+  it("rejects an unrelated secret even inside the overlap window", () => {
+    const timestamp = new Date().toISOString();
+
+    const result = WebhookProvider.verifySignatureWithRotation(
+      body,
+      sign(body, timestamp, "whsec_attacker"),
+      timestamp,
+      currentSecret,
+      {
+        previousSecret,
+        previousSecretExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+      },
+    );
+
+    expect(result.valid).toBe(false);
+  });
+
+  it("still enforces the replay tolerance on the previous secret", () => {
+    const staleTimestamp = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+
+    const result = WebhookProvider.verifySignatureWithRotation(
+      body,
+      sign(body, staleTimestamp, previousSecret),
+      staleTimestamp,
+      currentSecret,
+      {
+        previousSecret,
+        previousSecretExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+      },
+    );
+
+    expect(result).toEqual({
+      valid: false,
+      reason: "TIMESTAMP_OUT_OF_TOLERANCE",
+    });
+  });
+
+  it("ignores a previous secret identical to the current one", () => {
+    const timestamp = new Date().toISOString();
+
+    const result = WebhookProvider.verifySignatureWithRotation(
+      body,
+      sign(body, timestamp, "whsec_third_party"),
+      timestamp,
+      currentSecret,
+      { previousSecret: currentSecret },
+    );
+
+    expect(result.valid).toBe(false);
+  });
+});
 
 describe("WebhooksController#verifySignature", () => {
   const controller = new WebhooksController({} as WebhookService);

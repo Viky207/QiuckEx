@@ -11,7 +11,11 @@ import {
 } from "class-validator";
 import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
 
+import { SUPPORTED_WEBHOOK_API_VERSIONS } from "../webhook-event-versions";
 import type { NotificationEventType } from "../types/notification.types";
+
+/** Pinned webhook API versions a subscriber may request (#275). */
+const WEBHOOK_API_VERSIONS = [...SUPPORTED_WEBHOOK_API_VERSIONS];
 
 const WEBHOOK_EVENTS: NotificationEventType[] = [
   "EscrowDeposited",
@@ -87,6 +91,18 @@ export class CreateWebhookDto {
   @IsString()
   @MaxLength(128)
   secret?: string;
+
+  @ApiPropertyOptional({
+    enum: WEBHOOK_API_VERSIONS,
+    example: "v1",
+    description:
+      "Webhook API version to pin this subscriber to. Omit to use the default " +
+      "version. Deliveries always carry the pinned version plus the current " +
+      "schema version of the event, so a subscriber can migrate deliberately.",
+  })
+  @IsOptional()
+  @IsIn(WEBHOOK_API_VERSIONS)
+  apiVersion?: string;
 }
 
 export class UpdateWebhookDto {
@@ -135,6 +151,17 @@ export class UpdateWebhookDto {
   minAmountStroops?: number;
 
   @ApiPropertyOptional({
+    enum: WEBHOOK_API_VERSIONS,
+    example: "v2",
+    description:
+      "Change the pinned webhook API version. Omit to keep the current pin — " +
+      "an update never silently moves a subscriber to a different schema version.",
+  })
+  @IsOptional()
+  @IsIn(WEBHOOK_API_VERSIONS)
+  apiVersion?: string;
+
+  @ApiPropertyOptional({
     description: "Enable or disable this webhook",
   })
   @IsOptional()
@@ -151,6 +178,12 @@ export class WebhookResponseDto {
     example: "whsec_xxxxxxxxxxxxxxxx",
   })
   secret!: string;
+  @ApiProperty({
+    enum: WEBHOOK_API_VERSIONS,
+    example: "v1",
+    description: "Webhook API version this subscriber is pinned to",
+  })
+  apiVersion?: string;
   @ApiPropertyOptional({ type: [String], nullable: true }) events!:
     | NotificationEventType[]
     | null;
@@ -288,4 +321,23 @@ export class VerifyWebhookSignatureResponseDto {
       "VALID | MISSING_FIELDS | INVALID_SIGNATURE_FORMAT | INVALID_TIMESTAMP | TIMESTAMP_OUT_OF_TOLERANCE | SIGNATURE_MISMATCH",
   })
   reason!: string;
+}
+
+/**
+ * Rotation result (issue #277). `previousSecretExpiresAt` is present only when
+ * an overlap window was granted; the previous secret is never returned, only
+ * the instant it stops being accepted.
+ */
+export class RegenerateWebhookSecretResponseDto {
+  @ApiProperty({
+    description: "New signing secret. Used for every subsequent delivery.",
+    example: "whsec_xxxxxxxxxxxxxxxx",
+  })
+  secret!: string;
+  @ApiPropertyOptional({
+    description:
+      "ISO-8601 instant until which the previous secret is still accepted for " +
+      "verification. Absent when the rotation had no overlap window.",
+  })
+  previousSecretExpiresAt?: string;
 }

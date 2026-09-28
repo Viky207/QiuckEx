@@ -14,6 +14,9 @@ interface RawPreference {
   push_token: string | null;
   webhook_url: string | null;
   webhook_secret: string | null;
+  webhook_api_version: string | null;
+  webhook_previous_secret: string | null;
+  webhook_previous_secret_expires_at: string | null;
   events: string[] | null;
   min_amount_stroops: string | null; // Supabase returns bigint as string
   enabled: boolean;
@@ -30,6 +33,10 @@ function mapRow(row: RawPreference): NotificationPreference {
     pushToken: row.push_token ?? undefined,
     webhookUrl: row.webhook_url ?? undefined,
     webhookSecret: row.webhook_secret ?? undefined,
+    apiVersion: row.webhook_api_version ?? undefined,
+    previousWebhookSecret: row.webhook_previous_secret ?? undefined,
+    previousSecretExpiresAt:
+      row.webhook_previous_secret_expires_at ?? undefined,
     events: (row.events as NotificationEventType[] | null) ?? null,
     minAmountStroops: BigInt(row.min_amount_stroops ?? "0"),
     enabled: row.enabled,
@@ -132,6 +139,9 @@ export class NotificationPreferencesRepository {
       pushToken?: string;
       webhookUrl?: string;
       webhookSecret?: string;
+      apiVersion?: string;
+      previousWebhookSecret?: string;
+      previousSecretExpiresAt?: string;
       events?: NotificationEventType[] | null;
       minAmountStroops?: bigint;
       enabled?: boolean;
@@ -144,6 +154,18 @@ export class NotificationPreferencesRepository {
       push_token: options.pushToken ?? null,
       webhook_url: options.webhookUrl ?? null,
       webhook_secret: options.webhookSecret ?? null,
+      // Only meaningful for the webhook channel; null everywhere else keeps the
+      // per-channel row uniform.
+      webhook_api_version:
+        options.apiVersion !== undefined ? options.apiVersion : null,
+      webhook_previous_secret:
+        options.previousWebhookSecret !== undefined
+          ? options.previousWebhookSecret
+          : null,
+      webhook_previous_secret_expires_at:
+        options.previousSecretExpiresAt !== undefined
+          ? options.previousSecretExpiresAt
+          : null,
       events: options.events ?? null,
       min_amount_stroops: (options.minAmountStroops ?? 0n).toString(),
       enabled: options.enabled ?? true,
@@ -303,15 +325,42 @@ export class NotificationPreferencesRepository {
     return true;
   }
 
-  /** Regenerate webhook secret. */
+  /**
+   * Rotate a webhook signing secret (issue #277).
+   *
+   * The new secret is used for every signature from this point. When the
+   * current secret is known, it is retained for a bounded overlap window and
+   * the expiry is returned, so verification tooling can accept in-flight
+   * deliveries signed with the old secret while a subscriber redeploys.
+   * Omitting `currentSecret` (or passing a zero grace period) rotates
+   * immediately and discards the old secret, matching the previous behaviour.
+   */
   async regenerateWebhookSecret(
     id: string,
     newSecret: string,
+    options: {
+      currentSecret?: string;
+      overlapMs?: number;
+    } = {},
   ): Promise<NotificationPreference> {
+    const overlapMs = options.overlapMs ?? 0;
+    const retainPrevious =
+      typeof options.currentSecret === "string" &&
+      options.currentSecret.length > 0 &&
+      overlapMs > 0;
+
+    const update: Record<string, unknown> = {
+      webhook_secret: newSecret,
+      webhook_previous_secret: retainPrevious ? options.currentSecret : null,
+      webhook_previous_secret_expires_at: retainPrevious
+        ? new Date(Date.now() + overlapMs).toISOString()
+        : null,
+    };
+
     const { data, error } = await this.supabase
       .getClient()
       .from("notification_preferences")
-      .update({ webhook_secret: newSecret })
+      .update(update)
       .eq("id", id)
       .eq("channel", "webhook")
       .select()

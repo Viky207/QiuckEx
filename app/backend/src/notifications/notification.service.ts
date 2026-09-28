@@ -44,6 +44,8 @@ import type { WebhookDeliveryPayload } from "../job-queue/types/job-payloads.typ
 
 import { InAppNotificationRepository } from "./in-app-notification.repository";
 import { TemplateVersionService } from "./template-versioning/template-version.service";
+import { evaluateNotificationPreference } from "./utils/preference-evaluator";
+import type { NotificationSuppressionReason } from "./utils/preference-evaluator";
 
 const MAX_ATTEMPTS = 3;
 
@@ -321,12 +323,47 @@ export class NotificationService implements OnModuleInit {
     // Store template version ID for persistence in notification logs
     const templateVersionId = renderedTemplate?.templateVersionId;
 
-    const filtered = preferences.filter((pref) =>
-      this.matchesPreference(renderedPayload, pref),
-    );
+    // Single authoritative preference gate for every channel (issue #274).
+    // Email, push, webhook, telegram and in-app all run the same evaluator, so
+    // a suppression reason means the same thing wherever it is observed.
+    const decisions = preferences.map((pref) => ({
+      pref,
+      decision: evaluateNotificationPreference(pref, renderedPayload),
+    }));
+
+    for (const { pref, decision } of decisions) {
+      if (decision.allowed) continue;
+      this.logSuppression(
+        renderedPayload,
+        pref.channel,
+        decision.reason as NotificationSuppressionReason,
+      );
+    }
+
+    const filtered = decisions
+      .filter((entry) => entry.decision.allowed)
+      .map((entry) => entry.pref);
 
     await Promise.allSettled(
       filtered.map((pref) => this.sendToChannel(pref, renderedPayload, templateVersionId)),
+    );
+  }
+
+  /**
+   * Record why a channel did not receive a notification.
+   *
+   * The recipient is logged as a truncated prefix only: the full account is the
+   * routing key and is not needed to diagnose a suppression, so it is not
+   * written to the log stream.
+   */
+  private logSuppression(
+    payload: NotificationPayload,
+    channel: NotificationPreference["channel"],
+    reason: NotificationSuppressionReason,
+  ): void {
+    this.logger.debug(
+      `notification_suppressed channel=${channel} eventType=${payload.eventType} ` +
+        `eventId=${payload.eventId} recipient=${payload.recipientPublicKey.slice(0, 8)}... reason=${reason}`,
     );
   }
 
@@ -443,6 +480,19 @@ export class NotificationService implements OnModuleInit {
           occurredAt: new Date().toISOString(),
         } as NotificationPayload;
 
+        // Re-evaluate preferences on the retry path (issue #274). A retry must
+        // not deliver a notification the user has since opted out of, and it
+        // must not hit a channel whose destination was cleared.
+        const decision = evaluateNotificationPreference(pref, synthetic);
+        if (!decision.allowed) {
+          this.logSuppression(
+            synthetic,
+            pref.channel,
+            decision.reason as NotificationSuppressionReason,
+          );
+          continue;
+        }
+
         await this.sendToChannel(pref, synthetic);
       } catch {}
     }
@@ -451,23 +501,6 @@ export class NotificationService implements OnModuleInit {
   // ---------------------------------------------------------------------------
   // HELPERS
   // ---------------------------------------------------------------------------
-
-  private matchesPreference(
-    payload: NotificationPayload,
-    pref: NotificationPreference,
-  ): boolean {
-    if (pref.events !== null && !pref.events.includes(payload.eventType)) {
-      return false;
-    }
-
-    if (pref.minAmountStroops > 0n && payload.amountStroops !== undefined) {
-      if (payload.amountStroops < pref.minAmountStroops) {
-        return false;
-      }
-    }
-
-    return true;
-  }
 
   private formatAmount(stroops: bigint): string {
     const xlm = Number(stroops) / 10_000_000;

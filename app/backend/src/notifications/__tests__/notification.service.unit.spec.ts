@@ -391,11 +391,13 @@ describe("NotificationService", () => {
     it("retries failed entries", async () => {
       logRepo.getPendingRetries.mockResolvedValue([
         {
+          id: "log-email-1",
           publicKey: PUBLIC_KEY,
           channel: "email",
           eventType: "payment.received",
           eventId: "tx-fail",
           attempts: 1,
+          sequence: 1,
         },
       ]);
       prefsRepo.getEnabledPreferences.mockResolvedValue([makeEmailPref()]);
@@ -409,11 +411,13 @@ describe("NotificationService", () => {
     it("skips retry if preference no longer exists for channel", async () => {
       logRepo.getPendingRetries.mockResolvedValue([
         {
+          id: "log-push-1",
           publicKey: PUBLIC_KEY,
           channel: "push",
           eventType: "payment.received",
           eventId: "tx-fail",
           attempts: 1,
+          sequence: 1,
         },
       ]);
       // User only has email pref now, not push

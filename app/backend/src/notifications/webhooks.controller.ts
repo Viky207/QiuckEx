@@ -12,6 +12,7 @@ import {
   Logger,
   NotFoundException,
   ForbiddenException,
+  BadRequestException,
 } from "@nestjs/common";
 import {
   ApiTags,
@@ -34,6 +35,7 @@ import {
   WebhookRedeliverResponseDto,
   VerifyWebhookSignatureDto,
   VerifyWebhookSignatureResponseDto,
+  RegenerateWebhookSecretResponseDto,
 } from "./dto/webhook.dto";
 import { RateLimitGroupTag } from "../auth/decorators/rate-limit-group.decorator";
 import { WebhookProvider } from "./providers/notification-provider.interface";
@@ -192,35 +194,91 @@ export class WebhooksController {
   @Post(":publicKey/:id/regenerate-secret")
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
-    summary: "Regenerate webhook secret",
+    summary: "Regenerate (rotate) webhook secret",
     description:
-      "Generate a new secret for signing webhook payloads. The old secret will immediately stop working.",
+      "Issue a new secret for signing webhook payloads. The new secret is used " +
+      "for every subsequent delivery. The previous secret is retained for a " +
+      "bounded overlap window (WEBHOOK_SECRET_ROTATION_GRACE_MS) and the " +
+      "response reports when that window closes, so a subscriber can redeploy " +
+      "without rejecting in-flight deliveries. Pass overlapMs=0 to rotate " +
+      "immediately, which makes the previous secret stop working at once.",
   })
   @ApiParam({ name: "publicKey", description: "Stellar public key (G...)" })
   @ApiParam({ name: "id", description: "Webhook ID (UUID)" })
+  @ApiQuery({
+    name: "overlapMs",
+    required: false,
+    type: Number,
+    description:
+      "Overlap window in milliseconds during which the previous secret is " +
+      "still accepted for verification. 0 = immediate rotation.",
+    example: 3_600_000,
+  })
   @ApiResponse({
     status: 200,
     description: "New secret generated",
-    schema: {
-      type: "object",
-      properties: {
-        secret: { type: "string", example: "whsec_xxxxxxxxxxxxxxxx" },
-      },
-    },
+    type: RegenerateWebhookSecretResponseDto,
   })
   @ApiResponse({ status: 404, description: "Webhook not found" })
   async regenerateSecret(
     @Param("publicKey") publicKey: string,
     @Param("id") id: string,
-  ): Promise<{ secret: string }> {
-    const result = await this.webhookService.regenerateSecret(id, publicKey);
+    @Query("overlapMs") overlapMs?: number,
+  ): Promise<RegenerateWebhookSecretResponseDto> {
+    const parsedOverlap =
+      overlapMs === undefined ? undefined : Number(overlapMs);
+    if (
+      parsedOverlap !== undefined &&
+      (!Number.isFinite(parsedOverlap) || parsedOverlap < 0)
+    ) {
+      throw new BadRequestException("overlapMs must be a non-negative number");
+    }
+
+    const result = await this.webhookService.regenerateSecret(
+      id,
+      publicKey,
+      parsedOverlap,
+    );
     if (!result) {
       throw new NotFoundException("Webhook not found");
     }
     this.logger.log(
-      `Regenerated secret for webhook ${id} (${publicKey.slice(0, 8)}...)`,
+      `Rotated secret for webhook ${id} (${publicKey.slice(0, 8)}...) ` +
+        `overlap=${result.previousSecretExpiresAt ? "windowed" : "immediate"}`,
     );
     return result;
+  }
+
+  /**
+   * GET /webhooks/:publicKey/:id/event-versions
+   * Version and migration metadata for the events this webhook subscribes to.
+   *
+   * This is the discovery surface a subscriber uses to plan a migration: it
+   * names the schema version each event is currently emitted at, which versions
+   * are deprecated, when they sunset, and what to change.
+   */
+  @Get(":publicKey/:id/event-versions")
+  @ApiOperation({
+    summary: "List event versions and migration metadata for a webhook",
+    description:
+      "Returns the schema version currently emitted for each subscribed event " +
+      "type, the versions still supported, any deprecated versions with their " +
+      "sunset date, and migration guidance. Read-only; reveals no secrets.",
+  })
+  @ApiParam({ name: "publicKey", description: "Stellar public key (G...)" })
+  @ApiParam({ name: "id", description: "Webhook ID (UUID)" })
+  @ApiResponse({ status: 200, description: "Event version metadata" })
+  @ApiResponse({ status: 404, description: "Webhook not found" })
+  async getEventVersions(
+    @Param("publicKey") publicKey: string,
+    @Param("id") id: string,
+  ) {
+    const webhook = await this.webhookService.getWebhook(id);
+    if (!webhook || webhook.publicKey !== publicKey) {
+      throw new NotFoundException("Webhook not found");
+    }
+
+    return this.webhookService.getEventVersionMetadata(id, publicKey);
   }
 
   @Get(":publicKey/:id/logs")
