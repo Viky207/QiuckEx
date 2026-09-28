@@ -82,6 +82,32 @@ accidental breakage.
 
 ## Current event catalogue (Schema v2)
 
+### Governance action events
+
+The governance action catalog is the on-chain audit trail for all privileged lifecycle operations. These events must be emitted under the `TOPIC_GOVERNANCE` namespace and must include `schema_version` and `timestamp` in every payload.
+
+- `ProposalCreated`
+  - Topics: `TOPIC_GOVERNANCE`, `ProposalCreated`, `proposal_id`, `proposer`
+  - Data: `schema_version`, `action_tag`, `expires_at`, `timestamp`
+
+- `ProposalApproved`
+  - Topics: `TOPIC_GOVERNANCE`, `ProposalApproved`, `proposal_id`, `approver`
+  - Data: `schema_version`, `approval_count`, `threshold`, `timestamp`
+
+- `ProposalExecuted`
+  - Topics: `TOPIC_GOVERNANCE`, `ProposalExecuted`, `proposal_id`
+  - Data: `schema_version`, `action_tag`, `approval_count`, `timestamp`
+
+- `ProposalCancelled`
+  - Topics: `TOPIC_GOVERNANCE`, `ProposalCancelled`, `proposal_id`, `cancelled_by`
+  - Data: `schema_version`, `timestamp`
+
+- `SignerSetUpdated`
+  - Topics: `TOPIC_GOVERNANCE`, `SignerSetUpdated`
+  - Data: `schema_version`, `new_threshold`, `signer_count`, `timestamp`
+
+All governance events must be emitted only after validation succeeds. Any direct contract error path must leave the event stream unchanged and the caller must receive the relevant governance error code without an event emission.
+
 ### Privacy
 
 - `PrivacyToggled`

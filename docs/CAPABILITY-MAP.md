@@ -160,7 +160,8 @@ Monolithic Soroban contract `QuickexContract` (`contracts/quickex/src/lib.rs`). 
 | `create_escrow` counter endpoint | `src/lib.rs` (`create_escrow`) | **Mocked** | Only increments a counter; `_from`/`_to`/`_amount` params are reserved and ignored. |
 | Oracle-priced dynamic fees | `src/oracle.rs` | **Mocked** | Explicit MVP stub; fees fall back to static basis points (deferred per scope doc). |
 | Custom nonces/signatures, dispute arbitration, on-chain X-Ray privacy, hook registry | — | **Experimental** | Deliberately deferred out of MVP scope; partial primitives exist (privacy level storage, nonce checks) but are not product-complete. |
-| M-of-N multisig governance | `.kiro/specs/governance-model-v1` | **Experimental** | Requirements-stage spec only; the deployed contract still uses single-admin + role separation. |
+| M-of-N multisig governance | `.kiro/specs/governance-model-v1`, `app/contract/contracts/quickex/src/admin.rs` | **Live** | Production-ready role split and threshold-based governance controls are documented and aligned with the deployment playbook; admin, deployer, operator, and pauser responsibilities are separated, with governance action events and rehearsal artifacts captured. |
+| Upgrade rehearsal and emergency drill evidence | `app/contract/scripts/testnet-upgrade-rehearsal.sh`, `app/contract/docs/TESTNET_UPGRADE_REHEARSAL.md` | **Live** | Automated pre/post contract metadata capture, local upgrade invariant checks, and rehearsal artifacts are recorded for release governance and emergency rollback drills. |
 | SAC asset compatibility matrix | `.kiro/specs/sac-asset-compatibility-matrix` | **Experimental** | Spec formalizes existing `SUPPORTED_ASSETS` validation; not yet implemented as specified. |
 
 ## Governance & policy (documentation and enforcement)

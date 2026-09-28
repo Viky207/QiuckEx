@@ -88,17 +88,38 @@ To eliminate single points of failure, the Mainnet deployment of QuickEx utilize
 - **Restrictions**: No automated backend server, CI/CD pipeline, or hot wallet may hold admin signing rights on Mainnet.
 
 ### 2.2 Role Separation
-1. **Admin Role**:
-   - Authorized to invoke contract upgrades (`migrate(admin, new_wasm_hash)`).
-   - Authorized to trigger protocol emergency freeze (`activate_emergency_mode`).
-   - Authorized to rotate the protocol fee destination account (`set_fee_recipient`).
-2. **Operator Role**:
-   - Authorized to perform routine parameter adjustments and granular entrypoint pauses (`set_pause_flags`).
-   - Cannot migrate contract code or rotate admin authority.
+The production governance split separates four distinct operational roles to prevent one credential from controlling the full lifecycle of a live deployment.
 
-### 2.3 Time-Locked Upgrade Staging
+1. **Admin Role**:
+   - Authorized to approve or reject full protocol changes, including contract upgrades and governance-signed parameter changes.
+   - Authorized to confirm emergency escalation while preserving a clear audit trail.
+   - Not permitted to act as the deployer or the runtime operator for the same environment.
+2. **Deployer Role**:
+   - Responsible for creating the initial contract instance, recording the on-chain deployment metadata, and publishing the verified WASM hash.
+   - May perform custodial setup or environment bootstrap, but does not retain routine operator privileges after initialization.
+3. **Operator Role**:
+   - Authorized to perform routine parameter adjustments and granular entrypoint pauses (`set_pause_flags`).
+   - Must not possess the ability to migrate bytecode or rotate admin authority without administrative quorum.
+4. **Pauser Role**:
+   - Authorized only for emergency response pauses and controlled rollback activation.
+   - Must be separate from the deployer and from the admin quorum that approves code upgrades.
+   - Access is reviewed on a fixed cadence and is reversible via a documented recovery process.
+
+### 2.3 Governance Action Event Catalog
+All governance transitions must be auditable on-chain and readable by indexers. The canonical event catalog is maintained in [../app/contract/docs/events-schema.md](../app/contract/docs/events-schema.md) and includes the lifecycle events for proposal creation, approval, execution, cancellation, signer-set update, and pause-state changes. Indexers must treat `schema_version` and `timestamp` as mandatory fields for every governance emission.
+
+### 2.4 Time-Locked Upgrade Staging
 - All contract bytecode migrations must be announced via a public governance proposal with a minimum **48-hour timelock** before execution.
 - This window gives merchants and liquidity providers adequate time to settle or withdraw active escrows if they choose not to adopt the upgrade.
+
+### 2.5 Emergency Pause Access Review and Recovery Runbook
+The emergency pause path is intentionally higher-risk than routine maintenance, so access review and recovery are part of the production control set rather than an afterthought.
+
+1. **Design review**: Every pause capability must have a named owner, a second human approver, and a written rationale for why emergency action is necessary.
+2. **Credential separation**: No single admin, deployer, or operator identity may hold both emergency pause permissions and upgrade authorization in the same environment.
+3. **Recovery drill**: Every quarter, operators run the pause drill in testnet, verify that event capture still matches the governance catalog, and confirm the contract can be safely unpaused or rolled back without data loss.
+4. **Operational escalation**: When a pause is activated, the incident lead must record the reason, the actor identity, the exact contract state affected, and the restoration plan before any service is reopened.
+5. **Documentation**: The detailed procedure lives in [../app/contract/docs/EMERGENCY_PAUSE_RUNBOOK.md](../app/contract/docs/EMERGENCY_PAUSE_RUNBOOK.md).
 
 ---
 
