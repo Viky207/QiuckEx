@@ -110,10 +110,27 @@ export class PublishContractRegistryDto {
   @IsNotEmpty()
   networkPassphrase: string;
 
-  @ApiPropertyOptional({ example: 'deploy-2026-05-30T18:00:00Z' })
-  @IsOptional()
+  @ApiProperty({ example: 'deploy-2026-05-30T18:00:00Z' })
   @IsString()
-  deploymentId?: string;
+  @IsNotEmpty()
+  @MaxLength(128)
+  deploymentId: string;
+
+  @ApiProperty({ example: '2026-09-26T12:00:00.000Z' })
+  @IsISO8601()
+  manifestTimestamp: string;
+
+  @ApiProperty({ description: 'Trusted key identifier used to sign this deployment manifest' })
+  @IsString()
+  @IsNotEmpty()
+  @Matches(/^[a-zA-Z0-9._-]{1,64}$/)
+  manifestKeyId: string;
+
+  @ApiProperty({ description: 'Base64-encoded Ed25519 signature over the canonical publication payload' })
+  @IsString()
+  @IsNotEmpty()
+  @Matches(/^[A-Za-z0-9+/]{86}==$/)
+  manifestSignature: string;
 
   @ApiProperty({ type: [ContractRegistryEntryDto] })
   @IsArray()

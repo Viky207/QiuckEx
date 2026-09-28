@@ -1,4 +1,4 @@
-import { createHash } from 'crypto';
+import { createHash, createPrivateKey, sign as signManifest } from 'crypto';
 import { execFileSync } from 'child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import * as path from 'path';
@@ -12,6 +12,9 @@ interface Args {
   dryRun: boolean;
   registryUrl?: string;
   apiKey?: string;
+  mainnetGate?: string;
+  testnetManifest?: string;
+  auditReport?: string;
 }
 
 function parseArgs(argv: string[]): Args {
@@ -46,6 +49,9 @@ function parseArgs(argv: string[]): Args {
     dryRun: map.get('dry-run') === 'true',
     registryUrl: map.get('registry-url'),
     apiKey: map.get('api-key'),
+    mainnetGate: map.get('mainnet-gate'),
+    testnetManifest: map.get('testnet-manifest'),
+    auditReport: map.get('audit-report'),
   };
 }
 
@@ -54,11 +60,52 @@ function run(command: string, args: string[], dryRun: boolean): string {
   return execFileSync(command, args, { encoding: 'utf8' }).trim();
 }
 
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (value !== null && typeof value === 'object') {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .filter(([, entry]) => entry !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => `${JSON.stringify(key)}:${canonicalJson(entry)}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const wasmPath = path.resolve(args.wasm);
   if (!existsSync(wasmPath)) {
     throw new Error(`WASM file not found at ${wasmPath}`);
+  }
+
+  const signingKeyId = process.env.QUICKEX_REGISTRY_MANIFEST_KEY_ID;
+  const signingKeyPem = process.env.QUICKEX_REGISTRY_MANIFEST_PRIVATE_KEY?.replace(/\\n/g, '\n');
+  let registrySigningKey: ReturnType<typeof createPrivateKey> | undefined;
+  if (args.registryUrl && (!signingKeyId || !signingKeyPem)) {
+    throw new Error('Registry publishing requires QUICKEX_REGISTRY_MANIFEST_KEY_ID and QUICKEX_REGISTRY_MANIFEST_PRIVATE_KEY');
+  }
+  if (args.registryUrl) {
+    try {
+      registrySigningKey = createPrivateKey(signingKeyPem!);
+    } catch {
+      throw new Error('QUICKEX_REGISTRY_MANIFEST_PRIVATE_KEY must be a valid Ed25519 private-key PEM');
+    }
+    if (registrySigningKey.asymmetricKeyType !== 'ed25519') {
+      throw new Error('QUICKEX_REGISTRY_MANIFEST_PRIVATE_KEY must use Ed25519');
+    }
+  }
+  if (args.network === 'mainnet' && !args.dryRun) {
+    if (!args.mainnetGate || !args.testnetManifest || !args.auditReport) {
+      throw new Error('Mainnet deployment requires --mainnet-gate, --testnet-manifest, and --audit-report');
+    }
+    execFileSync(process.execPath, [
+      path.resolve(__dirname, '../../..', 'scripts/verify-mainnet-deployment-gate.js'),
+      '--gate', path.resolve(args.mainnetGate),
+      '--testnet-manifest', path.resolve(args.testnetManifest),
+      '--audit-report', path.resolve(args.auditReport),
+      '--wasm', wasmPath,
+    ], { stdio: 'inherit' });
   }
 
   const networkPassphrase =
@@ -98,6 +145,28 @@ async function main() {
   writeFileSync(artifactPath, JSON.stringify(artifact, null, 2));
 
   if (args.registryUrl) {
+    const publication = {
+      networkPassphrase,
+      deploymentId: `${args.network}-${args.contractName}-${Date.now()}`,
+      manifestTimestamp: new Date().toISOString(),
+      contracts: [
+        {
+          name: args.contractName,
+          contractId,
+          wasmHash,
+          contractVersion: 1,
+          metadata: {
+            artifactPath,
+            dryRun: args.dryRun,
+          },
+        },
+      ],
+    };
+    const manifestSignature = signManifest(
+      null,
+      Buffer.from(canonicalJson(publication)),
+      registrySigningKey!,
+    ).toString('base64');
     const response = await fetch(`${args.registryUrl.replace(/\/$/, '')}/contracts/registry/publish`, {
       method: 'POST',
       headers: {
@@ -105,20 +174,9 @@ async function main() {
         ...(args.apiKey ? { 'X-API-Key': args.apiKey } : {}),
       },
       body: JSON.stringify({
-        networkPassphrase,
-        deploymentId: `${args.network}-${args.contractName}-${Date.now()}`,
-        contracts: [
-          {
-            name: args.contractName,
-            contractId,
-            wasmHash,
-            contractVersion: 1,
-            metadata: {
-              artifactPath,
-              dryRun: args.dryRun,
-            },
-          },
-        ],
+        ...publication,
+        manifestKeyId: signingKeyId,
+        manifestSignature,
       }),
     });
 

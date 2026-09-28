@@ -6,7 +6,7 @@ set -euo pipefail
 # Builds, deploys, and initialises a QuickEx Soroban contract on the target
 # network, then emits a JSON manifest conforming to manifest-schema.json.
 #
-# Prerequisites: cargo (wasm32v1-none target), stellar CLI, sha256sum, python3
+# Prerequisites: cargo (wasm32v1-none target), stellar CLI, sha256sum, python3, node, git
 #
 # Usage:
 #   ./scripts/deploy.sh \
@@ -17,6 +17,8 @@ set -euo pipefail
 #     [--rpc-url https://soroban-testnet.stellar.org] \
 #     [--passphrase "Test SDF Network ; September 2015"] \
 #     [--out-dir docs/deployment-artifacts]
+#
+# Mainnet additionally requires --mainnet-gate, --testnet-manifest, and --audit-report.
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 NETWORK=""
@@ -26,6 +28,9 @@ WASM_PATH="${WASM_PATH:-$ROOT_DIR/target/wasm32v1-none/release/quickex.wasm}"
 RPC_URL=""
 PASSPHRASE=""
 OUT_DIR="${OUT_DIR:-$ROOT_DIR/docs/deployment-artifacts}"
+MAINNET_GATE_FILE="${MAINNET_GATE_FILE:-}"
+TESTNET_MANIFEST="${TESTNET_MANIFEST:-}"
+AUDIT_REPORT="${AUDIT_REPORT:-}"
 STELLAR_BIN="${STELLAR_BIN:-stellar}"
 SKIP_BUILD="${SKIP_BUILD:-0}"
 DRY_RUN="${DRY_RUN:-0}"
@@ -39,6 +44,9 @@ while [[ $# -gt 0 ]]; do
     --rpc-url)    RPC_URL="$2";   shift 2 ;;
     --passphrase) PASSPHRASE="$2"; shift 2 ;;
     --out-dir)    OUT_DIR="$2";   shift 2 ;;
+    --mainnet-gate) MAINNET_GATE_FILE="$2"; shift 2 ;;
+    --testnet-manifest) TESTNET_MANIFEST="$2"; shift 2 ;;
+    --audit-report) AUDIT_REPORT="$2"; shift 2 ;;
     --skip-build) SKIP_BUILD=1;   shift ;;
     --dry-run)    DRY_RUN=1;      shift ;;
     *) echo "unknown argument: $1" >&2; exit 1 ;;
@@ -48,7 +56,9 @@ done
 # ── Validation ──────────────────────────────────────────────────────────────
 
 need(){ command -v "$1" >/dev/null 2>&1 || { echo "missing required command: $1" >&2; exit 1; }; }
-need python3 need sha256sum need "$STELLAR_BIN"
+need python3
+need sha256sum
+need "$STELLAR_BIN"
 
 if [[ -z "$NETWORK" ]]; then echo "error: --network is required" >&2; exit 1; fi
 if [[ -z "$SOURCE" ]]; then echo "error: --source is required" >&2; exit 1; fi
@@ -82,6 +92,21 @@ fi
 
 WASM_SHA="$(sha256sum "$WASM_PATH" | awk '{print $1}')"
 echo "WASM SHA-256: 0x${WASM_SHA}"
+
+if [[ "$NETWORK" == "mainnet" && "$DRY_RUN" != "1" ]]; then
+  need node
+  for gate_input in "$MAINNET_GATE_FILE" "$TESTNET_MANIFEST" "$AUDIT_REPORT"; do
+    if [[ -z "$gate_input" || ! -f "$gate_input" ]]; then
+      echo "error: mainnet deployment requires --mainnet-gate, --testnet-manifest, and --audit-report files" >&2
+      exit 1
+    fi
+  done
+  node "$ROOT_DIR/../../scripts/verify-mainnet-deployment-gate.js" \
+    --gate "$MAINNET_GATE_FILE" \
+    --testnet-manifest "$TESTNET_MANIFEST" \
+    --audit-report "$AUDIT_REPORT" \
+    --wasm "$WASM_PATH"
+fi
 
 if [[ "$DRY_RUN" == "1" ]]; then
   # Generate a dry-run manifest with placeholder values
@@ -178,10 +203,11 @@ HEALTH=$($STELLAR_BIN contract invoke \
 echo "Health: $HEALTH"
 
 echo "==> Fetching current ledger sequence"
-LEDGER_SEQUENCE=$($STELLAR_BIN ledger current --network "$NETWORK" 2>&1 | grep -oP 'Current ledger sequence: \K\d+' || echo "")
+LEDGER_OUTPUT=$($STELLAR_BIN ledger current --network "$NETWORK" 2>&1)
+LEDGER_SEQUENCE=$(printf '%s\n' "$LEDGER_OUTPUT" | sed -n 's/.*Current ledger sequence: \([0-9][0-9]*\).*/\1/p' | tail -1)
 if [[ -z "$LEDGER_SEQUENCE" ]]; then
-  echo "warning: could not fetch ledger sequence, using 0 as fallback"
-  LEDGER_SEQUENCE=0
+  echo "error: could not determine the current ledger sequence; refusing to emit an incomplete manifest" >&2
+  exit 1
 fi
 echo "Ledger Sequence: $LEDGER_SEQUENCE"
 
@@ -189,8 +215,8 @@ echo "Ledger Sequence: $LEDGER_SEQUENCE"
 
 TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-python3 - "$DEPLOY_DIR" "$METADATA" "$CONTRACT_ID" "$WASM_SHA" "$TIMESTAMP" "$LEDGER_SEQUENCE" <<'PY'
-import json, os, sys
+python3 - "$DEPLOY_DIR" "$METADATA" "$CONTRACT_ID" "$WASM_SHA" "$TIMESTAMP" "$LEDGER_SEQUENCE" "$ADMIN" "$SOURCE" "$NETWORK" "$PASSPHRASE" "$RPC_URL" <<'PY'
+import json, sys
 from pathlib import Path
 
 deploy_dir = Path(sys.argv[1])
@@ -199,11 +225,7 @@ contract_id = sys.argv[3]
 wasm_sha = sys.argv[4]
 timestamp = sys.argv[5]
 ledger_sequence = sys.argv[6]
-admin = os.environ.get('ADMIN', '')
-source = os.environ.get('SOURCE', '')
-network = os.environ.get('NETWORK', '')
-passphrase = os.environ.get('PASSPHRASE', '')
-rpc_url = os.environ.get('RPC_URL', '')
+admin, source, network, passphrase, rpc_url = sys.argv[7:12]
 
 # Parse on-chain metadata (Soroban CLI returns JSON with string-encoded values)
 try:

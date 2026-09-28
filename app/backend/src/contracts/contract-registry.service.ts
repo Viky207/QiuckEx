@@ -1,11 +1,14 @@
 import {
   BadRequestException,
+  ConflictException,
+  ForbiddenException,
   forwardRef,
   Inject,
   Injectable,
   Logger,
   NotFoundException,
 } from '@nestjs/common';
+import { createHash, verify } from 'crypto';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 
 import { AuditService } from '../audit/audit.service';
@@ -52,6 +55,19 @@ interface RegistryRecord {
   updatedAt: string;
   networkPassphrase: string;
   active: boolean;
+}
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalJson).join(',')}]`;
+  }
+  if (value !== null && typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, entry]) => entry !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right));
+    return `{${entries.map(([key, entry]) => `${JSON.stringify(key)}:${canonicalJson(entry)}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
 }
 
 @Injectable()
@@ -145,6 +161,9 @@ export class ContractRegistryService {
     dto: UpsertContractDeploymentDto,
     actor = 'deployment_automation',
   ) {
+    if (this.configService.network === 'mainnet') {
+      throw new ForbiddenException('Manual registry upserts are disabled on mainnet; use a signed deployment publication');
+    }
     if (dto.network !== this.configService.network) {
       throw new BadRequestException(
         `network must match active backend network (${this.configService.network})`,
@@ -236,10 +255,27 @@ export class ContractRegistryService {
     dto: PublishContractRegistryDto,
     actor = 'deployment_automation',
   ) {
+    this.verifyManifestSignature(dto);
     this.validatePassphrase(dto.networkPassphrase);
     this.validateContractSet(dto.contracts);
 
     const current = await this.readRecords();
+    const priorDeployment = current.filter((record) => record.deploymentId === dto.deploymentId);
+    if (priorDeployment.length > 0) {
+      const replayMatchesCurrent = priorDeployment.length === dto.contracts.length &&
+        priorDeployment.every((record) => record.active && dto.contracts.some((contract) =>
+          contract.name.toLowerCase() === record.name &&
+          contract.contractId === record.contractId &&
+          contract.wasmHash === record.wasmHash &&
+          (contract.contractVersion ?? 1) === record.contractVersion &&
+          (contract.schemaVersion ?? '1.0.0') === record.schemaVersion &&
+          canonicalJson(contract.schemaCompatibility ?? { min: '1.0.0', max: '1.0.0' }) === canonicalJson(record.schemaCompatibility) &&
+          canonicalJson(contract.initParams ?? {}) === canonicalJson(record.initParams ?? {}) &&
+          canonicalJson(contract.metadata ?? {}) === canonicalJson(record.metadata ?? {}) &&
+          dto.networkPassphrase === record.networkPassphrase));
+      if (replayMatchesCurrent) return this.getRegistry();
+      throw new ConflictException('Deployment ID has already been used for a different registry publication');
+    }
     let nextVersion = current.reduce(
       (max, record) => Math.max(max, record.version),
       this.fallbackVersion,
@@ -266,6 +302,9 @@ export class ContractRegistryService {
       dto.deploymentId,
       {
         actor,
+        manifestSignerKeyId: dto.manifestKeyId,
+        manifestTimestamp: dto.manifestTimestamp,
+        manifestSignatureSha256: createHash('sha256').update(dto.manifestSignature).digest('hex'),
         version: nextVersion,
         contracts: published.map((record) => ({
           name: record.name,
@@ -318,6 +357,33 @@ export class ContractRegistryService {
     }
 
     return this.getRegistry();
+  }
+
+  private verifyManifestSignature(dto: PublishContractRegistryDto): void {
+    const timestamp = Date.parse(dto.manifestTimestamp);
+    const age = Date.now() - timestamp;
+    if (!Number.isFinite(timestamp) || age > 5 * 60 * 1000 || age < -60 * 1000) {
+      throw new ForbiddenException('Deployment manifest signature is expired or not yet valid');
+    }
+    const publicKeys = this.configService.contractRegistryManifestPublicKeys;
+    const publicKey = publicKeys[dto.manifestKeyId];
+    if (!publicKey) {
+      throw new ForbiddenException('Deployment manifest signing key is not trusted');
+    }
+
+    const { manifestKeyId, manifestSignature, ...payload } = dto;
+    try {
+      const signature = Buffer.from(manifestSignature, 'base64');
+      const valid = signature.length === 64 && verify(
+        null,
+        Buffer.from(canonicalJson(payload)),
+        publicKey,
+        signature,
+      );
+      if (!valid) throw new Error('invalid signature');
+    } catch {
+      throw new ForbiddenException('Deployment manifest signature is invalid');
+    }
   }
 
   async finalizeDualRead(

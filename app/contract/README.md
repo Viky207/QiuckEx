@@ -99,12 +99,17 @@ soroban contract invoke \
 
 ### Mainnet Deployment
 
+Mainnet deployments must use the reviewed gate-enabled deploy script. See [the mainnet deployment gate](documentation/mainnet-deployment-gate.md) for required evidence and trusted reviewer keys.
+
 ```bash
-# Deploy to mainnet (use with caution!)
-soroban contract deploy \
-  --wasm target/wasm32-unknown-unknown/release/quickex.wasm \
-  --source main \
-  --network mainnet
+./scripts/deploy.sh \
+  --network mainnet \
+  --source quickex-mainnet \
+  --admin "$QUICKEX_MAINNET_ADMIN" \
+  --wasm target/wasm32v1-none/release/quickex.wasm \
+  --mainnet-gate /secure/release/mainnet-gate.json \
+  --testnet-manifest /secure/release/testnet-deployment-manifest.json \
+  --audit-report /secure/release/security-audit.pdf
 ```
 
 ## Contract Spec Export

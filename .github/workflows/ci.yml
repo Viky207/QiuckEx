@@ -47,6 +47,12 @@ jobs:
       - name: Install Dependencies
         run: pnpm install --no-frozen-lockfile
 
+      - name: Verify contract metadata and deployment gates
+        if: matrix.package == '@quickex/backend'
+        run: |
+          pnpm check:contract-metadata-drift
+          node --test scripts/check-contract-metadata-drift.test.js scripts/verify-mainnet-deployment-gate.test.js
+
       # Affected-package execution with Turbo caching
       - name: Run CI tasks for ${{ matrix.package }}
         run: |

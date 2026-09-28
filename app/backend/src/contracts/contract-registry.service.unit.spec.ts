@@ -1,4 +1,5 @@
 import { BadRequestException, NotFoundException } from "@nestjs/common";
+import { generateKeyPairSync, sign } from "crypto";
 import { EventEmitter2 } from "@nestjs/event-emitter";
 import { SupabaseService } from "../supabase/supabase.service";
 import { AppConfigService } from "../config";
@@ -7,6 +8,30 @@ import { ContractRegistryService } from "./contract-registry.service";
 import { ContractChangeWebhookService } from "./contract-change-webhook.service";
 import { ContractChangeWebhookDispatcher } from "./contract-change-webhook.dispatcher";
 import { ContractSpecService } from "./contract-spec.service";
+
+const signingKeyPair = generateKeyPairSync('ed25519');
+const publicKeyPem = signingKeyPair.publicKey.export({ type: 'spki', format: 'pem' }).toString();
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (value !== null && typeof value === 'object') {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .filter(([, entry]) => entry !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => `${JSON.stringify(key)}:${canonicalJson(entry)}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function signPublish<T extends Record<string, unknown>>(payload: T) {
+  const signedPayload = { manifestTimestamp: new Date().toISOString(), ...payload };
+  return {
+    ...signedPayload,
+    manifestKeyId: 'unit-test',
+    manifestSignature: sign(null, Buffer.from(canonicalJson(signedPayload)), signingKeyPair.privateKey).toString('base64'),
+  };
+}
 
 describe("ContractRegistryService", () => {
   let service: ContractRegistryService;
@@ -43,6 +68,7 @@ describe("ContractRegistryService", () => {
 
     mockAppConfigService = {
       network: "testnet",
+      contractRegistryManifestPublicKeys: { 'unit-test': publicKeyPem },
     };
 
     mockEventEmitter = {
@@ -76,7 +102,7 @@ describe("ContractRegistryService", () => {
   });
 
   it("publishes and returns the active registry", async () => {
-    const result = await service.publish({
+    const result = await service.publish(signPublish({
       networkPassphrase: "Test SDF Network ; September 2015",
       deploymentId: "deploy-1",
       contracts: [
@@ -87,7 +113,7 @@ describe("ContractRegistryService", () => {
           contractVersion: 1,
         },
       ],
-    });
+    }));
 
     expect(result.data.quickex).toEqual(
       expect.objectContaining({ id: "C123", wasmHash: "abc123", version: 1 }),
@@ -101,10 +127,43 @@ describe("ContractRegistryService", () => {
     );
   });
 
+  it("rejects unsigned and tampered deployment manifests", async () => {
+    const payload = {
+      networkPassphrase: "Test SDF Network ; September 2015",
+      deploymentId: "deploy-signature-test",
+      contracts: [{ name: "quickex", contractId: "C123", wasmHash: "abc123" }],
+    };
+
+    await expect(service.publish(payload as never)).rejects.toThrow();
+
+    const signed = signPublish(payload);
+    signed.contracts[0].contractId = 'C456';
+    await expect(service.publish(signed as never)).rejects.toThrow();
+  });
+
+  it("makes exact signed publication retries idempotent and rejects changed replay payloads", async () => {
+    const payload = {
+      networkPassphrase: "Test SDF Network ; September 2015",
+      deploymentId: "deploy-idempotent",
+      contracts: [{ name: "quickex", contractId: "C123", wasmHash: "abc123", metadata: { source: "deploy" } }],
+    };
+    const signed = signPublish(payload);
+    const first = await service.publish(signed as never);
+    const replay = await service.publish(signed as never);
+    expect(replay.version).toBe(first.version);
+
+    const changed = signPublish({
+      ...payload,
+      contracts: [{ ...payload.contracts[0], metadata: { source: "manual" } }],
+    });
+    await expect(service.publish(changed as never)).rejects.toThrow('Deployment ID has already been used');
+  });
+
   it("rejects a mismatched passphrase", async () => {
     await expect(
-      service.publish({
+      service.publish(signPublish({
         networkPassphrase: "Public Global Stellar Network ; September 2015",
+        deploymentId: "deploy-wrong-network",
         contracts: [
           {
             name: "quickex",
@@ -112,12 +171,12 @@ describe("ContractRegistryService", () => {
             wasmHash: "abc123",
           },
         ],
-      }),
+      })),
     ).rejects.toThrow(BadRequestException);
   });
 
   it("rolls back to a previous contract version", async () => {
-    await service.publish({
+    await service.publish(signPublish({
       networkPassphrase: "Test SDF Network ; September 2015",
       deploymentId: "deploy-1",
       contracts: [
@@ -128,9 +187,9 @@ describe("ContractRegistryService", () => {
           contractVersion: 1,
         },
       ],
-    });
+    }));
 
-    await service.publish({
+    await service.publish(signPublish({
       networkPassphrase: "Test SDF Network ; September 2015",
       deploymentId: "deploy-2",
       contracts: [
@@ -141,7 +200,7 @@ describe("ContractRegistryService", () => {
           contractVersion: 2,
         },
       ],
-    });
+    }));
 
     const result = await service.rollback({ name: "quickex", version: 1 });
     expect(result.data.quickex).toEqual(
@@ -209,6 +268,19 @@ describe("ContractRegistryService", () => {
         schemaCompatibility: { min: "1.0.0", max: "1.0.0" },
       }),
     ).rejects.toThrow(BadRequestException);
+  });
+
+  it("disables unsigned manual registry upserts on mainnet", async () => {
+    mockAppConfigService.network = "mainnet";
+    await expect(service.upsertDeployment({
+      name: "quickex",
+      network: "mainnet",
+      networkPassphrase: "Public Global Stellar Network ; September 2015",
+      contractId: "C111",
+      wasmHash: "0x111",
+      schemaVersion: "1.0.0",
+      schemaCompatibility: { min: "1.0.0", max: "1.0.0" },
+    })).rejects.toThrow('Manual registry upserts are disabled on mainnet');
   });
 
   describe("Dual-read finalization", () => {

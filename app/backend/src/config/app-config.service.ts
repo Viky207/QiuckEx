@@ -56,6 +56,12 @@ export class AppConfigService {
     return this.configService.get("NETWORK", { infer: true });
   }
 
+  get contractRegistryManifestPublicKeys(): Record<string, string> {
+    const raw = this.configService.get("CONTRACT_REGISTRY_MANIFEST_PUBLIC_KEYS", { infer: true });
+    if (!raw) return {};
+    return JSON.parse(raw) as Record<string, string>;
+  }
+
   /**
    * Get the Supabase URL
    */

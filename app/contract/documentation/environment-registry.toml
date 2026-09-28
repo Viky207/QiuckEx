@@ -17,6 +17,8 @@ mainnet_gated = false
 name = "quickex"
 contract_id = "CCM5LR3XVTSDDNVEK7U4QQUN663TU4LZGDTMP3H4QIPIZO2WJOAJS2JH"
 wasm_hash = "0x57025c36c2dca81767dfbe03e78e7abc383e138ef9fe44b61f327e2cac83ed92"
+contract_version = 1
+event_schema_version = 2
 admin_addresses = ["GA5TBSBGERHVMEFBJGEM3KYMRLWO73Y2QRAV6P66GPEBOJ5ZMJUT7LLY"]
 init_params = { admin = "GA5TBSBGERHVMEFBJGEM3KYMRLWO73Y2QRAV6P66GPEBOJ5ZMJUT7LLY" }
 deployed_at = "2026-06-02T11:54:30Z"

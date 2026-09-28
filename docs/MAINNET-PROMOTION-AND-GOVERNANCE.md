@@ -135,6 +135,8 @@ In the event of an exploit, smart contract defect, or critical chain reorg, Quic
 
 ## 4. Mainnet Deployment Runbook
 
+The deployment tools enforce the [signed mainnet deployment gate](../app/contract/documentation/mainnet-deployment-gate.md) before sending mainnet transactions. The gate binds reviewer approvals to the release commit, reproducible WASM hash, testnet manifest, audit report, burn-in, invariant-suite result, and observability evidence. A security reviewer and a governance reviewer must sign with distinct trusted Ed25519 keys.
+
 ### Pre-Deployment Phase (T - 24h)
 1. Verify all 5 Promotion Gateways have documented sign-offs.
 2. Confirm `.secrets.baseline` and secret scanning CI checks pass without violations.

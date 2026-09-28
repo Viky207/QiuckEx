@@ -44,6 +44,29 @@ export const envSchema = Joi.object({
     .required()
     .description("Stellar network to connect to (testnet or mainnet)"),
 
+  CONTRACT_REGISTRY_MANIFEST_PUBLIC_KEYS: Joi.string()
+    .empty("")
+    .optional()
+    .custom((value, helpers) => {
+      let keys: unknown;
+      try {
+        keys = JSON.parse(value);
+      } catch {
+        return helpers.error('any.invalid');
+      }
+      if (!keys || typeof keys !== 'object' || Array.isArray(keys) || Object.keys(keys).length === 0) {
+        return helpers.error('any.invalid');
+      }
+      const validEntries = Object.entries(keys).every(([keyId, publicKey]) =>
+        /^[a-zA-Z0-9._-]{1,64}$/.test(keyId) &&
+        typeof publicKey === 'string' &&
+        publicKey.includes('-----BEGIN PUBLIC KEY-----') &&
+        publicKey.includes('-----END PUBLIC KEY-----'));
+      if (!validEntries) return helpers.error('any.invalid');
+      return value;
+    })
+    .description("JSON object mapping trusted deployment manifest key IDs to Ed25519 public-key PEMs"),
+
   STELLAR_NETWORK: Joi.string()
     .valid("testnet", "mainnet")
     .optional()

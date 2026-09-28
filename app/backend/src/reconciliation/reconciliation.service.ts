@@ -439,6 +439,50 @@ export class ReconciliationService {
     return BigInt(`${sign}${digits}`);
   }
 
+  private async observePaymentOnLedger(payment: PaymentRecord): Promise<
+    | { kind: 'observed'; asset: string; amount: string }
+    | { kind: 'missing' }
+    | { kind: 'unresolved' }
+  > {
+    try {
+      const tx = await this.server.transactions().transaction(payment.stellar_tx_hash).call();
+      if (!tx.successful) return { kind: 'missing' };
+
+      const response = await this.server
+        .operations()
+        .forTransaction(payment.stellar_tx_hash)
+        .limit(200)
+        .call();
+      const records = (response as { records?: Array<Record<string, unknown>> }).records ?? [];
+      const expectedAsset = payment.asset.trim();
+      const matches = records.flatMap((operation) => {
+        const type = String(operation.type ?? '');
+        if (!['payment', 'path_payment_strict_send', 'path_payment_strict_receive'].includes(type)) return [];
+        if (operation.from !== payment.from_address || operation.to !== payment.to_address) return [];
+
+        const isPathPayment = type.startsWith('path_payment_');
+        const assetType = String(operation[isPathPayment ? 'destination_asset_type' : 'asset_type'] ?? '');
+        const assetCode = String(operation[isPathPayment ? 'destination_asset_code' : 'asset_code'] ?? '');
+        const assetIssuer = String(operation[isPathPayment ? 'destination_asset_issuer' : 'asset_issuer'] ?? '');
+        const observedAsset = assetType === 'native' ? 'XLM' : `${assetCode}:${assetIssuer}`;
+        const assetMatches = expectedAsset === 'XLM'
+          ? assetType === 'native'
+          : observedAsset === expectedAsset;
+        const amount = operation[isPathPayment ? 'destination_amount' : 'amount'];
+        if (!assetMatches || typeof amount !== 'string') return [];
+        return [{ asset: observedAsset, amount }];
+      });
+
+      if (matches.length !== 1) return { kind: 'unresolved' };
+      return { kind: 'observed', ...matches[0] };
+    } catch (error) {
+      const status = (error as { response?: { status?: number } })?.response?.status;
+      if (status === 404) return { kind: 'missing' };
+      this.metrics.recordError('horizon', error instanceof Error ? error.constructor.name : 'UnknownError');
+      return { kind: 'unresolved' };
+    }
+  }
+
   private buildMetrics(report: ReconciliationReport, divergenceCount: number): ReconciliationMetrics {
     const processedTotal = (report.escrows.processed ?? 0) + (report.payments.processed ?? 0);
     const totalReviewed = Math.max(0, processedTotal - divergenceCount);
@@ -609,47 +653,72 @@ export class ReconciliationService {
     try {
       const dbPayments = await this.supabase.fetchPaidPayments();
       const expectedCount = dbPayments.length;
-      const expectedTotalAmount = dbPayments.reduce(
-        (sum, p) => sum + this.normalizeAmountToBaseUnits(p.amount),
-        0n,
-      ).toString();
+      const observations: Array<Awaited<ReturnType<ReconciliationService['observePaymentOnLedger']>>> = [];
+      for (let offset = 0; offset < dbPayments.length; offset += 20) {
+        observations.push(...await Promise.all(
+          dbPayments.slice(offset, offset + 20).map((payment) => this.observePaymentOnLedger(payment)),
+        ));
+      }
 
-      const observedRecords = await Promise.all(
-        dbPayments.map(async (payment) => {
-          try {
-            const tx = await this.server.transactions().transaction(payment.stellar_tx_hash).call();
-            if (!tx.successful) {
-              return null;
-            }
-            return {
-              txHash: payment.stellar_tx_hash,
-              amount: payment.amount,
-            };
-          } catch (error) {
-            const status = (error as { response?: { status?: number } })?.response?.status;
-            if (status === 404) {
-              return null;
-            }
-            throw error;
-          }
-        }),
-      );
+      const assetTotals = new Map<string, {
+        expectedCount: number;
+        observedCount: number;
+        expectedTotal: bigint;
+        observedTotal: bigint;
+      }>();
+      let observedCount = 0;
+      let unresolvedCount = 0;
+      let countDiscrepancy = 0;
+      let amountMismatchCount = 0;
+      let expectedTotal = 0n;
+      let observedTotal = 0n;
 
-      const observedPayments = observedRecords.filter((entry): entry is { txHash: string; amount: string } => entry !== null);
-      const observedCount = observedPayments.length;
-      const observedTotalAmount = observedPayments.reduce(
-        (sum, payment) => sum + this.normalizeAmountToBaseUnits(payment.amount),
-        0n,
-      ).toString();
+      for (let index = 0; index < dbPayments.length; index += 1) {
+        const payment = dbPayments[index];
+        const observation = observations[index];
+        const expectedAmount = this.normalizeAmountToBaseUnits(payment.amount);
+        expectedTotal += expectedAmount;
+        const assetName = payment.asset;
+        const totals = assetTotals.get(assetName) ?? {
+          expectedCount: 0,
+          observedCount: 0,
+          expectedTotal: 0n,
+          observedTotal: 0n,
+        };
+        totals.expectedCount += 1;
+        totals.expectedTotal += expectedAmount;
 
-      const countDiscrepancy = Math.abs(expectedCount - observedCount);
-      const amountDiscrepancy = (
-        BigInt(expectedTotalAmount) - BigInt(observedTotalAmount)
-      ).toString();
-      const exceedsThreshold = countDiscrepancy > 0 || amountDiscrepancy !== '0';
+        if (observation.kind === 'observed') {
+          const observedAmount = this.normalizeAmountToBaseUnits(observation.amount);
+          observedCount += 1;
+          observedTotal += observedAmount;
+          totals.observedCount += 1;
+          totals.observedTotal += observedAmount;
+          if (observedAmount !== expectedAmount) amountMismatchCount += 1;
+        } else if (observation.kind === 'missing') {
+          countDiscrepancy += 1;
+        } else {
+          unresolvedCount += 1;
+        }
+        assetTotals.set(assetName, totals);
+      }
+
+      const assets = Object.fromEntries([...assetTotals.entries()].map(([asset, totals]) => {
+        const amountDiscrepancy = totals.expectedTotal - totals.observedTotal;
+        return [asset, {
+          expectedCount: totals.expectedCount,
+          observedCount: totals.observedCount,
+          expectedTotalAmount: totals.expectedTotal.toString(),
+          observedTotalAmount: totals.observedTotal.toString(),
+          amountDiscrepancy: amountDiscrepancy.toString(),
+        }];
+      }));
+      const amountDiscrepancy = expectedTotal - observedTotal;
+      const complete = unresolvedCount === 0;
+      const exceedsThreshold = countDiscrepancy > 0 || amountMismatchCount > 0;
 
       this.logger.log(
-        `[${runId}] Payment totals comparison: expected=${expectedCount}/${expectedTotalAmount}, observed=${observedCount}/${observedTotalAmount}, exceedsThreshold=${exceedsThreshold}`,
+        `[${runId}] Payment totals comparison: expected=${expectedCount}/${expectedTotal}, observed=${observedCount}/${observedTotal}, unresolved=${unresolvedCount}, exceedsThreshold=${exceedsThreshold}`,
       );
 
       return {
@@ -657,10 +726,14 @@ export class ReconciliationService {
           expectedCount,
           observedCount,
           countDiscrepancy,
-          expectedTotalAmount,
-          observedTotalAmount,
-          amountDiscrepancy,
+          expectedTotalAmount: expectedTotal.toString(),
+          observedTotalAmount: observedTotal.toString(),
+          amountDiscrepancy: amountDiscrepancy.toString(),
+          amountMismatchCount,
+          unresolvedCount,
+          complete,
           exceedsThreshold,
+          assets,
         },
       };
     } catch (error) {
@@ -675,21 +748,22 @@ export class ReconciliationService {
    * Generate alert if discrepancies exceed configured threshold.
    */
   private generateDiscrepancyAlert(report: ReconciliationReport): { severity: 'critical' | 'warning'; message: string; details: string } | undefined {
-    if (!report.totalsComparison?.payments.exceedsThreshold) {
+    const paymentTotals = report.totalsComparison?.payments;
+    if (!paymentTotals || (!paymentTotals.exceedsThreshold && paymentTotals.complete)) {
       return undefined;
     }
 
-    const { payments } = report.totalsComparison;
-    const { countDiscrepancy, amountDiscrepancy } = payments;
+    const { countDiscrepancy, amountDiscrepancy, amountMismatchCount, unresolvedCount, complete } = paymentTotals;
 
-    // Critical if amount discrepancy or high count discrepancy
-    const isCritical = amountDiscrepancy !== '0' || countDiscrepancy > 10;
+    const isCritical = amountMismatchCount > 0 || (complete && countDiscrepancy > 10);
 
     const message = isCritical
       ? 'Critical payment discrepancy detected'
-      : 'Payment discrepancy detected';
+      : !complete
+        ? 'Payment totals comparison incomplete'
+        : 'Payment discrepancy detected';
 
-    const details = `Count discrepancy: ${countDiscrepancy}, Amount discrepancy: ${amountDiscrepancy}`;
+    const details = `Count discrepancy: ${countDiscrepancy}, amount discrepancy: ${amountDiscrepancy}, amount mismatches: ${amountMismatchCount}, unresolved: ${unresolvedCount}`;
 
     this.logger.error(
       `[${report.runId}] ${message}: ${details}`,

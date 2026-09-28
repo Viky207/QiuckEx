@@ -45,6 +45,7 @@ export interface EscrowRecord {
   contract_address: string;  // Stellar account ID acting as escrow
   status: EscrowDbStatus;
   amount: string;
+  /** Stellar asset identity: XLM or an issued asset as CODE:ISSUER. */
   asset: string;
   from_address: string;
   to_address: string;
@@ -167,7 +168,17 @@ export interface ReconciliationReport {
       expectedTotalAmount: string;
       observedTotalAmount: string;
       amountDiscrepancy: string;
+      amountMismatchCount: number;
+      unresolvedCount: number;
+      complete: boolean;
       exceedsThreshold: boolean;
+      assets: Record<string, {
+        expectedCount: number;
+        observedCount: number;
+        expectedTotalAmount: string;
+        observedTotalAmount: string;
+        amountDiscrepancy: string;
+      }>;
     };
   };
   /** Alert if discrepancies exceed configured threshold */

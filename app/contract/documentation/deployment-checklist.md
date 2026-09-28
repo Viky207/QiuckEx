@@ -71,6 +71,11 @@ For the smoke test, invoke one known event-emitting action on testnet, then conf
 
 Mainnet deployment is only allowed after the exact testnet command sequence above has been completed and recorded.
 
+- [ ] Complete and obtain security plus governance signatures for the [formally reviewed mainnet gate](mainnet-deployment-gate.md).
+- [ ] Verify the gate references the exact release commit, WASM artifact, testnet manifest, audit report, and all five promotion evidence areas.
+- [ ] Run `node scripts/check-contract-metadata-drift.js` and resolve all reported network metadata drift.
+- [ ] Publish the registry only with an Ed25519-signed deployment manifest using a trusted registry signing key.
+
 1. Reuse the same release WASM artifact that passed testnet validation.
 2. Reuse the same operator checklist and deployment order.
 3. Replace the network and source key with the mainnet equivalents.
@@ -78,13 +83,17 @@ Mainnet deployment is only allowed after the exact testnet command sequence abov
 5. Re-run the event emission smoke test and confirm the schema is unchanged.
 6. Confirm the registry entry has been approved by the governance owner.
 
-Suggested command shape:
+Use the gate-enabled deploy script; do not deploy to mainnet with a raw Stellar CLI command:
 
 ```bash
-stellar contract deploy \
+./scripts/deploy.sh \
+  --network mainnet \
+  --source quickex-mainnet \
+  --admin "$QUICKEX_MAINNET_ADMIN" \
   --wasm target/wasm32v1-none/release/quickex.wasm \
-  --source main \
-  --network mainnet
+  --mainnet-gate /secure/release/mainnet-gate.json \
+  --testnet-manifest /secure/release/testnet-deployment-manifest.json \
+  --audit-report /secure/release/security-audit.pdf
 ```
 
 ## 5. What reviewers should confirm

@@ -23,6 +23,7 @@ The goals are:
 - Gated target.
 - Requires completed testnet validation, governance sign-off, and registry review.
 - Mainnet deploys should reuse the exact artifact and process that succeeded on testnet.
+- Deploy only through the gate-enabled [`scripts/deploy.sh`](../scripts/deploy.sh) path; direct mainnet CLI deploys do not verify the required evidence.
 
 ## 2. Standard Soroban CLI setup
 

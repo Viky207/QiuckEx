@@ -18,25 +18,19 @@ mainnet_gated = false
 name = "quickex"
 contract_id = "CXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
 wasm_hash = "0x0000000000000000000000000000000000000000000000000000000000000000"
+contract_version = 1
+event_schema_version = 2
 admin_addresses = ["GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"]
 init_params = { admin = "GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX", paused = false }
 deployed_at = "2026-06-02T00:00:00Z"
 deployed_by = "quickex-testnet"
 notes = "Initial testnet deploy; replace placeholder values after deployment."
 
+# Keep contracts empty until the formally reviewed mainnet gate is approved.
 [environments.mainnet]
 network = "mainnet"
 rpc_url = "https://mainnet.stellar.org"
 network_passphrase = "Public Global Stellar Network ; September 2015"
 identity = "quickex-mainnet"
 mainnet_gated = true
-
-[[environments.mainnet.contracts]]
-name = "quickex"
-contract_id = "CXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
-wasm_hash = "0x0000000000000000000000000000000000000000000000000000000000000000"
-admin_addresses = ["GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"]
-init_params = { admin = "GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX", paused = false }
-deployed_at = "2026-06-02T00:00:00Z"
-deployed_by = "quickex-mainnet"
-notes = "Mainnet record should remain empty until governance approves release."
+# Add mainnet contract records only after the deployment gate is approved.

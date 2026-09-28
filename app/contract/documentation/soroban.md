@@ -162,15 +162,19 @@ Recommended post-deploy validation:
 ### 3) Mainnet deployment
 
 Mainnet deployment must repeat the validated testnet flow with the mainnet source key and network.
-Mainnet promotion also requires the registry entry to be reviewed and approved.
+Mainnet promotion also requires the registry entry to be reviewed and approved. Use the gate-enabled deploy script; a raw mainnet CLI deploy bypasses required evidence verification and is not an approved deployment path.
 
 ```bash
 cd app/contract
 
-stellar contract deploy \
+./scripts/deploy.sh \
+  --network mainnet \
+  --source quickex-mainnet \
+  --admin "$QUICKEX_MAINNET_ADMIN" \
   --wasm target/wasm32v1-none/release/quickex.wasm \
-  --source main \
-  --network mainnet
+  --mainnet-gate /secure/release/mainnet-gate.json \
+  --testnet-manifest /secure/release/testnet-deployment-manifest.json \
+  --audit-report /secure/release/security-audit.pdf
 ```
 
 > Caution: Mainnet deployment is irreversible and should only be done after review and testnet validation.
