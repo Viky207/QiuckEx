@@ -90,16 +90,21 @@ describe('TransactionsService', () => {
       getNetworkPassphrase: jest.fn().mockResolvedValue('Test SDF Network ; September 2015'),
       getAccount: jest.fn().mockResolvedValue({ accountId: 'G123', sequence: '1' }),
       simulateTransaction: jest.fn().mockResolvedValue({
+        // Mirrors the shape `rpc.parseRawSimulation` produces for
+        // @stellar/stellar-sdk v17: `build()` yields a plain XDR struct whose
+        // `resources`, `instructions`, `footprint` and `writeBytes` are
+        // properties, not accessor methods. Mocking the old method-call shape
+        // is what let the compose path break unnoticed in production.
         transactionData: {
           build: () => ({
-            resources: () => ({
-              instructions: () => 123,
-              footprint: () => ({
-                readOnly: () => [1, 2],
-                readWrite: () => [3],
-              }),
-              writeBytes: () => 77,
-            }),
+            resources: {
+              instructions: 123,
+              footprint: {
+                readOnly: [1, 2],
+                readWrite: [3],
+              },
+              writeBytes: 77,
+            },
           }),
         },
         minResourceFee: '250',

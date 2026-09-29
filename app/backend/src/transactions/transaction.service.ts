@@ -173,16 +173,20 @@ export class TransactionsService {
 
     // 10. Extract resource estimates  ← REPLACE FROM HERE
     const sorobanData = simulationResult.transactionData.build();
-    const resources = sorobanData.resources();
+    // In @stellar/stellar-sdk v17 the assembled SorobanTransactionData is a
+    // plain XDR struct: `resources`, `instructions`, `footprint`, `readOnly`
+    // and `writeBytes` are *properties*, not accessor methods. Calling them
+    // throws a TypeError, which previously turned every successful compose
+    // into a 500 after the RPC had already done the expensive work.
+    const resources = sorobanData.resources;
+    const footprint = resources.footprint;
 
     const resourceEstimate: ResourceEstimate = {
-      cpuInstructions: Number(resources.instructions()),
+      cpuInstructions: Number(resources.instructions),
       memoryBytes: 0, // not exposed by Soroban RPC simulate response
-      ledgerReads:
-        resources.footprint().readOnly().length +
-        resources.footprint().readWrite().length,
-      ledgerWrites: resources.footprint().readWrite().length,
-      eventBytes: Number(resources.writeBytes() ?? 0),
+      ledgerReads: footprint.readOnly.length + footprint.readWrite.length,
+      ledgerWrites: footprint.readWrite.length,
+      eventBytes: Number(resources.writeBytes ?? 0),
       returnValueBytes: simulationResult.result?.retval
         ? simulationResult.result.retval.toXDR().length
         : 0,
@@ -218,8 +222,8 @@ export class TransactionsService {
       simulationSummary: {
         status: "success" as const,
         footprint: {
-          readOnly: resources.footprint().readOnly().length,
-          readWrite: resources.footprint().readWrite().length,
+          readOnly: footprint.readOnly.length,
+          readWrite: footprint.readWrite.length,
         },
         estimatedCost: {
           cpuInstructions: resourceEstimate.cpuInstructions,
