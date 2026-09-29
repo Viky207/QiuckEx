@@ -456,6 +456,75 @@ export class NotificationService implements OnModuleInit {
   }
 
   // ---------------------------------------------------------------------------
+  // OPERATOR REPLAY
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Force a re-send of one delivery for an operator-initiated replay.
+   *
+   * This deliberately bypasses the `isAlreadySent` idempotency guard that
+   * `sendToChannel` applies: a replay is by definition a request to re-send an
+   * event that was already attempted. The caller is responsible for the
+   * duplicate-suppression checks (status must not be `sent`), which is why
+   * this method is not reachable from any customer-facing route.
+   *
+   * The rate limiter is still applied so a replay storm cannot out-run a
+   * subscriber's endpoint.
+   */
+  async redeliverToChannel(
+    pref: NotificationPreference,
+    payload: NotificationPayload,
+  ): Promise<void> {
+    const { publicKey, channel } = pref;
+    const { eventType, eventId } = payload;
+
+    if (!this.rateLimiter.allow(publicKey, channel)) {
+      this.logger.warn(
+        `Operator replay for ${publicKey.slice(0, 8)}.../${channel} was ` +
+          `dropped by the notification rate limiter`,
+      );
+      return;
+    }
+
+    if (channel === "webhook" && this.jobQueueService) {
+      await this.enqueueWebhookJob(pref, payload);
+      return;
+    }
+
+    const provider = this.providerMap.get(channel);
+    if (!provider) {
+      this.logger.warn(
+        `No provider registered for channel "${channel}" — replay not sent`,
+      );
+      return;
+    }
+
+    try {
+      const result = await provider.send(pref, payload);
+
+      await this.logRepo.markSent(
+        publicKey,
+        channel,
+        eventType,
+        eventId,
+        result.messageId,
+        result.httpStatus,
+        result.responseBody,
+      );
+    } catch (err) {
+      // Record the failure on the delivery row so the retry scheduler and the
+      // operator can both see that the replay did not land.
+      await this.logRepo.markFailed(
+        publicKey,
+        channel,
+        eventType,
+        eventId,
+        (err as Error).message,
+      );
+    }
+  }
+
+  // ---------------------------------------------------------------------------
   // RETRY (UNCHANGED)
   // ---------------------------------------------------------------------------
 

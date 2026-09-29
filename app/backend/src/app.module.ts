@@ -66,6 +66,8 @@ import { TeamsModule } from "./teams/teams.module";
 import { ReceiptsModule } from "./receipts/receipts.module";
 import { BulkOperationsModule } from "./bulk-operations/bulk-operations.module";
 import { SessionModule } from "./session/session.module";
+import { ObservabilityModule } from "./observability/observability.module";
+import { TracingMiddleware } from "./observability/tracing/tracing.middleware";
 
 type AppImport =
 | Type<unknown>
@@ -129,6 +131,7 @@ OperationsModule,
     DashboardFeedModule,
     TeamsModule,
     SessionModule,
+ObservabilityModule,
     ];
 
     try {
@@ -184,6 +187,12 @@ configure(consumer: MiddlewareConsumer) {
   consumer
     .apply(AbuseSignalMiddleware)
     .forRoutes("payment-links", "links");
+
+  // Tracing runs after the correlation id so a log line can carry both, and
+  // before any route handler so a dependency failure is always attributable.
+  consumer
+    .apply(TracingMiddleware)
+    .forRoutes("*");
 
   consumer
     .apply(PreviewScopeMiddleware)
