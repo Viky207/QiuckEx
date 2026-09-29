@@ -36,6 +36,16 @@ export class MetricsService implements OnModuleInit {
   private escrowDisputedTotal: client.Counter<string>;
   private escrowExtendedTotal: client.Counter<string>;
   private escrowCleanedTotal: client.Counter<string>;
+  // Observability: SLO, alerting, tracing, dependency probes, operator replays
+  private sloCompliance: client.Gauge<string>;
+  private sloErrorBudgetRemaining: client.Gauge<string>;
+  private sloBurnRate: client.Gauge<string>;
+  private sloStatus: client.Gauge<string>;
+  private alertsFiring: client.Gauge<string>;
+  private dependencyProbeDuration: client.Histogram<string>;
+  private dependencyProbeUp: client.Gauge<string>;
+  private traceContexts: client.Counter<string>;
+  private operatorReplayTotal: client.Counter<string>;
   private initialized = false;
 
   onModuleInit() {
@@ -264,6 +274,74 @@ export class MetricsService implements OnModuleInit {
       this.register.registerMetric(this.escrowDisputedTotal);
       this.register.registerMetric(this.escrowExtendedTotal);
       this.register.registerMetric(this.escrowCleanedTotal);
+
+      // Observability metrics (issues #278-#281). SLO and alert series are
+      // published here rather than by the observability module so they always
+      // land in the same registry the /metrics endpoint scrapes.
+      this.sloCompliance = new client.Gauge({
+        name: "quickex_slo_compliance_ratio",
+        help: "Observed compliance ratio (0-1) per service level objective",
+        labelNames: ["slo", "path", "kind"],
+      });
+
+      this.sloErrorBudgetRemaining = new client.Gauge({
+        name: "quickex_slo_error_budget_remaining_ratio",
+        help: "Remaining error budget ratio (0-1); negative means over budget",
+        labelNames: ["slo", "path"],
+      });
+
+      this.sloBurnRate = new client.Gauge({
+        name: "quickex_slo_error_budget_burn_rate",
+        help: "Error budget burn rate as a multiple of the 30-day budget",
+        labelNames: ["slo", "path"],
+      });
+
+      this.sloStatus = new client.Gauge({
+        help: "Current SLO status (0=ok, 1=insufficient_data, 2=warning, 3=critical)",
+        name: "quickex_slo_status",
+        labelNames: ["slo", "path", "enforced"],
+      });
+
+      this.alertsFiring = new client.Gauge({
+        name: "quickex_alerts_firing",
+        help: "1 when an alert is firing, 0 otherwise",
+        labelNames: ["alert", "severity"],
+      });
+
+      this.dependencyProbeDuration = new client.Histogram({
+        name: "quickex_dependency_probe_duration_seconds",
+        help: "Duration of dependency readiness probes in seconds",
+        labelNames: ["dependency", "criticality", "status"],
+        buckets: [0.05, 0.1, 0.25, 0.5, 1, 2, 5],
+      });
+
+      this.dependencyProbeUp = new client.Gauge({
+        name: "quickex_dependency_probe_up",
+        help: "Last result of a dependency readiness probe (1=healthy, 0=not)",
+        labelNames: ["dependency", "criticality"],
+      });
+
+      this.traceContexts = new client.Counter({
+        name: "quickex_trace_context_total",
+        help: "Trace contexts established per request",
+        labelNames: ["outcome"],
+      });
+
+      this.operatorReplayTotal = new client.Counter({
+        name: "quickex_operator_replay_total",
+        help: "Operator-initiated notification and webhook replays",
+        labelNames: ["target", "outcome"],
+      });
+
+      this.register.registerMetric(this.sloCompliance);
+      this.register.registerMetric(this.sloErrorBudgetRemaining);
+      this.register.registerMetric(this.sloBurnRate);
+      this.register.registerMetric(this.sloStatus);
+      this.register.registerMetric(this.alertsFiring);
+      this.register.registerMetric(this.dependencyProbeDuration);
+      this.register.registerMetric(this.dependencyProbeUp);
+      this.register.registerMetric(this.traceContexts);
+      this.register.registerMetric(this.operatorReplayTotal);
 
       this.initialized = true;
     } catch (error) {
@@ -579,4 +657,104 @@ export class MetricsService implements OnModuleInit {
       this.escrowCleanedTotal.labels(status).inc();
     } catch (error) {}
   }
+
+  // ── Observability recorders (issues #278-#281) ─────────────────────────────
+  // Every recorder is a silent no-op when the registry is not initialized and
+  // swallows its own errors, matching the behaviour of the existing
+  // recorders: a metrics failure must never become an API failure.
+
+  /**
+   * Publish the evaluated SLO report. `null` ratios are published as NaN so
+   * Prometheus distinguishes "no observation" from "0% compliant" — writing 0
+   * for an unobserved objective would page an operator for no reason.
+   */
+  recordSloEvaluation(evaluation: {
+    id: string;
+    path: string;
+    kind: string;
+    enforced: boolean;
+    observedRatio: number | null;
+    burnRate: number | null;
+    remainingBudgetRatio: number | null;
+    status: string;
+  }) {
+    if (!this.initialized) return;
+
+    const toNaN = (value: number | null) => (value === null ? NaN : value);
+
+    try {
+      this.sloCompliance
+        .labels(evaluation.id, evaluation.path, evaluation.kind)
+        .set(toNaN(evaluation.observedRatio));
+      this.sloBurnRate
+        .labels(evaluation.id, evaluation.path)
+        .set(toNaN(evaluation.burnRate));
+      this.sloErrorBudgetRemaining
+        .labels(evaluation.id, evaluation.path)
+        .set(toNaN(evaluation.remainingBudgetRatio));
+      this.sloStatus
+        .labels(
+          evaluation.id,
+          evaluation.path,
+          evaluation.enforced ? "true" : "false",
+        )
+        .set(SLO_STATUS_CODES[evaluation.status] ?? 1);
+    } catch (error) {}
+  }
+
+  /** Publish whether an alert is currently firing (1) or not (0). */
+  recordAlertState(alertId: string, severity: string, firing: boolean) {
+    if (!this.initialized || !this.alertsFiring) return;
+    try {
+      this.alertsFiring.labels(alertId, severity).set(firing ? 1 : 0);
+    } catch (error) {}
+  }
+
+  recordDependencyProbe(
+    dependency: string,
+    status: string,
+    durationMs: number,
+    criticality = "unknown",
+  ) {
+    if (!this.initialized) return;
+    try {
+      this.dependencyProbeDuration
+        .labels(dependency, criticality, status)
+        .observe(durationMs / 1000);
+      this.dependencyProbeUp
+        .labels(dependency, criticality)
+        .set(status === "healthy" ? 1 : 0);
+    } catch (error) {}
+  }
+
+  /**
+   * `outcome` is one of `started`, `continued` or `replaced_malformed`, and
+   * `hasBaggage` is a boolean, never the baggage contents, so user-controlled
+   * values can never become a label.
+   */
+  recordTraceContext(outcome: string, hasBaggage: boolean) {
+    if (!this.initialized || !this.traceContexts) return;
+    try {
+      this.traceContexts.labels(outcome).inc();
+      if (hasBaggage) {
+        this.traceContexts.labels("baggage_forwarded").inc();
+      }
+    } catch (error) {}
+  }
+
+  /** `target` is `notification` or `webhook`; `outcome` is a stable code. */
+  recordOperatorReplay(target: string, outcome: string) {
+    if (!this.initialized || !this.operatorReplayTotal) return;
+    try {
+      this.operatorReplayTotal.labels(target, outcome).inc();
+    } catch (error) {}
+  }
 }
+
+const SLO_STATUS_CODES: Record<string, number> = {
+  ok: 0,
+  insufficient_data: 1,
+  warning: 2,
+  critical: 3,
+};
+

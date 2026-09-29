@@ -140,7 +140,10 @@ describe("MetricsService", () => {
         labelNames: ["service", "error_type"],
       });
 
-      expect(mockRegistry.registerMetric).toHaveBeenCalledTimes(21);
+      // Every metric the service declares is registered exactly once. The count
+      // is asserted explicitly so a metric that is created but never registered
+      // (and therefore never exported) fails the suite.
+      expect(mockRegistry.registerMetric).toHaveBeenCalledTimes(40);
     });
 
     it("should handle initialization errors gracefully", () => {

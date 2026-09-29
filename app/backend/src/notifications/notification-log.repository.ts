@@ -136,6 +136,92 @@ export class NotificationLogRepository {
     }
   }
 
+  async getDelivery(
+    publicKey: string,
+    channel: NotificationChannel,
+    eventType: string,
+    eventId: string,
+  ): Promise<{
+    id: string;
+    channel: NotificationChannel;
+    eventType: NotificationEventType;
+    eventId: string;
+    status: string;
+    attempts: number;
+    lastError?: string;
+    httpStatus?: number;
+    responseBody?: string;
+    createdAt: string;
+    updatedAt: string;
+    deliveredAt?: string;
+  } | null> {
+    const { data, error } = await this.supabase
+      .getClient()
+      .from("notification_log")
+      .select(
+        "id, channel, event_type, event_id, status, attempts, last_error, webhook_response_status, webhook_response_body, created_at, updated_at, webhook_delivered_at",
+      )
+      .eq("public_key", publicKey)
+      .eq("channel", channel)
+      .eq("event_type", eventType)
+      .eq("event_id", eventId)
+      .maybeSingle();
+
+    if (error) {
+      this.logger.error(
+        `Failed to fetch ${channel} delivery ${eventType}/${eventId}: ${error.message}`,
+      );
+      return null;
+    }
+
+    if (!data) return null;
+
+    return {
+      id: data.id,
+      channel: data.channel as NotificationChannel,
+      eventType: data.event_type as NotificationEventType,
+      eventId: data.event_id,
+      status: data.status,
+      attempts: data.attempts,
+      lastError: data.last_error ?? undefined,
+      httpStatus: data.webhook_response_status ?? undefined,
+      responseBody: data.webhook_response_body ?? undefined,
+      createdAt: data.created_at,
+      updatedAt: data.updated_at,
+      deliveredAt: data.webhook_delivered_at ?? undefined,
+    };
+  }
+
+  /**
+   * Reset a non-webhook delivery for a safe operator replay. The row is
+   * preserved (not deleted) so the audit trail and attempt history survive.
+   */
+  async resetNotificationForManualReplay(
+    publicKey: string,
+    channel: NotificationChannel,
+    eventType: NotificationEventType,
+    eventId: string,
+  ): Promise<void> {
+    const { error } = await this.supabase
+      .getClient()
+      .from("notification_log")
+      .update({
+        status: "pending",
+        attempts: 0,
+        last_error: null,
+      })
+      .eq("public_key", publicKey)
+      .eq("channel", channel)
+      .eq("event_type", eventType)
+      .eq("event_id", eventId);
+
+    if (error) {
+      this.logger.warn(
+        `Failed to reset ${channel} delivery for manual replay: ${error.message}`,
+      );
+    }
+  }
+
   async getWebhookDelivery(
     publicKey: string,
     eventType: string,
