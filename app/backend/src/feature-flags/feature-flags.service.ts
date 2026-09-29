@@ -70,6 +70,22 @@ const DEFAULT_FLAGS: FeatureFlagRecord[] = [
     updatedAt: new Date(0).toISOString(),
     updatedBy: 'bootstrap',
   },
+  {
+    key: 'mainnet.operator_replay',
+    name: 'Mainnet Operator Replay',
+    description:
+      'Allows operators to replay failed notification and webhook deliveries on ' +
+      'mainnet. Replay re-sends a customer notification, so it is disabled by ' +
+      'default and must be enabled deliberately.',
+    enabled: false,
+    killSwitch: false,
+    rolloutPercentage: 0,
+    allowedUsers: [],
+    environments: ['production'],
+    metadata: { highRisk: true, flow: 'operator_replay', network: 'mainnet' },
+    updatedAt: new Date(0).toISOString(),
+    updatedBy: 'bootstrap',
+  },
   // ── Governance flags (issues #306, #307) ─────────────────────────────────
   // Enabled on local/test only: mainnet enforcement requires the policy review
   // sign-off recorded in docs/policies/*.json (defaultDisabledNetworks).

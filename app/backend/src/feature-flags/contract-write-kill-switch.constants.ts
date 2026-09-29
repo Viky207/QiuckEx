@@ -3,6 +3,13 @@ import { SorobanErrorCode } from '../common/soroban-errors';
 export const TESTNET_CONTRACT_WRITES_FLAG = 'testnet.contract_writes';
 export const MAINNET_DISPUTE_ACTIONS_FLAG = 'mainnet.dispute_actions';
 
+/**
+ * Gates the operator replay surface on mainnet (issue #278). Replay re-sends a
+ * customer notification, so on mainnet it must be enabled deliberately by an
+ * admin rather than being available by default.
+ */
+export const MAINNET_OPERATOR_REPLAY_FLAG = 'mainnet.operator_replay';
+
 export const CONTRACT_WRITES_DISABLED_CODE =
   SorobanErrorCode.CONTRACT_WRITES_DISABLED;
 
