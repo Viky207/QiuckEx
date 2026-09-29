@@ -172,7 +172,23 @@ describe("WebhookProvider", () => {
       const result = await provider.send(makePref(), makePayload());
 
       expect(result.responseBody?.length).toBeLessThan(longBody.length);
-      expect(result.responseBody).toMatch(/\.\.\.$/);
+      // Truncation is now done by the shared redactor, which marks the cut
+      // explicitly rather than appending a bare ellipsis.
+      expect(result.responseBody).toMatch(/\[truncated\]$/);
+    });
+
+    it("should redact secrets echoed back by the endpoint (#277)", async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        status: 200,
+        text: async () =>
+          JSON.stringify({ status: "ok", api_key: "sk-live-should-not-persist" }),
+      });
+
+      const result = await provider.send(makePref(), makePayload());
+
+      expect(result.responseBody).not.toContain("sk-live-should-not-persist");
+      expect(result.responseBody).toContain("[REDACTED]");
     });
 
     it("should handle response body read errors", async () => {

@@ -7,8 +7,17 @@ import { NotificationPreferencesRepository } from "./notification-preferences.re
 import { WebhookProvider } from "./providers/notification-provider.interface";
 import type { BaseNotificationPayload } from "./types/notification.types";
 import {
+  canAttemptDelivery,
+  computeNextRetryAt,
+  isPermanentHttpStatus,
+  isRetryDue,
+  resolveQuarantine,
+  type WebhookDeliveryRecord,
+} from "./webhook-delivery-policy";
+import {
   WEBHOOK_MAX_DELIVERY_ATTEMPTS,
   WEBHOOK_RETRY_DELAYS_MS,
+  extractHttpStatus,
 } from "./webhook-retry.constants";
 
 @Injectable()
@@ -25,6 +34,10 @@ export class WebhookRetryScheduler {
   /**
    * Runs every minute to pick up failed webhook deliveries that are due for retry.
    * After MAX_ATTEMPTS the entry moves to DLQ status (inspectable via delivery API).
+   *
+   * Ordering (issue #276): a delivery is only retried when it is the lowest
+   * unfinished sequence for its subscriber endpoint, so a subscriber never sees
+   * event N+1 before event N has either succeeded or been quarantined.
    */
   @Cron(CronExpression.EVERY_MINUTE)
   async retryFailedWebhooks(): Promise<void> {
@@ -39,21 +52,42 @@ export class WebhookRetryScheduler {
 
     this.logger.debug(`Retrying ${webhookPending.length} failed webhook(s)`);
 
-    for (const entry of webhookPending) {
-      const delayMs =
-        WEBHOOK_RETRY_DELAYS_MS[entry.attempts - 1] ??
-        WEBHOOK_RETRY_DELAYS_MS[WEBHOOK_RETRY_DELAYS_MS.length - 1];
-      const nextRetryAt = new Date(
-        new Date(entry.lastFailedAt ?? Date.now()).getTime() + delayMs,
-      );
+    // Build the per-resource view the ordering policy needs. The delivery log is
+    // keyed by (public key, channel, event), so a public key is used as the
+    // resource id here; endpoints are isolated at the preference layer.
+    const records: WebhookDeliveryRecord[] = webhookPending.map((entry) => ({
+      resourceId: entry.publicKey,
+      sequence: entry.sequence,
+      status: "failed" as const,
+      attempts: entry.attempts,
+      lastFailedAt: entry.lastFailedAt,
+    }));
 
-      if (nextRetryAt > new Date()) continue;
+    for (const entry of webhookPending) {
+      const record: WebhookDeliveryRecord = {
+        resourceId: entry.publicKey,
+        sequence: entry.sequence,
+        status: "failed",
+        attempts: entry.attempts,
+        lastFailedAt: entry.lastFailedAt,
+      };
+
+      if (!canAttemptDelivery(record, records)) {
+        this.logger.debug(
+          `Deferring retry out of order: ${entry.eventType}/${entry.eventId} ` +
+            `seq=${entry.sequence} for ${entry.publicKey.slice(0, 8)}...`,
+        );
+        continue;
+      }
+
+      if (!isRetryDue(record)) continue;
 
       await this.attemptRedelivery(
         entry.publicKey,
         entry.eventType,
         entry.eventId,
         entry.attempts,
+        entry.id,
       );
     }
   }
@@ -70,12 +104,38 @@ export class WebhookRetryScheduler {
     return this.attemptRedelivery(publicKey, eventType as never, eventId, 0);
   }
 
+  /**
+   * Attempt one redelivery of an event across every active endpoint of a wallet.
+   *
+   * Deduplication (issue #276): an event already recorded as `sent` is skipped
+   * rather than POSTed again, so a replay storm or a duplicated scheduler tick
+   * cannot produce a duplicate delivery.
+   *
+   * Quarantine: a permanent 4xx quarantines immediately without burning the
+   * remaining attempts; a transient failure quarantines once the attempt budget
+   * is spent. Quarantined entries stop being retried automatically and surface
+   * through the dead-letter endpoints.
+   */
   private async attemptRedelivery(
     publicKey: string,
     eventType: string,
     eventId: string,
     currentAttempts: number,
+    deliveryLogId?: string,
   ): Promise<boolean> {
+    const alreadyDelivered = await this.logRepo.isAlreadySent(
+      publicKey,
+      "webhook",
+      eventType as never,
+      eventId,
+    );
+    if (alreadyDelivered) {
+      this.logger.debug(
+        `Skipping duplicate redelivery: ${eventType}/${eventId} already sent`,
+      );
+      return true;
+    }
+
     const webhooks = await this.prefsRepo.getWebhooksByPublicKey(publicKey);
     const active = webhooks.filter((w) => w.enabled && w.webhookUrl);
 
@@ -115,6 +175,10 @@ export class WebhookRetryScheduler {
         anySuccess = true;
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
+        const httpStatus = extractHttpStatus(message);
+        const permanent =
+          httpStatus !== null && isPermanentHttpStatus(httpStatus);
+
         await this.logRepo.markFailed(
           publicKey,
           "webhook",
@@ -123,9 +187,28 @@ export class WebhookRetryScheduler {
           message,
         );
 
-        if (currentAttempts + 1 >= WEBHOOK_MAX_DELIVERY_ATTEMPTS) {
+        const { quarantine, reason } = resolveQuarantine(
+          {
+            resourceId: publicKey,
+            sequence: currentAttempts + 1,
+            status: "failed",
+            attempts: currentAttempts + 1,
+          },
+          { permanent },
+        );
+
+        if (quarantine && deliveryLogId) {
+          await this.logRepo.quarantine(
+            deliveryLogId,
+            reason ?? "ATTEMPTS_EXHAUSTED",
+            message,
+          );
+        }
+
+        if (quarantine) {
           this.logger.warn(
-            `Webhook DLQ: ${eventType}/${eventId} exhausted ${WEBHOOK_MAX_DELIVERY_ATTEMPTS} attempts. Last error: ${message}`,
+            `Webhook quarantined (${reason}): ${eventType}/${eventId} ` +
+              `after ${currentAttempts + 1} attempt(s). Last error: ${message}`,
           );
         } else {
           this.logger.debug(

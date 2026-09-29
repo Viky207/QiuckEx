@@ -195,6 +195,19 @@ export interface NotificationPreference {
   pushToken?: string;
   webhookUrl?: string;
   webhookSecret?: string;
+  /**
+   * Webhook API version this subscriber is pinned to (issue #275).
+   * Absent means the default version; see `webhook-event-versions.ts`.
+   */
+  apiVersion?: string;
+  /**
+   * Previous signing secret retained during a rotation overlap window
+   * (issue #277). Signatures are always produced with `webhookSecret`; this
+   * only extends verification so an in-flight consumer does not break.
+   */
+  previousWebhookSecret?: string;
+  /** When the previous secret stops being accepted. */
+  previousSecretExpiresAt?: string;
   events: NotificationEventType[] | null;
   minAmountStroops: bigint;
   enabled: boolean;
@@ -228,12 +241,25 @@ export interface WebhookPayload {
   id: string;
   eventType: NotificationEventType;
   eventId: string;
+  /** Webhook API version this payload was rendered for (issue #275). */
+  apiVersion: string;
+  /** Schema version of the specific event type (issue #275). */
+  version: string;
   timestamp: string;
   sentAt: string;
   recipientPublicKey: string;
   title: string;
   body: string;
   data: Record<string, unknown>;
+  /** Present only when the subscriber is behind the current schema. */
+  migration?: {
+    eventType: string;
+    deliveredVersion: string;
+    currentVersion: string;
+    deprecated: boolean;
+    sunsetAt?: string;
+    migration?: string;
+  };
 }
 
 export interface WebhookDeliveryResult {

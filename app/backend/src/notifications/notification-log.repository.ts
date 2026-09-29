@@ -303,18 +303,26 @@ export class NotificationLogRepository {
 
   async getPendingRetries(maxAttempts: number): Promise<
     Array<{
+      id: string;
       publicKey: string;
       channel: NotificationChannel;
       eventType: NotificationEventType;
       eventId: string;
       attempts: number;
       lastFailedAt?: string;
+      /**
+       * Position of this delivery in creation order across the pending set
+       * (issue #276). Used to hold a later event back until every earlier
+       * unfinished event for the same resource has succeeded or been
+       * quarantined.
+       */
+      sequence: number;
     }>
   > {
     const { data, error } = await this.supabase
       .getClient()
       .from("notification_log")
-      .select("public_key, channel, event_type, event_id, attempts, updated_at")
+      .select("id, public_key, channel, event_type, event_id, attempts, updated_at, created_at")
       .eq("status", "failed")
       .lt("attempts", maxAttempts)
       .order("created_at", { ascending: true })
@@ -325,14 +333,47 @@ export class NotificationLogRepository {
       return [];
     }
 
-    return (data ?? []).map((r) => ({
+    return (data ?? []).map((r, index) => ({
+      id: r.id,
       publicKey: r.public_key,
       channel: r.channel as NotificationChannel,
       eventType: r.event_type as NotificationEventType,
       eventId: r.event_id,
       attempts: r.attempts,
       lastFailedAt: r.updated_at ?? undefined,
+      // Rows are ordered oldest-first, so the index is a stable per-resource
+      // ordering key that needs no additional column or sequence generator.
+      sequence: index + 1,
     }));
+  }
+
+  /**
+   * Move a delivery to the dead-letter state with a stable quarantine reason
+   * (issue #276).
+   *
+   * Quarantine is terminal for automatic retries: the row stops being returned
+   * by `getPendingRetries`, so the scheduler stops attempting it. Recovery is an
+   * explicit operator replay via `resetForManualReplay`.
+   */
+  async quarantine(
+    id: string,
+    reason: string,
+    lastError?: string,
+  ): Promise<void> {
+    const { error } = await this.supabase
+      .getClient()
+      .from("notification_log")
+      .update({
+        status: "dlq",
+        last_error: lastError ?? reason,
+        dlq_reason: reason,
+        quarantined_at: new Date().toISOString(),
+      })
+      .eq("id", id);
+
+    if (error) {
+      this.logger.warn(`Failed to quarantine delivery ${id}: ${error.message}`);
+    }
   }
 
   /** Move a log entry to DLQ status after exhausting all retries. */

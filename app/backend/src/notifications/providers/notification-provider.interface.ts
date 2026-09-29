@@ -2,6 +2,14 @@ import { Logger, Inject } from "@nestjs/common";
 import * as crypto from "crypto";
 
 import { MetricsService } from "../../metrics/metrics.service";
+import {
+  buildWebhookEventEnvelope,
+  normalizeApiVersion,
+} from "../webhook-event-versions";
+import {
+  redactResponseBody,
+  redactWebhookPayload,
+} from "../webhook-payload-redaction";
 import type {
   NotificationChannel,
   NotificationPreference,
@@ -205,7 +213,7 @@ export class WebhookProvider implements INotificationProvider {
     }
 
     const startTime = Date.now();
-    const webhookPayload = this.buildWebhookPayload(payload);
+    const webhookPayload = this.buildWebhookPayload(payload, preference);
     const body = JSON.stringify(webhookPayload);
     const signature = this.signPayload(body, webhookPayload.sentAt, preference.webhookSecret);
 
@@ -215,7 +223,16 @@ export class WebhookProvider implements INotificationProvider {
       "X-QuickEx-Delivery-ID": webhookPayload.id,
       "X-QuickEx-Event": payload.eventType,
       "X-QuickEx-Timestamp": webhookPayload.sentAt,
+      // Version negotiation headers (issue #275). Subscribers can branch on
+      // these without parsing the body, and the sunset header tells a pinned
+      // subscriber how long its version keeps working.
+      "X-QuickEx-Api-Version": webhookPayload.apiVersion,
+      "X-QuickEx-Event-Version": webhookPayload.version,
     };
+
+    if (webhookPayload.migration?.sunsetAt) {
+      headers["X-QuickEx-Event-Sunset-At"] = webhookPayload.migration.sunsetAt;
+    }
 
     try {
       const response = await fetch(preference.webhookUrl, {
@@ -229,10 +246,9 @@ export class WebhookProvider implements INotificationProvider {
       let responseBody: string | undefined;
       try {
         const text = await response.text();
-        responseBody =
-          text.length > this.maxResponseBodyLength
-            ? text.slice(0, this.maxResponseBodyLength) + "..."
-            : text;
+        // Redacted before it reaches the delivery log (issue #277): the body
+        // originates outside QuickEx and is later readable by the owning tenant.
+        responseBody = redactResponseBody(text, this.maxResponseBodyLength);
       } catch {
         // Ignore response body read errors
       }
@@ -279,29 +295,59 @@ export class WebhookProvider implements INotificationProvider {
     }
   }
 
+  /**
+   * Build the outgoing webhook body.
+   *
+   * The body is a versioned envelope: the event schema version travels with the
+   * payload (issue #275) and the event data is redacted before it leaves the
+   * trust boundary (issue #277). Redaction happens here, once, so every caller
+   * of the provider gets the same guarantee.
+   */
   private buildWebhookPayload(
     payload: BaseNotificationPayload,
+    preference: NotificationPreference,
   ): WebhookPayload {
-    // Stable delivery ID derived from the event — retries (and any accidental
-    // duplicate pushes) reuse the same ID so receivers can deduplicate via the
-    // X-QuickEx-Delivery-ID header.
+    const apiVersion = normalizeApiVersion(preference.apiVersion);
+    const envelope = buildWebhookEventEnvelope({
+      eventType: payload.eventType,
+      eventId: payload.eventId,
+      occurredAt: payload.occurredAt,
+      apiVersion,
+      data: redactWebhookPayload(payload.metadata ?? {}),
+    });
+
+    // Stable delivery ID derived from the event and the pinned API version —
+    // retries (and any accidental duplicate pushes) reuse the same ID so
+    // receivers can deduplicate via the X-QuickEx-Delivery-ID header, while two
+    // subscribers on different versions never collide with each other.
     const deliveryId = `wh_${crypto
       .createHash("sha256")
-      .update(`${payload.eventType}.${payload.eventId}.${payload.recipientPublicKey}`)
+      .update(`${envelope.apiVersion}.${payload.eventType}.${payload.eventId}.${payload.recipientPublicKey}`)
       .digest("hex")
       .slice(0, 16)}`;
 
-    return {
+    const webhookPayload: WebhookPayload = {
       id: deliveryId,
       eventType: payload.eventType,
       eventId: payload.eventId,
+      apiVersion: envelope.apiVersion,
+      version: envelope.version,
       timestamp: payload.occurredAt,
       sentAt: new Date().toISOString(),
       recipientPublicKey: payload.recipientPublicKey,
       title: payload.title,
       body: payload.body,
-      data: payload.metadata ?? {},
+      data: envelope.data,
     };
+
+    if (envelope.migration) {
+      webhookPayload.migration = envelope.migration;
+      this.logger.debug(
+        `Webhook ${envelope.id} rendered at version ${envelope.version} with migration notice for ${preference.publicKey.slice(0, 8)}...`,
+      );
+    }
+
+    return webhookPayload;
   }
 
   private signPayload(body: string, timestamp: string, secret?: string): string {
@@ -405,6 +451,60 @@ export class WebhookProvider implements INotificationProvider {
     return matches
       ? { valid: true, reason: "VALID" }
       : { valid: false, reason: "SIGNATURE_MISMATCH" };
+  }
+
+  /**
+   * Verify a signature against a subscriber's current secret, falling back to
+   * the retained previous secret while a rotation overlap window is open
+   * (issue #277).
+   *
+   * Rotation is signing-only-on-new: QuickEx always signs with the current
+   * secret. The previous secret is accepted for verification for
+   * `WEBHOOK_SECRET_ROTATION_GRACE_MS` so a consumer that has not yet
+   * redeployed does not reject in-flight deliveries. Once the window closes the
+   * previous secret is discarded and verification fails closed.
+   */
+  static verifySignatureWithRotation(
+    body: string,
+    signature: string,
+    timestamp: string,
+    secret: string,
+    options: {
+      previousSecret?: string;
+      previousSecretExpiresAt?: string | null;
+      toleranceMs?: number;
+      now?: Date;
+    } = {},
+  ): WebhookVerificationResult {
+    const current = WebhookProvider.verifySignatureDetailed(
+      body,
+      signature,
+      timestamp,
+      secret,
+      options.toleranceMs,
+    );
+    if (current.valid) return current;
+
+    const { previousSecret, previousSecretExpiresAt } = options;
+    if (!previousSecret) return current;
+
+    if (previousSecret === secret) return current;
+
+    const now = options.now ?? new Date();
+    if (
+      previousSecretExpiresAt &&
+      new Date(previousSecretExpiresAt).getTime() <= now.getTime()
+    ) {
+      return current;
+    }
+
+    return WebhookProvider.verifySignatureDetailed(
+      body,
+      signature,
+      timestamp,
+      previousSecret,
+      options.toleranceMs,
+    );
   }
 }
 

@@ -1,10 +1,31 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Injectable, Logger, NotFoundException } from "@nestjs/common";
 import * as crypto from "crypto";
 
 import { NotificationPreferencesRepository } from "./notification-preferences.repository";
 import { NotificationLogRepository } from "./notification-log.repository";
 import { WebhookReplayService } from "./webhook-replay.service";
+import {
+  getEventVersionDescriptor,
+  normalizeApiVersion,
+  LATEST_WEBHOOK_API_VERSION,
+  type WebhookEventVersionDescriptor,
+} from "./webhook-event-versions";
+import { WEBHOOK_SECRET_ROTATION_GRACE_MS } from "./webhook-retry.constants";
 import type { NotificationPreference } from "./types/notification.types";
+
+/**
+ * Event types covered by the version registry. Used when a webhook subscribes
+ * to all events, so the discovery endpoint can describe every event it may
+ * receive without the registry having to be queried twice.
+ */
+const ALL_VERSIONED_EVENT_TYPES = [
+  "payment.received",
+  "EscrowDeposited",
+  "EscrowWithdrawn",
+  "EscrowRefunded",
+  "username.claimed",
+  "payment.link.expired",
+] as const;
 import type {
   CreateWebhookDto,
   UpdateWebhookDto,
@@ -38,6 +59,10 @@ export class WebhookService {
       {
         webhookUrl: dto.webhookUrl,
         webhookSecret: secret,
+        // Pin the subscriber to a known-good API version (issue #275). Unknown
+        // values normalize to the default rather than being rejected, so an
+        // integrator sending a version from a newer QuickEx still registers.
+        apiVersion: normalizeApiVersion(dto.apiVersion),
         events: dto.events ?? null,
         minAmountStroops: dto.minAmountStroops
           ? BigInt(dto.minAmountStroops)
@@ -84,6 +109,9 @@ export class WebhookService {
       {
         webhookUrl: dto.webhookUrl ?? existing.webhookUrl,
         webhookSecret: existing.webhookSecret,
+        // An omitted apiVersion keeps the current pin: re-registering a webhook
+        // must not silently move a subscriber onto a different schema version.
+        apiVersion: normalizeApiVersion(dto.apiVersion ?? existing.apiVersion),
         events: dto.events ?? existing.events,
         minAmountStroops:
           dto.minAmountStroops !== undefined
@@ -106,19 +134,42 @@ export class WebhookService {
     return true;
   }
 
+  /**
+   * Rotate a webhook's signing secret (issue #277).
+   *
+   * The new secret signs every subsequent delivery. The previous secret is kept
+   * for a bounded overlap window so a subscriber that has not yet redeployed
+   * does not reject in-flight deliveries; the caller is told when the overlap
+   * ends. Pass `overlapMs: 0` for an immediate rotation with no overlap.
+   *
+   * Returns `null` when the webhook does not exist or belongs to another
+   * public key, so the controller can answer 404 without leaking existence.
+   */
   async regenerateSecret(
     id: string,
     publicKey: string,
-  ): Promise<{ secret: string } | null> {
+    overlapMs: number = WEBHOOK_SECRET_ROTATION_GRACE_MS,
+  ): Promise<{ secret: string; previousSecretExpiresAt?: string } | null> {
     const existing = await this.prefsRepo.getWebhookById(id);
     if (!existing || existing.publicKey !== publicKey) {
       return null;
     }
 
     const newSecret = this.generateSecret();
-    await this.prefsRepo.regenerateWebhookSecret(id, newSecret);
+    const rotated = await this.prefsRepo.regenerateWebhookSecret(id, newSecret, {
+      currentSecret: existing.webhookSecret,
+      overlapMs,
+    });
 
-    return { secret: newSecret };
+    this.logger.log(
+      `Rotated webhook secret for ${publicKey.slice(0, 8)}... webhook=${id} ` +
+        `overlapMs=${overlapMs} previousRetained=${Boolean(rotated.previousWebhookSecret)}`,
+    );
+
+    return {
+      secret: newSecret,
+      previousSecretExpiresAt: rotated.previousSecretExpiresAt,
+    };
   }
 
   async getDeliveryLogs(
@@ -214,6 +265,41 @@ export class WebhookService {
     return this.replayService.listReplayHistory(webhookId, limit);
   }
 
+  /**
+   * Version and migration metadata for the events a webhook subscribes to
+   * (issue #275).
+   *
+   * When the webhook subscribes to all events (`events === null`) the full
+   * registry is returned; otherwise only the subscribed types are. The response
+   * contains no secrets, so it is safe to expose to the owning tenant.
+   */
+  async getEventVersionMetadata(
+    webhookId: string,
+    publicKey: string,
+  ): Promise<{
+    webhookId: string;
+    apiVersion: string;
+    latestApiVersion: string;
+    events: WebhookEventVersionDescriptor[];
+  }> {
+    const preference = await this.prefsRepo.getWebhookById(webhookId);
+    if (!preference || preference.publicKey !== publicKey) {
+      throw new NotFoundException("Webhook not found");
+    }
+
+    const subscribed = preference.events;
+    const events = (subscribed ?? ALL_VERSIONED_EVENT_TYPES).map(
+      (eventType) => getEventVersionDescriptor(eventType),
+    );
+
+    return {
+      webhookId,
+      apiVersion: normalizeApiVersion(preference.apiVersion),
+      latestApiVersion: LATEST_WEBHOOK_API_VERSION,
+      events,
+    };
+  }
+
   private generateSecret(): string {
     const bytes = crypto.randomBytes(32);
     return `whsec_${bytes.toString("hex")}`;
@@ -225,6 +311,7 @@ export class WebhookService {
       publicKey: preference.publicKey,
       webhookUrl: preference.webhookUrl ?? "",
       secret: preference.webhookSecret ?? "",
+      apiVersion: normalizeApiVersion(preference.apiVersion),
       events: preference.events,
       minAmountStroops: preference.minAmountStroops.toString(),
       enabled: preference.enabled,
