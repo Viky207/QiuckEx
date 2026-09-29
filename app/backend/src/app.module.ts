@@ -67,6 +67,7 @@ import { ReceiptsModule } from "./receipts/receipts.module";
 import { BulkOperationsModule } from "./bulk-operations/bulk-operations.module";
 import { SessionModule } from "./session/session.module";
 import { ObservabilityModule } from "./observability/observability.module";
+import { TestnetFixturesModule } from "./testnet-fixtures/testnet-fixtures.module";
 import { TracingMiddleware } from "./observability/tracing/tracing.middleware";
 
 type AppImport =
@@ -132,6 +133,7 @@ OperationsModule,
     TeamsModule,
     SessionModule,
 ObservabilityModule,
+    TestnetFixturesModule,
     ];
 
     try {

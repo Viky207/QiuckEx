@@ -46,6 +46,8 @@ export class MetricsService implements OnModuleInit {
   private dependencyProbeUp: client.Gauge<string>;
   private traceContexts: client.Counter<string>;
   private operatorReplayTotal: client.Counter<string>;
+  private testnetFixtureTotal: client.Counter<string>;
+  private testnetFixtureDuration: client.Histogram<string>;
   private initialized = false;
 
   onModuleInit() {
@@ -333,6 +335,21 @@ export class MetricsService implements OnModuleInit {
         labelNames: ["target", "outcome"],
       });
 
+      // Testnet fixture manager (#283). The outcome label is a stable enum so
+      // the cardinality stays bounded: a fixture name is never a label value.
+      this.testnetFixtureTotal = new client.Counter({
+        name: "quickex_testnet_fixture_total",
+        help: "Testnet fixture accounts resolved by outcome",
+        labelNames: ["outcome"],
+      });
+
+      this.testnetFixtureDuration = new client.Histogram({
+        name: "quickex_testnet_fixture_duration_seconds",
+        help: "Wall-clock duration of a testnet fixture resolution",
+        labelNames: ["outcome"],
+        buckets: [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30],
+      });
+
       this.register.registerMetric(this.sloCompliance);
       this.register.registerMetric(this.sloErrorBudgetRemaining);
       this.register.registerMetric(this.sloBurnRate);
@@ -342,6 +359,8 @@ export class MetricsService implements OnModuleInit {
       this.register.registerMetric(this.dependencyProbeUp);
       this.register.registerMetric(this.traceContexts);
       this.register.registerMetric(this.operatorReplayTotal);
+      this.register.registerMetric(this.testnetFixtureTotal);
+      this.register.registerMetric(this.testnetFixtureDuration);
 
       this.initialized = true;
     } catch (error) {
@@ -747,6 +766,27 @@ export class MetricsService implements OnModuleInit {
     if (!this.initialized || !this.operatorReplayTotal) return;
     try {
       this.operatorReplayTotal.labels(target, outcome).inc();
+    } catch (error) {}
+  }
+
+  /**
+   * Record a resolved testnet fixture account (#283).
+   *
+   * `outcome` is one of the bounded `FixtureStatus` values. The fixture *name*
+   * is deliberately not a label: labels are a permanent, unbounded cost in the
+   * registry, and a fixture set is expected to grow over time.
+   */
+  recordTestnetFixture(outcome: string, durationSeconds?: number) {
+    if (!this.initialized || !this.testnetFixtureTotal) return;
+    try {
+      this.testnetFixtureTotal.labels(outcome).inc();
+      if (
+        typeof durationSeconds === 'number' &&
+        Number.isFinite(durationSeconds) &&
+        this.testnetFixtureDuration
+      ) {
+        this.testnetFixtureDuration.labels(outcome).observe(durationSeconds);
+      }
     } catch (error) {}
   }
 }
