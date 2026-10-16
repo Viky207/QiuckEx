@@ -1,5 +1,6 @@
 import { Injectable, Logger, HttpException, HttpStatus, Optional } from '@nestjs/common';
 import { Horizon } from '@stellar/stellar-sdk';
+import * as StellarSdk from '@stellar/stellar-sdk';
 import { LRUCache } from 'lru-cache';
 import { AppConfigService } from '../config/app-config.service';
 import { TransactionItemDto, TransactionResponseDto } from './dto/transaction.dto';
@@ -174,6 +175,30 @@ export class HorizonService {
                 this.recordCircuitFailure();
             }
             this.handleHorizonError(error);
+        }
+    }
+
+    async loadAccount(publicKey: string): Promise<StellarSdk.Account> {
+        try {
+            return await this.server.loadAccount(publicKey);
+        } catch (error) {
+            throw error;
+        }
+    }
+
+    async submitSignedTransaction(transaction: StellarSdk.Transaction): Promise<{ hash: string }> {
+        const result = await this.server.submitTransaction(transaction);
+        return { hash: result.hash };
+    }
+
+    async findTransaction(hash: string): Promise<{ hash: string } | null> {
+        try {
+            const result = await this.server.transactions().transaction(hash).call();
+            return { hash: result.hash };
+        } catch (error) {
+            const status = (error as { response?: { status?: number } })?.response?.status;
+            if (status === 404) return null;
+            throw error;
         }
     }
 

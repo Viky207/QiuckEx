@@ -77,6 +77,34 @@ export class SubmitSignedTransactionDto {
   idempotencyKey: string; // Required idempotency key for submit
 }
 
+export class ComposePaymentTransactionDto {
+  @IsString()
+  @IsNotEmpty()
+  sourceAccount: string;
+
+  @IsString()
+  @IsNotEmpty()
+  destinationAccount: string;
+
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(32)
+  amount: string;
+
+  @IsString()
+  @IsNotEmpty()
+  asset: string;
+
+  @IsString()
+  @IsOptional()
+  @MaxLength(28)
+  memo?: string;
+
+  @IsString()
+  @IsOptional()
+  expiresAt?: string;
+}
+
 export class SimulateOperationDto {
   @IsString()
   @IsNotEmpty()

@@ -3,11 +3,16 @@ import {
   Logger,
   BadRequestException,
   InternalServerErrorException,
+  ConflictException,
+  ForbiddenException,
+  GoneException,
+  ServiceUnavailableException,
+  Optional,
 } from "@nestjs/common";
 import { createHash } from "crypto";
 import * as StellarSdk from "@stellar/stellar-sdk";
 import { rpc as SorobanRpc } from "@stellar/stellar-sdk";
-import { ComposeTransactionDto, SimulateOperationDto, SubmitSignedTransactionDto } from "./dto/compose-transaction.dto";
+import { ComposePaymentTransactionDto, ComposeTransactionDto, SimulateOperationDto, SubmitSignedTransactionDto } from "./dto/compose-transaction.dto";
 import {
   ComposeTransactionResponse,
   ComposeTransactionError,
@@ -18,6 +23,8 @@ import { buildScVal } from "./utils/param-builder";
 import { SorobanRpcService } from "./soroban-rpc.service";
 import { mapSorobanError } from "../common/soroban-errors";
 import { SorobanErrorCode } from "../common/soroban-errors";
+import { HorizonService } from "./horizon.service";
+import { AppConfigService } from "../config/app-config.service";
 
 const STROOPS_PER_XLM = 10_000_000;
 const BASE_FEE = 100; // stroops
@@ -36,7 +43,44 @@ export class TransactionsService {
   >();
   private readonly submitIdempotencyFingerprints = new Map<string, string>();
 
-  constructor(private readonly sorobanRpcService: SorobanRpcService) {}
+  constructor(
+    private readonly sorobanRpcService: SorobanRpcService,
+    @Optional() private readonly horizonService?: HorizonService,
+    @Optional() private readonly appConfig?: AppConfigService,
+  ) {}
+
+  async composePaymentTransaction(dto: ComposePaymentTransactionDto): Promise<{ unsignedXdr: string; network: "testnet"; expiresAt: string }> {
+    if (this.appConfig?.network !== "testnet") {
+      throw new ServiceUnavailableException({ code: "WALLET_PAYMENT_DISABLED", message: "Wallet payments are currently available on testnet only." });
+    }
+    if (!this.horizonService) throw new ServiceUnavailableException({ code: "HORIZON_UNAVAILABLE", message: "Payment composition is temporarily unavailable." });
+    if (!StellarSdk.StrKey.isValidEd25519PublicKey(dto.sourceAccount) || !StellarSdk.StrKey.isValidEd25519PublicKey(dto.destinationAccount)) {
+      throw new BadRequestException({ code: "MALFORMED_PAYMENT", message: "A valid Stellar source and destination account are required." });
+    }
+    if (dto.asset !== "XLM") {
+      throw new BadRequestException({ code: "UNSUPPORTED_PAYMENT_ASSET", message: "Only native XLM payments are enabled." });
+    }
+    if (!/^(0|[1-9]\d{0,13})(\.\d{1,7})?$/.test(dto.amount) || Number(dto.amount) <= 0) {
+      throw new BadRequestException({ code: "MALFORMED_PAYMENT", message: "Payment amount must be a positive XLM amount with at most seven decimal places." });
+    }
+    if (dto.expiresAt && (!Number.isFinite(Date.parse(dto.expiresAt)) || Date.parse(dto.expiresAt) <= Date.now())) {
+      throw new GoneException({ code: "PAYMENT_LINK_EXPIRED", message: "This payment link has expired." });
+    }
+
+    const account = await this.horizonService.loadAccount(dto.sourceAccount);
+    const expiresAt = new Date(Date.now() + 5 * 60_000).toISOString();
+    const builder = new StellarSdk.TransactionBuilder(account, {
+      fee: "100",
+      networkPassphrase: this.appConfig.stellarNetworkPassphrase,
+    }).addOperation(StellarSdk.Operation.payment({
+      destination: dto.destinationAccount,
+      asset: StellarSdk.Asset.native(),
+      amount: dto.amount,
+    })).setTimeout(300);
+    if (dto.memo) builder.addMemo(StellarSdk.Memo.text(dto.memo));
+    const transaction = builder.build();
+    return { unsignedXdr: transaction.toXDR(), network: "testnet", expiresAt };
+  }
 
   async composeTransaction(
     dto: ComposeTransactionDto,
@@ -308,12 +352,27 @@ export class TransactionsService {
   async submitSignedTransaction(
     dto: SubmitSignedTransactionDto,
   ): Promise<{ success: boolean; hash?: string; error?: string; userMessage?: string }> {
-    // Validate the signed XDR is properly formatted (never extracts private keys)
+    if (this.appConfig?.network !== "testnet") {
+      throw new ServiceUnavailableException({ code: "WALLET_PAYMENT_DISABLED", message: "Wallet payments are currently available on testnet only." });
+    }
+    if (!this.horizonService) throw new ServiceUnavailableException({ code: "HORIZON_UNAVAILABLE", message: "Transaction submission is temporarily unavailable." });
+
+    let transaction: StellarSdk.Transaction;
     try {
-      // Just validate the XDR can be parsed - we don't need to use the transaction object
-      new StellarSdk.Transaction(StellarSdk.xdr.TransactionEnvelope.fromXDR(dto.signedXdr, 'base64'), dto.networkPassphrase || 'Test SDF Network ; September 2015');
-    } catch (err) {
-      throw new BadRequestException('Invalid signed transaction XDR format');
+      transaction = new StellarSdk.Transaction(StellarSdk.xdr.TransactionEnvelope.fromXDR(dto.signedXdr, 'base64'), this.appConfig.stellarNetworkPassphrase);
+    } catch {
+      throw new BadRequestException({ code: "MALFORMED_XDR", message: "Signed transaction XDR is malformed." });
+    }
+
+    if (!transaction.signatures?.length) {
+      throw new ForbiddenException({ code: "UNAUTHORIZED", message: "The transaction has no wallet signature." });
+    }
+    const timeBounds = transaction.timeBounds;
+    if (!timeBounds || Number(timeBounds.maxTime) * 1000 <= Date.now()) {
+      throw new GoneException({ code: "TRANSACTION_EXPIRED", message: "The signed transaction has expired. Review and sign a new payment." });
+    }
+    if (transaction.operations.length !== 1 || transaction.operations[0].type !== "payment" || transaction.operations[0].asset?.getCode?.() !== "XLM") {
+      throw new BadRequestException({ code: "MALFORMED_PAYMENT", message: "Only a single native XLM payment transaction is accepted by this endpoint." });
     }
 
     // Create fingerprint for idempotency checking
@@ -323,12 +382,14 @@ export class TransactionsService {
     })).digest('hex');
 
     const idempotencyKey = dto.idempotencyKey;
+    const envelopeFingerprint = createHash('sha256').update(dto.signedXdr).digest('hex');
+    if (idempotencyKey !== envelopeFingerprint) {
+      throw new ConflictException({ code: "IDEMPOTENCY_CONFLICT", message: "Idempotency key must match the signed envelope fingerprint." });
+    }
     const fingerprintForKey = this.submitIdempotencyFingerprints.get(idempotencyKey);
     
     if (fingerprintForKey && fingerprintForKey !== payloadFingerprint) {
-      throw new BadRequestException(
-        'This idempotency key was already used with a different payload.',
-      );
+      throw new ConflictException({ code: "IDEMPOTENCY_CONFLICT", message: "This idempotency key was already used with a different payload." });
     }
 
     // Return cached response if already processed this idempotency key
@@ -337,24 +398,29 @@ export class TransactionsService {
       return cached;
     }
 
-    // Submit to network (in production would send to Soroban RPC)
-    // For now, we simulate submission with 90% success rate (deterministic)
-    const txHash = createHash('sha256').update(dto.signedXdr).digest('hex');
-    const successDeterminant = parseInt(txHash.substring(0, 2), 16);
-    const isSuccess = successDeterminant < 230; // 230/256 = ~90% success rate
-    
-    let response;
-    if (isSuccess) {
-      response = {
-        success: true,
-        hash: txHash
-      };
-    } else {
-      response = {
-        success: false,
-        error: 'NETWORK_ERROR',
-        userMessage: 'Transaction submission failed due to network conditions. Please retry with the same idempotency key.'
-      };
+    const txHash = transaction.hash().toString('hex');
+    let response: { success: boolean; hash?: string; error?: string; userMessage?: string };
+    try {
+      const existing = await this.horizonService.findTransaction(txHash);
+      if (existing) {
+        response = { success: true, hash: existing.hash };
+      } else {
+        const submitted = await this.horizonService.submitSignedTransaction(transaction);
+        response = { success: true, hash: submitted.hash };
+      }
+    } catch (error) {
+      const message = String((error as Error)?.message ?? "").toLowerCase();
+      if (message.includes("bad_auth") || message.includes("tx_bad_auth")) {
+        throw new ForbiddenException({ code: "UNAUTHORIZED", message: "The Stellar network rejected the wallet signature." });
+      }
+      if (message.includes("tx_bad_seq") || message.includes("tx_too_late") || message.includes("expired")) {
+        throw new GoneException({ code: "TRANSACTION_EXPIRED", message: "The signed transaction is no longer valid." });
+      }
+      if (message.includes("tx_failed") || message.includes("op_")) {
+        throw new BadRequestException({ code: "TRANSACTION_REJECTED", message: "The Stellar network rejected this payment." });
+      }
+      this.logger.warn(`wallet payment submission failed [HORIZON_UNAVAILABLE] hash=${txHash.slice(0, 12)}`);
+      throw new ServiceUnavailableException({ code: "HORIZON_UNAVAILABLE", message: "The Stellar network is temporarily unavailable. Retry with the same signed transaction." });
     }
 
     // Store for idempotency
