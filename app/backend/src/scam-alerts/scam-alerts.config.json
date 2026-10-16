@@ -1,0 +1,58 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "large-payment-without-memo",
+      "enabled": true,
+      "warning": "Large payment without memo",
+      "description": "Flags payments above the configured threshold that omit a memo.",
+      "params": {
+        "threshold": 100,
+        "asset": "USDC"
+      }
+    },
+    {
+      "id": "unusual-round-amount",
+      "enabled": true,
+      "warning": "Unusual round amount",
+      "description": "Flags suspiciously round amounts (e.g. 10000 USDC) that omit a memo.",
+      "params": {
+        "minAmount": 1000,
+        "asset": "USDC"
+      }
+    },
+    {
+      "id": "suspicious-username",
+      "enabled": true,
+      "warning": "Suspicious username",
+      "description": "Flags usernames containing common phishing patterns.",
+      "params": {
+        "patterns": [
+          "quickex-official",
+          "quickex_official",
+          "support",
+          "official",
+          "admin",
+          "helpdesk",
+          "verify",
+          "security",
+          "wallet-support",
+          "airdrop"
+        ]
+      }
+    },
+    {
+      "id": "zero-value-payment",
+      "enabled": true,
+      "warning": "Zero-value payment link",
+      "description": "Flags payment links requesting a zero amount.",
+      "params": {
+        "amount": 0
+      }
+    }
+  ],
+  "riskThresholds": {
+    "medium": 1,
+    "high": 2
+  }
+}
