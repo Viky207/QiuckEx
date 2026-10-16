@@ -43,7 +43,7 @@ export class InAppNotificationRepository {
     let query = this.db
       .getClient()
       .from("in_app_notifications")
-      .select("*")
+      .select("*", { count: "exact" })
       .eq("publicKey", publicKey);
 
     if (previewScope) {

@@ -38,6 +38,7 @@ describe("in-app notifications API client", () => {
               createdAt: "2026-07-26T10:00:00.000Z",
             },
           ],
+          pagination: { page: 1, limit: 20, total: 1, has_more: false },
         }),
     });
 
@@ -49,8 +50,53 @@ describe("in-app notifications API client", () => {
         headers: expect.objectContaining({ Accept: "application/json" }),
       }),
     );
-    expect(result).toHaveLength(1);
-    expect(result[0].id).toBe("n1");
+    expect(result.data).toHaveLength(1);
+    expect(result.data[0].id).toBe("n1");
+    expect(result.pagination.has_more).toBe(false);
+  });
+
+  it("rejects legacy array responses", async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify([]),
+    });
+
+    await expect(fetchInAppNotifications("GABC")).rejects.toMatchObject({
+      code: "NOTIFICATION_RESPONSE_MALFORMED",
+    });
+  });
+
+  it("rejects malformed pagination instead of presenting an empty inbox", async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () =>
+        JSON.stringify({
+          data: [],
+          pagination: { page: 1, limit: 50, total: 0, has_more: true },
+        }),
+    });
+
+    await expect(fetchInAppNotifications("GABC")).rejects.toMatchObject({
+      code: "NOTIFICATION_RESPONSE_MALFORMED",
+    });
+  });
+
+  it("preserves stable backend errors", async () => {
+    fetchMock.mockResolvedValue({
+      ok: false,
+      status: 503,
+      json: async () => ({
+        code: "NOTIFICATIONS_UNAVAILABLE",
+        message: "Notifications are temporarily unavailable",
+      }),
+    });
+
+    await expect(fetchInAppNotifications("GABC")).rejects.toMatchObject({
+      code: "NOTIFICATIONS_UNAVAILABLE",
+      status: 503,
+    });
   });
 
   it("posts mark-read for a single notification", async () => {

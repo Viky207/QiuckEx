@@ -121,6 +121,8 @@ request header. The resolved value is echoed back in:
 
 | Code | HTTP Status | Description |
 |---|---|---|
+| `NOTIFICATION_UNAUTHORIZED` | 401 / 403 | Notification request has no wallet selector or conflicts with the request identity |
+| `NOTIFICATIONS_UNAVAILABLE` | 503 | Notification storage is temporarily unavailable |
 | `WEBHOOK_NOT_FOUND` | 404 | Webhook endpoint does not exist |
 | `WEBHOOK_DELIVERY_FAILED` | 502 | Webhook could not be delivered after retries |
 

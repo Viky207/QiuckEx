@@ -135,8 +135,8 @@ Expo/React Native app, 25 screens in `app/mobile/app`. ⚠️ All "Live" rows ar
 |---|---|---|---|
 | Transaction history | `services/transactions.ts` → backend `transactions` | **Live** | Real Horizon-backed data. |
 | Link creation & asset picker | `services/link-metadata.ts`, `app/link-generator.tsx` → backend `links`, `stellar` | **Live** | Same contracts as frontend. |
-| In-app notification center | `services/in-app-notifications.ts` → backend `notifications` | **Live** | Defensively handles two response shapes (mismatch #8). |
-| Local notification store | `services/notifications.ts` | **Partial** | Real API when online with a wallet session; seeds `MOCK_NOTIFICATIONS` on offline/error/no-session paths. |
+| In-app notification center | `services/in-app-notifications.ts` → backend `notifications` | **Live** | Uses the single paginated `{ data, pagination }` API contract; malformed or legacy response shapes fail closed with `NOTIFICATION_RESPONSE_MALFORMED`. Offline/error mode serves only previously cached notifications and never seeds fake payment activity. |
+| Local notification store | `services/notifications.ts` | **Partial** | Real API when online with a wallet session; offline/error/no-session paths serve cached data or an empty list. Read-state changes remain locally optimistic and queue for synchronization. |
 | Escrow confirmation (contract registry sync) | `app/payment-confirmation.tsx`, `services/contract-registry.ts` | **Partial** | **Broken today**: calls `/api/contracts/registry` but the backend serves `/contracts/registry` — every sync 404s (mismatch #1, highest-value small fix). |
 | Session bootstrap | `services/session-bootstrap.ts`, `services/wallet-session.ts` | **Live** | Authenticated Bearer bootstrap, resilient degraded-mode fallback, and full session restoration. |
 | In-app feedback | `services/feedback.ts`, `app/feedback.tsx` | **Partial** | No backend route; every submit silently degrades to the export path (mismatch #3). |

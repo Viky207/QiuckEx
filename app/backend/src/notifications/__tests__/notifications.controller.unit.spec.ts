@@ -30,7 +30,7 @@ describe("NotificationsController", () => {
   });
 
   describe("getInApp", () => {
-    it("returns notifications for the authenticated user", async () => {
+    it("returns a stable paginated envelope scoped to the wallet", async () => {
       const req = {
         user: {
           publicKey: "GTEST123",
@@ -45,13 +45,80 @@ describe("NotificationsController", () => {
         },
       ];
 
-      mockRepo.findByUser.mockResolvedValue(notifications);
+      mockRepo.findByUser.mockResolvedValue({
+        data: notifications,
+        count: 21,
+        error: null,
+      });
 
-      const result = await controller.getInApp(req, 1, 20);
+      const result = await controller.getInApp(req, {
+        publicKey: "GTEST123",
+        page: 1,
+        limit: 20,
+      });
 
       expect(mockRepo.findByUser).toHaveBeenCalledWith("GTEST123", 1, 20);
+      expect(result).toEqual({
+        data: notifications,
+        pagination: { page: 1, limit: 20, total: 21, has_more: true },
+      });
+    });
 
-      expect(result).toEqual(notifications);
+    it("rejects a query wallet that differs from the authenticated wallet", async () => {
+      await expect(
+        controller.getInApp(
+          { user: { publicKey: "GTEST123" } },
+          { publicKey: "GOTHER123", page: 1, limit: 20 },
+        ),
+      ).rejects.toMatchObject({
+        response: expect.objectContaining({ code: "NOTIFICATION_UNAUTHORIZED" }),
+        status: 403,
+      });
+      expect(mockRepo.findByUser).not.toHaveBeenCalled();
+    });
+
+    it("rejects a request without a wallet selector with a stable code", async () => {
+      await expect(
+        controller.getInApp({}, { page: 1, limit: 20 } as never),
+      ).rejects.toMatchObject({
+        response: expect.objectContaining({ code: "NOTIFICATION_UNAUTHORIZED" }),
+        status: 401,
+      });
+      expect(mockRepo.findByUser).not.toHaveBeenCalled();
+    });
+
+    it("maps repository failures to a stable dependency error", async () => {
+      mockRepo.findByUser.mockResolvedValue({
+        data: null,
+        count: null,
+        error: { message: "private database detail" },
+      });
+
+      await expect(
+        controller.getInApp({}, {
+          publicKey: "GTEST123",
+          page: 1,
+          limit: 20,
+        }),
+      ).rejects.toMatchObject({
+        response: expect.objectContaining({ code: "NOTIFICATIONS_UNAVAILABLE" }),
+        status: 503,
+      });
+    });
+
+    it("maps thrown repository failures to the same stable dependency error", async () => {
+      mockRepo.findByUser.mockRejectedValue(new Error("database detail"));
+
+      await expect(
+        controller.getInApp({}, {
+          publicKey: "GTEST123",
+          page: 1,
+          limit: 20,
+        }),
+      ).rejects.toMatchObject({
+        response: expect.objectContaining({ code: "NOTIFICATIONS_UNAVAILABLE" }),
+        status: 503,
+      });
     });
   });
 

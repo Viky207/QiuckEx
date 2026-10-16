@@ -119,7 +119,7 @@ Mainnet submission is gated behind `TESTNET_CONTRACT_WRITES_FLAG` (same flag use
 | Link creation (`services/link-metadata.ts`, `app/link-generator.tsx`) | `POST /links/metadata` | `links` | Same contract as frontend — paths **match** ✅ |
 | Wallet capability discovery (`services/wallet-capabilities.ts`) | `GET /stellar/wallet-capabilities?publicKey` | `stellar` | Same contract as frontend ✅; drives unsupported-wallet gating on escrow confirmation |
 | Asset picker (`app/link-generator.tsx`) | `GET /stellar/verified-assets` | `stellar` | Same as frontend ✅ |
-| Notification center (`services/in-app-notifications.ts`) | `GET /notifications/in-app?publicKey`, `POST /notifications/in-app/:id/read`, `POST /notifications/in-app/read-all?publicKey` | `notifications` (`notifications.controller.ts`) | List + read-state; client tolerates both a plain array and a Supabase-style list envelope (defensive drift handling) |
+| Notification center (`services/in-app-notifications.ts`) | `GET /notifications/in-app?publicKey&page&limit`, `POST /notifications/in-app/:id/read`, `POST /notifications/in-app/read-all?publicKey` | `notifications` (`notifications.controller.ts`) | List returns the canonical `{ data, pagination: { page, limit, total, has_more } }` envelope. The mobile client validates the envelope and notification rows; raw arrays and database-shaped responses are rejected. |
 | Escrow confirmation (`app/payment-confirmation.tsx` → `hooks/useContractRegistry.ts` → `services/contract-registry.ts`) | ⚠️ `GET /api/contracts/registry` | `contracts` (`contract-registry.controller.ts`) | **BROKEN** — backend serves `GET /contracts/registry` (with ETag/304 support). The `/api` prefix 404s. See mismatch #1 |
 | Session bootstrap (`services/session-bootstrap.ts`) | `GET /session/bootstrap` (Bearer = publicKey) | `session` (`session.controller.ts`) | Runtime configuration, active feature flags, unread count, and authenticated account context; degrades safely when offline |
 | In-app feedback (`services/feedback.ts`) | ⚠️ `POST /feedback` | — | **No backend controller.** Client intentionally degrades to an exportable payload on failure |
@@ -207,7 +207,36 @@ Explicitly tracked so contributors don't re-discover them:
 5. **Prefix inconsistency** — `v1/receipts` is the only versioned controller; `api/environment-parity` is the only `api/`-prefixed one; everything else is unprefixed. Treat these as historical accidents, not conventions to copy.
 6. **Two controllers share the `links` prefix** — `links.controller.ts` (metadata) and `scam-alerts.controller.ts` both mount `@Controller("links")`. Route collisions are possible when adding new `links/*` subroutes; check both files.
 7. **`admin/feature-flags` and `admin/audit` are unguarded** — unlike every other `admin/*` controller, `feature-flags.controller.ts` and `audit.controller.ts` have **no `ApiKeyGuard`/`RequireScopes`** (the audit controller even carries a `// In a real app, this route would be protected by an AdminGuard` comment). The frontend admin pages (`FeatureFlags.tsx`, `AuditLogs.tsx`) accordingly call them with no auth header. This is a known security gap: when guards are added, those two frontend pages must add key handling in the same change.
-8. **Notification list response shape is loose** — mobile handles both a raw array and a Supabase-style envelope from `/notifications/in-app`. Pin the backend DTO before removing the client's defensive unwrapping.
+8. **Notification list response shape is pinned** — `GET /notifications/in-app` returns `{ data: InAppNotification[], pagination: { page, limit, total, has_more } }`. Mobile consumes only this shape and reports malformed payloads with `NOTIFICATION_RESPONSE_MALFORMED`; backend repository failures return `503 NOTIFICATIONS_UNAVAILABLE`. Deploy/verify the backend envelope before rolling out a mobile build that requires it. Roll back the mobile build if an older backend still returns a raw array; no database migration is required.
+
+## In-app notification list envelope
+
+The API response is the backend-owned contract, not a Supabase result. A successful list request returns:
+
+```json
+{
+  "data": [
+    {
+      "id": "notification-id",
+      "publicKey": "G...",
+      "eventType": "payment.received",
+      "eventId": "event-id",
+      "title": "Payment received",
+      "body": "A payment was received",
+      "read": false,
+      "metadata": {},
+      "createdAt": "2026-10-16T12:00:00.000Z"
+    }
+  ],
+  "pagination": { "page": 1, "limit": 20, "total": 1, "has_more": false }
+}
+```
+
+`page` and `limit` in the response must match the request. `metadata` may be omitted or `null`; no credential material belongs in metadata. Empty results use the same envelope with `data: []`. The mobile client returns cached results when offline or when refresh fails, and returns `[]` when no cache exists; it never fabricates payment activity. The server preserves the global correlation ID and HTTP metrics, and maps repository failures to `NOTIFICATIONS_UNAVAILABLE` without returning database details.
+
+Compatibility assumptions for this work: notification delivery is off-chain and network-agnostic; the backend does not sign transactions or custody funds; the existing paginated envelope is retained without a route or database migration. The current route accepts `publicKey` as a selector when `req.user` is absent, so that value is not proof of wallet ownership; do not describe this endpoint as signature-authenticated. A signed wallet-session authorization contract remains a separate security follow-up before treating notification contents as private.
+
+Verification and operations: run `pnpm --dir app/backend test:unit -- src/notifications/__tests__/notifications.controller.unit.spec.ts --runInBand` and `pnpm --dir app/mobile exec jest --config jest.config.js __tests__/in-app-notifications.test.ts --runInBand`. There is no migration. Rollout requires a backend returning the paginated envelope before the strict mobile client; revert the mobile client if an older backend is still deployed. On `NOTIFICATIONS_UNAVAILABLE`, clients retain cached state and operators use the response correlation ID with backend HTTP metrics to inspect the storage dependency. No notification payload, wallet key, or database error detail is added to server logs by this change.
 
 ## Compatibility aliases & migration paths
 

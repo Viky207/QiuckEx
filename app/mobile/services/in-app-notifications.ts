@@ -26,10 +26,26 @@ export interface FetchInAppOptions {
   limit?: number;
 }
 
-type SupabaseListResponse = {
-  data?: InAppNotificationDto[] | null;
-  error?: { message?: string } | null;
-};
+export interface InAppNotificationListResponse {
+  data: InAppNotificationDto[];
+  pagination: {
+    page: number;
+    limit: number;
+    total: number;
+    has_more: boolean;
+  };
+}
+
+export class InAppNotificationApiError extends Error {
+  constructor(
+    public readonly code: string,
+    message: string,
+    public readonly status?: number,
+  ) {
+    super(message);
+    this.name = "InAppNotificationApiError";
+  }
+}
 
 function getApiBaseUrl() {
   return API_BASE_URL.replace(/\/$/, "");
@@ -50,20 +66,26 @@ async function requestJson<T>(
       },
     });
   } catch {
-    throw new Error(
+    throw new InAppNotificationApiError(
+      "NOTIFICATION_DEPENDENCY_UNAVAILABLE",
       "Network request failed. Check your connection and try again.",
     );
   }
 
   if (!response.ok) {
+    let code = "NOTIFICATION_REQUEST_FAILED";
     let message = `Server error (${response.status})`;
     try {
-      const body = (await response.json()) as { message?: string };
-      if (body.message) message = body.message;
+      const body = (await response.json()) as {
+        code?: unknown;
+        message?: unknown;
+      };
+      if (typeof body.code === "string") code = body.code;
+      if (typeof body.message === "string") message = body.message;
     } catch {
       // keep status-code message
     }
-    throw new Error(message);
+    throw new InAppNotificationApiError(code, message, response.status);
   }
 
   if (response.status === 204) {
@@ -75,19 +97,72 @@ async function requestJson<T>(
     return undefined as T;
   }
 
-  return JSON.parse(text) as T;
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw new InAppNotificationApiError(
+      "NOTIFICATION_RESPONSE_MALFORMED",
+      "The notification service returned an invalid response.",
+      response.status,
+    );
+  }
 }
 
-function unwrapList(
-  payload: InAppNotificationDto[] | SupabaseListResponse | null | undefined,
-): InAppNotificationDto[] {
-  if (!payload) return [];
-  if (Array.isArray(payload)) return payload;
-  if (Array.isArray(payload.data)) return payload.data;
-  if (payload.error?.message) {
-    throw new Error(payload.error.message);
+function isNotification(value: unknown): value is InAppNotificationDto {
+  if (!value || typeof value !== "object") return false;
+  const notification = value as Record<string, unknown>;
+  return (
+    typeof notification.id === "string" &&
+    typeof notification.publicKey === "string" &&
+    typeof notification.eventType === "string" &&
+    typeof notification.eventId === "string" &&
+    typeof notification.title === "string" &&
+    typeof notification.body === "string" &&
+    typeof notification.read === "boolean" &&
+    typeof notification.createdAt === "string" &&
+    !Number.isNaN(Date.parse(notification.createdAt)) &&
+    (notification.metadata === undefined ||
+      notification.metadata === null ||
+      (typeof notification.metadata === "object" &&
+        !Array.isArray(notification.metadata)))
+  );
+}
+
+function parseNotificationList(
+  payload: unknown,
+  expectedPage: number,
+  expectedLimit: number,
+): InAppNotificationListResponse {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw malformedResponse();
   }
-  return [];
+  const envelope = payload as Record<string, unknown>;
+  const pagination = envelope.pagination as
+    | Record<string, unknown>
+    | undefined;
+  if (
+    !Array.isArray(envelope.data) ||
+    !envelope.data.every(isNotification) ||
+    envelope.data.length > expectedLimit ||
+    !pagination ||
+    pagination.page !== expectedPage ||
+    pagination.limit !== expectedLimit ||
+    !Number.isInteger(pagination.total) ||
+    (pagination.total as number) < envelope.data.length ||
+    typeof pagination.has_more !== "boolean" ||
+    pagination.has_more !==
+      expectedPage * expectedLimit < (pagination.total as number)
+  ) {
+    throw malformedResponse();
+  }
+  return payload as InAppNotificationListResponse;
+}
+
+function malformedResponse(): InAppNotificationApiError {
+  return new InAppNotificationApiError(
+    "NOTIFICATION_RESPONSE_MALFORMED",
+    "The notification service returned an invalid response.",
+  );
 }
 
 /**
@@ -96,7 +171,7 @@ function unwrapList(
 export async function fetchInAppNotifications(
   publicKey: string,
   options: FetchInAppOptions = {},
-): Promise<InAppNotificationDto[]> {
+): Promise<InAppNotificationListResponse> {
   const { page = 1, limit = 50 } = options;
   const params = new URLSearchParams({
     publicKey,
@@ -104,11 +179,10 @@ export async function fetchInAppNotifications(
     limit: String(limit),
   });
 
-  const payload = await requestJson<
-    InAppNotificationDto[] | SupabaseListResponse
-  >(`/notifications/in-app?${params.toString()}`);
-
-  return unwrapList(payload);
+  const payload = await requestJson<unknown>(
+    `/notifications/in-app?${params.toString()}`,
+  );
+  return parseNotificationList(payload, page, limit);
 }
 
 /**
