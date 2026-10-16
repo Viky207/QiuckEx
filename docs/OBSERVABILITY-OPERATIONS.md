@@ -1,395 +1,118 @@
-# Observability & Operations: SLOs, Alerts, Tracing, and Operator Replay
+# Observability & Operations
 
-Operational contract for the QuickEx backend, covering the payment, link,
-indexing, and notification paths. This document is the authority for the
-service level objectives (SLOs) and error budgets, the alert rules and
-dashboards built on them, request tracing and dependency readiness probes, and
-the safe operator replay tooling.
+This document describes how to observe and operate the backend in production.
 
-Owning module: `app/backend/src/observability/`.
+## Metrics
 
----
+The NestJS backend exposes Prometheus metrics via `prom-client` on the `/metrics` endpoint (default port `4000`).
 
-## Assumptions
-
-Recorded explicitly, as required before a capability of this kind is
-promoted.
-
-| Assumption | Statement | Why it matters |
-|---|---|---|
-| **Network** | The SLOs, alerts, probes, and read-only surfaces are network-agnostic and run on both testnet and mainnet. Only the operator **replay write** is gated (see [Feature gating](#feature-gating)). | Testnet-first per [ADR 0002](./adr/0002-testnet-first-mainnet-feature-gated.md); read paths are safe everywhere. |
-| **Custody** | Nothing in this capability reads, derives, or transmits a private key or a seed phrase. Replay re-sends a *notification about* an already-recorded event. | [ADR 0001](./adr/0001-self-custody-and-no-server-side-key-custody.md) — self-custody is unaffected. |
-| **Financial invariants** | Replay never moves funds, never re-executes a contract call, and never writes the escrow state machine. `INV-01`..`INV-10` in [INVARIANTS.md](./INVARIANTS.md) cannot be affected by any operation described here. | The only write is to `notification_log`, and to an audit row. |
-| **Backward compatibility** | No existing route changes shape or status code. All new routes live under `admin/observability`, which did not exist before. | Existing clients are unaffected. |
-| **Observability window** | SLIs are derived from the in-process Prometheus registry, so the observation window is bounded by process uptime. A restart resets the counters. | Documented on every report as `observationSeconds`; a fresh process reports `insufficient_data` rather than a confident number. |
-| **Multi-instance deployments** | The replay limiter is in-process (as it already was for webhook replay). A multi-instance deployment needs the Redis-backed limiter before replay is enabled at scale. | Called out in [Operational procedure](#operational-procedure). |
-
----
-
-## What changed
-
-| Area | Change | Contract |
-|---|---|---|
-| SLOs & error budgets | `slo/slo.definitions.ts`, `slo/slo.service.ts` — five objectives with targets, windows, burn rates | `GET /admin/observability/slo`, `GET /admin/observability/slo/:id` |
-| Alerts | `alerting/alert-rules.ts`, `alerting/alerting.service.ts` — six rules with `for` semantics and runbooks | `GET /admin/observability/alerts`, `GET /admin/observability/alerts/rules` |
-| Dependency probes | `readiness/dependency-readiness.service.ts` — six probes with criticality | `GET /admin/observability/dependencies` |
-| Tracing | `tracing/trace-context.ts`, `tracing/tracing.middleware.ts` — W3C trace context | Inbound/outbound `traceparent`, response `x-trace-id` |
-| Operator replay | `replay/operator-replay.service.ts` — admin-scoped replay with duplicate suppression | `GET`/`POST /admin/observability/replay/:publicKey/:channel/:eventType/:eventId` |
-| Metrics | `src/metrics/metrics.service.ts` — nine new series | `/metrics` |
-| Notifications | `NotificationService.redeliverToChannel`, `NotificationLogRepository.getDelivery` / `resetNotificationForManualReplay` | No public contract change |
-| Feature flag | `mainnet.operator_replay`, default **disabled** | `NetworkSafetyGuard` |
-| Error tracking | Sentry — DSN configuration, release tagging, source maps, tracing, user context | See [Sentry](#sentry) |
-
-### Database / migration
-
-**No migration is required.** The capability reuses the existing
-`notification_log` and `webhook_replay_log` tables from
-`20260625000000_webhook_replay_tooling.sql`. The two new repository methods
-(`getDelivery`, `resetNotificationForManualReplay`) only read and update columns
-that already exist.
-
-### Configuration
-
-**No new environment variable is required.** The replay surface inherits the
-existing cooldown and quota configuration already read by
-`WebhookReplayLimiter`:
-
-| Variable | Default | Effect |
-|---|---|---|
-| `WEBHOOK_REPLAY_EVENT_COOLDOWN_MS` | `30000` | Minimum gap between replays of the same event |
-| `WEBHOOK_REPLAY_QUOTA_PER_HOUR` | `20` | Maximum replays per webhook per hour |
-| `WEBHOOK_REPLAY_QUOTA_WINDOW_MS` | `3600000` | Width of the quota window |
-| `INDEXER_LAG_THRESHOLD_LEDGERS` | see `AppConfigService` | Threshold used by the indexing SLO and alert |
-| `METRICS_ENDPOINT_TOKEN` | — | Required to scrape `/metrics` (unchanged) |
-| `SENTRY_DSN` | — | Sentry DSN. When unset, the SDK is not initialised and error reporting is a no-op. |
-| `SENTRY_RELEASE` | git SHA | Release tag attached to every event. Set to the commit SHA in CD and in the Vercel build. |
-| `SENTRY_TRACES_SAMPLE_RATE` | `0.1` | Fraction of transactions traced. 10% by default; raise deliberately, never to `1.0` in production. |
-| `SENTRY_ENVIRONMENT` | `NODE_ENV` | Environment tag (`production`, `staging`, `development`). |
-
----
-
-## Service level objectives and error budgets
-
-An objective is a compliance target over a rolling window. The error budget is
-`1 - target`; the **burn rate** is the observed bad-event ratio divided by the
-allowed bad-event ratio. A burn rate of `B` consumes the whole 30-day budget in
-`30d / B`.
-
-| ID | Path | Kind | Target | Window | Enforced |
-|---|---|---|---|---|---|
-| `payment_availability` | payment | availability | 99.5% | 7d | yes |
-| `link_availability` | link | availability | 99.5% | 7d | yes |
-| `indexing_freshness` | indexing | freshness | 99% | 1d | yes |
-| `notification_delivery` | notification | availability | 99% | 7d | yes |
-| `settlement_latency` | payment | latency | 99% | 7d | no (advisory) |
-
-**Burn-rate thresholds.** `warning` at 6x (exhausts a 30-day budget in ~5 days),
-`critical` at 14.4x (~2 days). Classification is burn-rate based, not a raw
-target comparison, so a single noisy sample does not page anyone.
-
-**Advisory objectives** (`enforced: false`) are excluded from `overallStatus`.
-Settlement latency is advisory while the transition-duration histogram settles.
-
-### How each SLI is measured
-
-Each objective is derived from series the `/metrics` endpoint already exports —
-there is no second, parallel source of truth.
-
-| Objective | Numerator | Denominator | Source |
-|---|---|---|---|
-| `payment_availability` | responses on `/payments*` and `/transactions*` that are not 5xx | all responses on those routes | `http_requests_total{route,status_code}` |
-| `link_availability` | same, for `/links*` and `/payment-links*` | same | `http_requests_total{route,status_code}` |
-| `indexing_freshness` | `1` when the lag guard is not reporting lag | `1` sample | `indexer_lag_ledgers`, `indexer_lag_guard_status` |
-| `notification_delivery` | deliveries with `status="success"` (replays excluded) | all delivery attempts (replays excluded) | `webhook_delivery_duration_seconds{status}` |
-| `settlement_latency` | transitions completing within 60s | all transitions | `escrow_state_transition_duration_seconds` |
-
-Two deliberate choices:
-
-- **4xx counts as good.** A malformed request is the caller's problem and must
-  not burn the availability budget.
-- **No traffic is not healthy.** When the denominator is zero the ratio is
-  `null` and the status is `insufficient_data`. `GET /admin/observability/slo`
-  never reports 100% for an objective that has never been exercised.
-
-Each evaluation also returns an `evidence` block (`total`, `good`, `bad`,
-`source`) so an operator can audit the arithmetic without re-deriving it.
-
----
-
-## Alerts and dashboards
-
-| Rule ID | Severity | Fires when | `for` |
-|---|---|---|---|
-| `indexer_lag_over_threshold` | critical | `indexer_lag_ledgers` > configured threshold | 2 evaluations |
-| `indexer_lag_guard_blocking_traffic` | warning | `indexer_lag_guard_status == 3` | 2 evaluations |
-| `settlement_latency_over_budget` | critical | any transition exceeded 60s | 3 evaluations |
-| `reconciliation_discrepancies` | critical | any `error_total{service="reconciliation"}` | 1 evaluation |
-| `error_budget_burn_rate_critical` | critical | an enforced SLO is `critical` | 2 evaluations |
-| `webhook_dead_letter_queue_backlog` | warning | `webhook_dlq_size` > 0 | 2 evaluations |
-
-`forSamples` implements the Prometheus `for` clause: the condition must hold for
-N consecutive evaluations before the alert fires. States are `ok`, `pending`,
-`firing`, and `no_data`; a `no_data` alert never fires, so losing the metrics
-registry cannot manufacture an incident.
-
-### Dashboard layout
-
-The panels below map one-to-one onto the series above and are the intended
-Grafana layout. All expressions use the `quickex_` prefixed series published by
-`ObservabilityScheduler`.
-
-| Panel | Query |
-|---|---|
-| SLO compliance (per objective) | `quickex_slo_compliance_ratio` |
-| Error budget remaining | `quickex_slo_error_budget_remaining_ratio` |
-| Error budget burn rate | `quickex_slo_error_budget_burn_rate` |
-| SLO status | `quickex_slo_status` (`0=ok 1=insufficient_data 2=warning 3=critical`) |
-| Firing alerts | `quickex_alerts_firing` |
-| Settlement latency p95 | `histogram_quantile(0.95, rate(escrow_state_transition_duration_seconds_bucket[5m]))` |
-| Indexer lag | `indexer_lag_ledgers` |
-| Reconciliation discrepancies | `rate(error_total{service="reconciliation"}[5m])` |
-| Webhook DLQ depth | `webhook_dlq_size` |
-| Dependency probe health | `quickex_dependency_probe_up` |
-| Operator replay outcomes | `quickex_operator_replay_total` |
-
-Suggested Alertmanager rules:
-
-```promql
-# Fast burn: page.
-quickex_slo_status == 3 and on (slo) quickex_slo_error_budget_remaining_ratio < 0
-# Any firing critical alert.
-quickex_alerts_firing{severity="critical"} == 1
-# A critical dependency is not ready.
-min by (dependency) (quickex_dependency_probe_up{criticality="critical"}) == 0
+```bash
+curl localhost:4000/metrics
 ```
 
-### Metrics reference
+### Metric Reference
 
-| Metric | Type | Labels |
-|---|---|---|
-| `quickex_slo_compliance_ratio` | gauge | `slo`, `path`, `kind` |
-| `quickex_slo_error_budget_remaining_ratio` | gauge | `slo`, `path` |
-| `quickex_slo_error_budget_burn_rate` | gauge | `slo`, `path` |
-| `quickex_slo_status` | gauge | `slo`, `path`, `enforced` |
-| `quickex_alerts_firing` | gauge | `alert`, `severity` |
-| `quickex_dependency_probe_duration_seconds` | histogram | `dependency`, `criticality`, `status` |
-| `quickex_dependency_probe_up` | gauge | `dependency`, `criticality` |
-| `quickex_trace_context_total` | counter | `outcome` |
-| `quickex_operator_replay_total` | counter | `target`, `outcome` |
+| Metric | Type | Labels | Description |
+| --- | --- | --- | --- |
+| `http_requests_total` | counter | `method`, `route`, `status_code` | Total number of HTTP requests handled by the backend. |
+| `http_request_duration_seconds` | histogram | `method`, `route`, `status_code` | HTTP request latency in seconds. |
+| `http_requests_in_flight` | gauge | `method`, `route` | Number of HTTP requests currently being processed. |
+| `process_cpu_seconds_total` | counter | — | Total user and system CPU time spent in seconds. |
+| `process_resident_memory_bytes` | gauge | — | Resident memory size in bytes. |
+| `nodejs_eventloop_lag_seconds` | gauge | — | Event loop lag in seconds. |
+| `nodejs_heap_size_used_bytes` | gauge | — | Node.js heap memory used in bytes. |
+| `nodejs_heap_size_total_bytes` | gauge | — | Node.js heap memory allocated in bytes. |
+| `nodejs_active_handles_total` | gauge | — | Number of active handles in the Node.js event loop. |
+| `nodejs_active_requests_total` | gauge | — | Number of active requests in the Node.js event loop. |
 
-An unobserved ratio is published as `NaN`, not `0`, so Prometheus distinguishes
-"no data" from "totally broken". A `NaN` series produces no alert.
+### Example Queries
 
-**Label cardinality is bounded.** `quickex_trace_context_total` records only
-whether baggage was *present* (`baggage_forwarded`), never its contents, so
-user-controlled input can never become a Prometheus label.
+Request rate by route:
 
----
+```promql
+sum by (route) (rate(http_requests_total[5m]))
+```
 
-## Sentry
+Error rate (5xx responses):
 
-Sentry is the error-tracking and performance backend. It is **additive**: it
-does not replace the Prometheus series above, and it is never on the request
-path in a way that can fail a request.
+```promql
+sum(rate(http_requests_total{status_code=~"5.."}[5m]))
+  /
+sum(rate(http_requests_total[5m]))
+```
 
-### DSN configuration
+p99 request latency:
 
-- The DSN is read from `SENTRY_DSN`. **When it is unset the SDK is not
-  initialised** — `Sentry.init` is skipped entirely and every capture call is a
-  no-op. Local development and CI therefore need no Sentry account, and a
-  missing DSN can never crash the process.
-- The DSN is a write-only ingest key, not a secret with read access, but it is
-  still supplied via the environment and never committed.
-- Initialisation happens once, at process start, before the HTTP server begins
-  listening, so errors thrown during bootstrap are captured.
+```promql
+histogram_quantile(
+  0.99,
+  sum by (le, route) (rate(http_request_duration_seconds_bucket[5m]))
+)
+```
 
-### Release tagging
+In-flight requests:
 
-Every event carries a release tag so a regression can be attributed to a
-commit.
+```promql
+sum by (route) (http_requests_in_flight)
+```
 
-- `SENTRY_RELEASE` is set to the **git SHA** of the deployed commit.
-- In CD the value is injected from the pipeline's commit SHA.
-- In the Vercel build the same value is set from `VERCEL_GIT_COMMIT_SHA`.
-- When `SENTRY_RELEASE` is unset the SDK falls back to its own detection; the
-  explicit value is preferred because it is stable across build and runtime.
+Event loop lag:
 
-### Source map upload
+```promql
+nodejs_eventloop_lag_seconds
+```
 
-Minified stack traces are useless without source maps, so upload is part of the
-build, not an afterthought.
+Heap usage ratio:
 
-- **CD:** the build step uploads source maps to Sentry using the release set
-  from the git SHA, then deletes the `.map` files from the deployed artifact so
-  they are not served publicly.
-- **Vercel build:** the same upload runs in the build command, keyed by
-  `VERCEL_GIT_COMMIT_SHA`, with the `.map` files excluded from the output.
-- Upload requires a Sentry auth token in the build environment only. It is
-  never present at runtime.
+```promql
+nodejs_heap_size_used_bytes / nodejs_heap_size_total_bytes
+```
 
-### Tracing
+## Alert Thresholds
 
-- `tracesSampleRate` defaults to **`0.1`** (10%). Tracing is sampled, not
-  exhaustive, so the performance overhead and event volume stay bounded.
-- The rate is overridable via `SENTRY_TRACES_SAMPLE_RATE` for a deliberate,
-  temporary increase during an investigation. It is not raised to `1.0` in
-  production.
-- Sentry tracing is independent of the W3C `traceparent` propagation described
-  below; the two coexist and do not share identifiers.
+Recommended PromQL alert rules for P0/P1 scenarios.
 
-### User context policy
+### P0 — Error rate > 1% for 5 minutes
 
-- Only the **username** is attached as user context. No email address, no
-  wallet public key, no IP address, and no other directly identifying field is
-  sent.
-- This keeps error reports useful for debugging ("which account hit this?")
-  without turning Sentry into a second store of customer PII.
-- The policy is enforced at the point of capture: the context object is
-  constructed from the username alone, so a caller cannot widen it by passing a
-  richer object.
+```promql
+(
+  sum(rate(http_requests_total{status_code=~"5.."}[5m]))
+    /
+  sum(rate(http_requests_total[5m]))
+) > 0.01
+```
 
----
+### P0 — p99 latency > 2s for 5 minutes
 
-## Distributed tracing
+```promql
+histogram_quantile(
+  0.99,
+  sum by (le) (rate(http_request_duration_seconds_bucket[5m]))
+) > 2
+```
 
-`TracingMiddleware` runs on every request, after the correlation-id middleware
-and before any route handler.
+### P1 — Event loop lag > 0.5s for 5 minutes
 
-- An inbound W3C `traceparent` is continued; anything malformed is **replaced**
-  with a freshly minted trace, never trusted. A caller must not be able to
-  inject a trace id that pollutes another tenant's traces.
-- The response carries `x-trace-id` and the downstream `traceparent`.
-- `tracePropagationHeaders()` returns the headers to attach to outbound Horizon,
-  Soroban RPC, and Supabase calls, joining their logs to this trace.
-- The middleware never awaits, so it adds no latency to the request path.
+```promql
+nodejs_eventloop_lag_seconds > 0.5
+```
 
-Counters: `started`, `continued`, `replaced_malformed`, `baggage_forwarded`.
+### P1 — Heap usage > 90% for 10 minutes
 
-## Dependency readiness probes
+```promql
+(nodejs_heap_size_used_bytes / nodejs_heap_size_total_bytes) > 0.9
+```
 
-| Probe | Criticality | Timeout source |
-|---|---|---|
-| `supabase` | critical | `HealthService.checkSupabase` (3s) |
-| `horizon` | critical | `HealthService.checkHorizon` (5s) |
-| `soroban_rpc` | critical | `HealthService.checkSorobanRpc` (5s) |
-| `job_queue` | critical | `HealthService.checkQueue` (5s) |
-| `redis` | optional | `HealthService.checkRedis` (3s) |
-| `indexer` | optional | `IndexerLagService.getStatus` (in-process) |
+### P1 — In-flight requests sustained above 100
 
-`ready` reflects **only** critical probes. An unhealthy *optional* dependency
-reports overall `degraded`, not `unhealthy`: `unhealthy` means "this instance
-should not receive traffic", and pulling every instance out of rotation because
-an optional cache is down would turn a degradation into a self-inflicted
-outage. This complements `/health` and `/ready`, which answer "is this process
-serving?"; this answers "which dependency is the reason it is not?".
+```promql
+sum(http_requests_in_flight) > 100
+```
 
-Results are cached for 5 seconds so a scrape storm cannot fan out into probes.
-A probe that throws is reported `unhealthy` with a fixed detail string — the
-raw error is logged, not returned.
+## Grafana Dashboard
 
----
+The exported Grafana dashboard JSON is committed at `docs/grafana-dashboard.json` and can be imported directly into Grafana.
 
-## Safe operator replay
+## Related Documentation
 
-Replay recovers a **lost** delivery. It does not create one.
-
-### Endpoints
-
-| Method | Path | Purpose |
-|---|---|---|
-| `GET` | `/admin/observability/replay/:publicKey/:channel/:eventType/:eventId` | Inspect the delivery. Read-only. |
-| `POST` | `/admin/observability/replay/:publicKey/:channel/:eventType/:eventId` | Replay it. |
-
-`?actor=<name>` labels the audit entry; the default is `admin-api-key`. The
-public key in the path identifies *whose* notification to replay — never who
-may ask.
-
-### Stable error codes
-
-| Code | HTTP | Meaning |
-|---|---|---|
-| `API_KEY_REQUIRED` | 401 | No `x-api-key` header |
-| `INVALID_API_KEY` | 401 | Unknown key |
-| `INSUFFICIENT_SCOPE` | 403 | Key lacks the `admin` scope |
-| `QUOTA_EXCEEDED` | 403 | Key's monthly quota exhausted |
-| `OPERATOR_REPLAY_MALFORMED` | 400 | Blank `eventType` or `eventId` |
-| `OPERATOR_REPLAY_CHANNEL_UNSUPPORTED` | 400 | Channel is not replayable |
-| `OPERATOR_REPLAY_NOT_FOUND` | 404 | No delivery row for the tuple |
-| `OPERATOR_REPLAY_ALREADY_DELIVERED` | 409 | Delivery already `sent` |
-| `OPERATOR_REPLAY_COOLDOWN` | 409 | Delivery is `pending`, or the replay limiter refused |
-| `WEBHOOK_REPLAY_COOLDOWN` / `WEBHOOK_REPLAY_QUOTA_EXCEEDED` | 429 | Limiter refused the webhook replay |
-| `OPERATOR_REPLAY_DEPENDENCY_FAILURE` | 503 | Supabase/provider unavailable — safe to retry |
-| `MAINNET_GATE_BLOCKED` | 503 | Blocked by the mainnet replay gate |
-
-### Safety properties
-
-- **Idempotency.** A delivery already `sent` is refused with
-  `OPERATOR_REPLAY_ALREADY_DELIVERED`, so an operator cannot cause a duplicate
-  notification. A `pending` delivery is refused with a conflict.
-- **Blast radius.** Webhook replays delegate to the existing
-  `WebhookReplayService`, which owns the per-event cooldown and per-webhook
-  quota. Every channel still passes the notification rate limiter. A replay
-  storm degrades into rejections, not into an amplified flood.
-- **Channel allowlist.** `webhook`, `email`, `push`, `telegram`. `in_app` is
-  excluded deliberately: an in-app notification is a row in the user's own
-  inbox and duplicating it would show a user two copies of the same event.
-- **Auditability.** Every accepted, rejected, and failed attempt is written to
-  `admin_audit_logs` and counted in `quickex_operator_replay_total`.
-- **Secret hygiene.** No response body, notification body, webhook URL, or
-  signing secret is returned. Log lines carry the truncated public key.
-
-### Feature gating
-
-| Network | Replay |
-|---|---|
-| testnet / development / test | Enabled |
-| mainnet | **Blocked** with `MAINNET_GATE_BLOCKED` until the `mainnet.operator_replay` flag is enabled by an admin |
-
-The flag ships **disabled** (`enabled: false`, `environments: ['production']`).
-Read-only SLO, alert, and dependency endpoints are not gated — they expose no
-customer data and no mutation path.
-
----
-
-## Operational procedure
-
-### Triage order for "payments are slow"
-
-1. `GET /admin/observability/dependencies` — is a critical dependency down?
-2. `GET /admin/observability/alerts` — which rule is `firing`, and what is its
-   `measurement.detail`?
-3. `GET /admin/observability/slo` — read the breaching objective's `evidence`
-   block to identify the failing route or transition.
-4. `GET /admin/observability/slo/settlement_latency` for the latency breakdown.
-
-### Recovering a dead-lettered webhook
-
-1. `GET /admin/operations/webhooks` — confirm the backlog and the last error.
-2. Confirm the subscriber endpoint is healthy. Replaying into a broken endpoint
-   only burns the retry budget again.
-3. `GET /admin/observability/replay/{publicKey}/webhook/{eventType}/{eventId}` —
-   confirm the status is `dlq`, not `sent`.
-4. `POST` the same path. Expect `200` with `delivered: true`.
-5. If `delivered: false`, the failure is upstream of us — check the delivery
-   status again and escalate rather than looping replays.
-
-### Known limitations / follow-up
-
-- The replay limiter is in-process. Before enabling replay across multiple
-  instances, move `WebhookReplayLimiter` to Redis. Tracked as a follow-up.
-- `indexing_freshness` currently evaluates a single gauge reading. Sustained
-  freshness across the window requires persisting samples; the objective stays
-  advisory until then.
-- SLO windows are uptime-bounded. Durable multi-window burn rates require
-  Prometheus `rate()` over the published series rather than the in-process
-  registry.
-
----
-
-## Related documents
-
-- [CAPABILITY-MAP.md](./CAPABILITY-MAP.md) — Live/Partial status of this capability
-- [BACKEND-CLIENT-CONTRACT-MAP.md](./BACKEND-CLIENT-CONTRACT-MAP.md) — endpoint wiring
-- [INVARIANTS.md](./INVARIANTS.md) — financial invariants replay cannot affect
-- [adr/0002-testnet-first-mainnet-feature-gated.md](./adr/0002-testnet-first-mainnet-feature-gated.md) — the gating policy
-- [SENTRY.md](./SENTRY.md) — Sentry setup and source map upload details
+- [Backend README](../app/backend/README.md)

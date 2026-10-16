@@ -45,6 +45,53 @@ cargo test -- --nocapture
 cargo tarpaulin --ignore-tests
 ```
 
+## Fuzz Testing
+
+The escrow input validation surface (amount parsing, memo/TTL handling, and ZK
+proof verification) is covered by a property-based fuzz suite built on
+[`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz). Malformed input to the
+proof verifier is especially dangerous, so these targets are run in CI.
+
+### Setup
+
+```bash
+# Install the fuzz runner (one-time)
+cargo install cargo-fuzz
+
+# Fuzz targets live under app/contract/fuzz
+cd app/contract
+```
+
+### Running locally
+
+```bash
+# Fuzz escrow creation inputs (amount, memo, TTL)
+cargo fuzz run fuzz_escrow_create
+
+# Fuzz the ZK proof verifier byte array
+cargo fuzz run fuzz_proof_verify
+
+# Bound a run to 60 seconds (matches CI)
+cargo fuzz run fuzz_escrow_create -- -max_total_time=60
+cargo fuzz run fuzz_proof_verify -- -max_total_time=60
+```
+
+Seed inputs live in `fuzz/corpus/<target>/` and include boundary cases such as
+zero amount, `u64::MAX` amount, empty proof, and truncated proof bytes. Add new
+edge cases there so they are picked up automatically on the next run.
+
+### Reproducing a crash
+
+When a target finds a crash, the offending input is written to
+`fuzz/artifacts/<target>/`. Re-run it directly:
+
+```bash
+cargo fuzz run fuzz_proof_verify fuzz/artifacts/fuzz_proof_verify/crash-<hash>
+```
+
+Fix the underlying validation bug before closing the issue, then re-run the
+target to confirm the crash no longer reproduces.
+
 ## Quality Checks
 
 ```bash
@@ -215,137 +262,4 @@ Helper functions:
 
 ### Overview
 
-The amount commitment functions provide a **placeholder** for X-Ray privacy shielded flows. These use KECCAK256-based deterministic commitments for optimal security and compatibility with Soroban cryptographic operations. Legacy SHA256 commitments remain accepted for backward compatibility.
-
-### Use Cases
-
-- **Shielding transaction amounts** before full ZK integration
-- **API shape validation** for frontend and backend clients
-- **Audit trail commitments** to record hidden values without exposing them
-
-### Serialization Format
-
-Commitments are computed as `KECCAK256(owner_bytes || amount_bytes || salt_bytes)`:
-
-| Component | Size | Format | Description |
-|-----------|------|--------|-------------|
-| Owner | Variable | XDR-serialized Address | Soroban address bytes |
-| Amount | 16 bytes | Big-endian i128 | Transaction amount value |
-| Salt | 0-1024 bytes | Raw bytes | Randomness for uniqueness |
-
-**Result**: 32-byte KECCAK256 hash
-
-#### Legacy SHA256 Migration
-
-For backward compatibility with existing deployments, both KECCAK256 and SHA256 commitments are accepted during verification. The migration strategy is:
-
-- **New deposits** (via `create_amount_commitment`): Use KECCAK256 (more secure, consistent with Soroban crypto ops)
-- **Existing SHA256 commitments**: Continue to verify correctly via `verify_amount_commitment`
-- **Verification paths**: Accept both algorithms transparently
-- **Logging**: Legacy SHA256 commitments are logged as `commitment_type: "legacy"` in events for audit trails
-
-**Deprecation Timeline**:
-- **v1.0** (current): Both KECCAK256 and SHA256 accepted; all new commitments use KECCAK256
-- **v2.0** (planned 2025 Q2): SHA256 verification deprecated but still functional; strong recommendation to migrate
-- **v3.0** (planned 2025 Q4): SHA256 support removed; KECCAK256 only
-
-**Migration Path for Users**:
-1. Verify existing escrows use KECCAK256 hashes where possible
-2. For SHA256-based escrows: Continue using `verify_amount_commitment` (works unchanged)
-3. For new workflows: Exclusively use KECCAK256 via `create_amount_commitment`
-4. Before v3.0: Complete transition to KECCAK256-only workflows
-
-### API Examples
-
-#### Create a Commitment
-
-```rust
-use soroban_sdk::{Address, Bytes, contract, contractimpl};
-
-let owner = Address::from_string(&env, &"GXXXXX...");  // Owner's address
-let amount = 1_500_000i128;                            // Amount in stroops
-let salt = Bytes::from_slice(&env, &[42, 13, 99]);    // Random bytes
-
-// Generate commitment
-let commitment = client.create_amount_commitment(&owner, &amount, &salt);
-// Result: 32-byte hash
-
-// Store or transmit commitment (e.g., in transaction metadata)
-```
-
-#### Verify a Commitment
-
-```rust
-// Later, verify the commitment against claimed values
-let is_valid = client.verify_amount_commitment(&commitment, &owner, &amount, &salt);
-
-if is_valid {
-    // Commitment matches; amount was not tampered with
-    println!("Commitment verified!");
-} else {
-    // Mismatch: amount, salt, or owner was modified
-    println!("Commitment invalid!");
-}
-```
-
-#### Handling Tampering
-
-```rust
-// If any component is modified, verification fails
-let wrong_amount = amount + 1;
-assert!(!client.verify_amount_commitment(&commitment, &owner, &wrong_amount, &salt));
-
-let modified_salt = Bytes::from_slice(&env, &[42, 13, 100]);
-assert!(!client.verify_amount_commitment(&commitment, &owner, &amount, &modified_salt));
-
-let other_owner = Address::generate(&env);
-assert!(!client.verify_amount_commitment(&commitment, &other_owner, &amount, &salt));
-```
-
-### Constraints & Limitations
-
-- **No confidentiality**: Commitments are deterministic hashes, not ZK proofs. Do not rely on them for privacy.
-- **Maximum salt length**: 1024 bytes to prevent resource exhaustion.
-- **Non-negative amounts**: Negative amounts will fail validation; validate client-side.
-- **Deterministic only**: Same inputs always produce identical commits; useful for audits but no hiding.
-- **Not production-grade privacy**: Mark this feature as "experimental" in UX; full privacy requires ZK integration.
-- **Algorithm migration**: New workflows use KECCAK256; legacy SHA256 commitments are accepted until v3.0.
-
-## View Functions (Read-Only RPC Calls)
-
-### Check Commitment State
-```bash
-stellar contract invoke \
-  --id <CONTRACT_ID> \
-  --fn get_commitment_state \
-  -- \
-  --commitment <COMMITMENT_HASH>
-```
-
-### Verify Proof Before Withdrawal
-```bash
-stellar contract invoke \
-  --id <CONTRACT_ID> \
-  --fn verify_proof_view \
-  -- \
-  --amount 1000000 \
-  --salt <SALT_BYTES> \
-  --owner <ADDRESS>
-```
-
-### Get Full Escrow Details
-```bash
-soroban contract invoke \
-  --id <CONTRACT_ID> \
-  --fn get_escrow_details \
-  -- \
-  --commitment <COMMITMENT_HASH>
-```
-
-
-### Roadmap
-
-1. **Current (v0.1)**: Deterministic SHA256 commitments
-2. **Future (v0.2)**: Pedersen commitments with proper range proofs
-3. **Target (v1.0)**: Full zero-knowledge privacy via Zether or Circom
-````
+The amount commitment functions provide a **placeholder** for X-Ray privacy shielded flows. These use KECCAK256-based deterministic commitments for optimal security.

@@ -73,3 +73,39 @@ jobs:
 
       - name: Run tests
         run: cargo test
+
+  fuzz:
+    name: Fuzz Escrow Input Validation
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app/contract
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "app/contract"
+
+      - name: Fuzz escrow create inputs
+        run: cargo fuzz run fuzz_escrow_create -- -max_total_time=60
+
+      - name: Fuzz proof verification
+        run: cargo fuzz run fuzz_proof_verify -- -max_total_time=60
+
+      - name: Upload fuzz artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quickex-contract-fuzz-artifacts
+          path: app/contract/fuzz/artifacts/
+          if-no-files-found: ignore

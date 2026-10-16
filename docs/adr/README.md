@@ -22,6 +22,7 @@ Cheap-to-reverse implementation choices (a new REST read endpoint, a new flag de
 | [ADR-0004](./0004-irreversible-emergency-pause.md) | Emergency pause is irreversible | Accepted |
 | [ADR-0005](./0005-static-fee-model-oracle-deferred.md) | Static fee model; oracle pricing deferred | Accepted |
 | [ADR-0006](./0006-contract-registry-rollback-and-etag.md) | Contract registry rollback and ETag change detection | Accepted |
+| [ADR-0007](./0007-xray-privacy-zk-scheme.md) | X-Ray privacy ZK scheme selection | Proposed |
 
 ## File format (enforced)
 
