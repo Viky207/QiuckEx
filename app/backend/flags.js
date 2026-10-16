@@ -103,6 +103,15 @@ const RollbackGuard = {
       return DEFAULT_TTL_MS;
     }
     return Math.min(raw, MAX_TTL_MS);
+  },
+
+  // Issue #372: X-Ray privacy mode (shielded transactions) is gated behind the
+  // `mainnet.xray_privacy_enabled` flag. The on-chain Groth16 verifier stub in
+  // the privacy contract is only exercised when this flag is explicitly opted
+  // in, so mainnet stays on the UI-only path until the verifier is deployed and
+  // cryptographer-reviewed.
+  isXrayPrivacyEnabled() {
+    return process.env.MAINNET_XRAY_PRIVACY_ENABLED === 'true';
   }
 };
 
