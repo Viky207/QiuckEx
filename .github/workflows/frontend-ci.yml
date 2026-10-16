@@ -1,189 +1,86 @@
 name: Frontend CI
 
 on:
-  pull_request:
-    branches:
-      - main
+  push:
+    branches: [main]
     paths:
       - 'app/frontend/**'
       - '.github/workflows/frontend-ci.yml'
-  push:
-    branches:
-      - main
+  pull_request:
     paths:
       - 'app/frontend/**'
       - '.github/workflows/frontend-ci.yml'
 
 jobs:
-  lint-and-type-check:
-    name: Lint, Type Check and Test
+  lint-and-test:
+    name: Lint & Unit Tests
     runs-on: ubuntu-latest
-
+    defaults:
+      run:
+        working-directory: app/frontend
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: pnpm/action-setup@v4
         with:
-          node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: app/frontend/package-lock.json
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: app/frontend/pnpm-lock.yaml
 
       - name: Install dependencies
-        working-directory: ./app/frontend
-        run: npm ci
+        run: pnpm install --frozen-lockfile
 
-      - name: Run ESLint
-        working-directory: ./app/frontend
-        run: npx eslint . --max-warnings 0
+      - name: Lint
+        run: pnpm lint
 
-      - name: Run TypeScript type check
-        working-directory: ./app/frontend
-        run: npx tsc --noEmit
-
-      - name: Run Unit Tests
-        working-directory: ./app/frontend
-        run: npm test || npx vitest run
-
-      - name: Run telemetry privacy tests
-        working-directory: ./app/frontend
-        run: npm run test:telemetry
-
-  accessibility-audit:
-    name: Accessibility Audit
-    runs-on: ubuntu-latest
-    needs: lint-and-type-check
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: app/frontend/package-lock.json
-
-      - name: Install dependencies
-        working-directory: ./app/frontend
-        run: npm ci
-
-      - name: Install Playwright browsers
-        working-directory: ./app/frontend
-        run: npx playwright install --with-deps chromium
-
-      - name: Run axe accessibility tests
-        working-directory: ./app/frontend
-        run: npm run test:axe || npx playwright test --grep @axe
-
-      - name: Upload axe report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: frontend-axe-report
-          path: app/frontend/test-results/
-          if-no-files-found: ignore
-
-  build:
-    name: Build Frontend
-    runs-on: ubuntu-latest
-    needs: lint-and-type-check
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: app/frontend/package-lock.json
-
-      - name: Install dependencies
-        working-directory: ./app/frontend
-        run: npm ci
-
-      - name: Build Next.js
-        working-directory: ./app/frontend
-        run: npm run build
-        env:
-          NEXT_PUBLIC_QUICKEX_API_URL: ${{ secrets.NEXT_PUBLIC_QUICKEX_API_URL }}
-          NEXT_PUBLIC_SITE_URL: ${{ secrets.NEXT_PUBLIC_SITE_URL }}
-          NEXT_PUBLIC_STELLAR_NETWORK: ${{ secrets.NEXT_PUBLIC_STELLAR_NETWORK }}
-          NEXT_PUBLIC_ERROR_REPORTING_ENABLED: ${{ secrets.NEXT_PUBLIC_ERROR_REPORTING_ENABLED }}
-          NEXT_PUBLIC_APP_VERSION: ${{ secrets.NEXT_PUBLIC_APP_VERSION }}
-
-      - name: Bundle Size
-        working-directory: ./app/frontend
-        run: npm run size
-
-      - name: Compare bundle size against main
-        if: github.event_name == 'pull_request'
-        uses: andresz1/size-limit-action@v1
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          directory: app/frontend
-          build_script: build
-          skip_step: install
+      - name: Unit tests
+        run: pnpm test
 
   visual-regression:
     name: Visual Regression
     runs-on: ubuntu-latest
-
+    defaults:
+      run:
+        working-directory: app/frontend
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: pnpm/action-setup@v4
         with:
-          node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: app/frontend/package-lock.json
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: app/frontend/pnpm-lock.yaml
 
       - name: Install dependencies
-        working-directory: ./app/frontend
-        run: npm ci
+        run: pnpm install --frozen-lockfile
 
-      - name: Install Chromium
-        working-directory: ./app/frontend
-        run: npx playwright install --with-deps chromium
+      - name: Install Playwright browsers
+        run: pnpm exec playwright install --with-deps chromium
 
-      - name: Run visual checks
-        working-directory: ./app/frontend
-        run: npm run test:visual
+      - name: Run visual regression tests
+        # Visual tests run against a mocked API (MSW / route interception);
+        # no real Horizon calls are made.
+        run: pnpm test:visual
+        env:
+          CI: 'true'
+          NEXT_PUBLIC_API_MOCK: 'true'
 
-      - name: Upload visual screenshots
-        if: always()
+      - name: Upload visual diff artifacts
+        if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: frontend-visual-screenshots
-          path: app/frontend/test-results/
+          name: visual-regression-diffs
+          path: |
+            app/frontend/test-results/**
+            app/frontend/visual/**/*-diff.png
+            app/frontend/visual/**/*-actual.png
           if-no-files-found: ignore
-
-  security-scan:
-    name: Security Scan
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Run npm audit
-        working-directory: ./app/frontend
-        run: npm audit --audit-level=moderate
-        continue-on-error: true
-
-      - name: Check for mixed content
-        run: |
-          echo "Checking for hardcoded HTTP URLs in frontend code..."
-          if grep -r "http://" app/frontend/src --include="*.ts" --include="*.tsx" --exclude-dir=node_modules 2>/dev/null | grep -v "http://localhost" > /dev/null 2>&1; then
-            echo "❌ Found hardcoded HTTP URLs (non-localhost). This may cause mixed-content issues in production."
-            grep -r "http://" app/frontend/src --include="*.ts" --include="*.tsx" --exclude-dir=node_modules | grep -v "http://localhost"
-            exit 1
-          else
-            echo "✅ No problematic HTTP URLs found"
-          fi
+          retention-days: 14

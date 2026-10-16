@@ -7,16 +7,17 @@ export default {
   },
   collectCoverageFrom: ["src/**/*.(t|j)s", "!src/**/*spec.ts"],
   coverageDirectory: "./coverage",
+  coverageReporters: ["text", "lcov", "html"],
   testEnvironment: "node",
   setupFiles: ["<rootDir>/jest.setup.ts"],
   testTimeout: 10000,
   maxWorkers: "50%",
   coverageThreshold: {
     global: {
-      branches: 37,
-      functions: 40,
-      lines: 44,
-      statements: 44,
+      statements: 80,
+      branches: 70,
+      functions: 80,
+      lines: 80,
     },
   },
 };

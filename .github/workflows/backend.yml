@@ -68,6 +68,9 @@ jobs:
       #     SUPABASE_URL: https://test.supabase.co
       #     SUPABASE_ANON_KEY: test-key
 
+      # Coverage thresholds are enforced by jest.unit.config.ts
+      # (statements: 80, branches: 70, functions: 80, lines: 80).
+      # This step fails the job when coverage drops below those thresholds.
       - name: Run Unit Tests with Coverage
         run: pnpm run test:unit:coverage
         env:
@@ -76,6 +79,15 @@ jobs:
           SUPABASE_URL: https://test.supabase.co
           SUPABASE_ANON_KEY: test-key
 
+      - name: Upload unit test coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-unit-coverage
+          path: app/backend/coverage
+          if-no-files-found: ignore
+          retention-days: 14
+
       - name: Run Integration Tests with Coverage
         run: pnpm run test:int:coverage
         env:
@@ -83,6 +95,15 @@ jobs:
           STELLAR_NETWORK: testnet
           SUPABASE_URL: https://test.supabase.co
           SUPABASE_ANON_KEY: test-key
+
+      - name: Upload integration test coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-integration-coverage
+          path: app/backend/coverage
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Run Fuzz Tests
         run: pnpm run test:fuzz:ci
@@ -100,3 +121,42 @@ jobs:
 
       - name: Horizon-Backed Endpoints Performance Regression Tests
         run: pnpm run test:perf:horizon
+
+  payment-lifecycle-integration:
+    name: Payment Lifecycle Integration Tests
+    runs-on: ubuntu-latest
+    # Slow end-to-end suite (~30s+) that hits a real Supabase test project and
+    # Horizon testnet. Runs on every PR against main and blocks merge, but is
+    # kept out of the lint/build job so it never gates linting.
+    if: github.event_name == 'pull_request' && github.base_ref == 'main'
+    defaults:
+      run:
+        working-directory: app/backend
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Run payment lifecycle integration tests
+        run: pnpm run test:int -- payment-lifecycle.int.spec.ts
+        env:
+          NODE_ENV: test
+          STELLAR_NETWORK: testnet
+          SUPABASE_URL: ${{ secrets.SUPABASE_TEST_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_TEST_ANON_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_TEST_SERVICE_ROLE_KEY }}
+          TEST_ACCOUNT_MNEMONIC: ${{ secrets.TEST_ACCOUNT_MNEMONIC }}
+          HORIZON_URL: https://horizon-testnet.stellar.org

@@ -1,0 +1,55 @@
+appId: com.handsoff.mobile
+# Username claim journey — runs against the Expo development build (not Expo Go)
+# connected to the mock backend. Configure the API URL via env vars:
+#   MAESTRO_API_URL / EXPO_PUBLIC_API_URL
+# See app/mobile/MAESTRO_SETUP.md for local + CI instructions.
+---
+- launchApp:
+    clearState: true
+    clearKeychain: true
+
+# Wait for the app to boot into the onboarding / auth surface
+- assertVisible:
+    id: "onboarding-screen"
+    optional: true
+- tapOn:
+    id: "get-started-button"
+    optional: true
+
+# Sign in with the mock backend test account
+- tapOn:
+    id: "sign-in-button"
+    optional: true
+- tapOn:
+    id: "email-input"
+    optional: true
+- inputText: "${MAESTRO_TEST_EMAIL}"
+- tapOn:
+    id: "password-input"
+    optional: true
+- inputText: "${MAESTRO_TEST_PASSWORD}"
+- tapOn:
+    id: "submit-sign-in-button"
+    optional: true
+
+# Navigate to the username claim screen
+- assertVisible:
+    id: "home-screen"
+- tapOn:
+    id: "profile-tab"
+- tapOn:
+    id: "claim-username-button"
+
+# Claim a deterministic username against the mock backend
+- assertVisible:
+    id: "claim-username-screen"
+- tapOn:
+    id: "username-input"
+- inputText: "${MAESTRO_TEST_USERNAME}"
+- tapOn:
+    id: "claim-username-submit"
+
+# Verify the claim succeeded and the username is now displayed
+- assertVisible:
+    id: "username-claimed-badge"
+- assertVisible: "${MAESTRO_TEST_USERNAME}"

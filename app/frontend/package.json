@@ -10,6 +10,7 @@
     "test": "echo 'Skipping frontend checks in backend release pipeline' || exit 0",
     "test:telemetry": "vitest run __tests__/errorReporter.smoke.test.ts",
     "test:visual": "playwright test --config=playwright.config.ts",
+    "test:visual:update": "playwright test --config=playwright.config.ts --update-snapshots",
     "test:axe": "playwright test --config=playwright.config.ts --grep @axe",
     "check:bundle": "node scripts/check-bundle-budget.mjs"
   },

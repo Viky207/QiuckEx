@@ -17,6 +17,14 @@ export default {
   // in 401/403 handling fail CI.
   testPathIgnorePatterns: ["/node_modules/"],
   coverageThreshold: {
+    // Issue #385: enforce a global coverage floor across all backend modules so
+    // CI fails when statement/branch/function/line coverage regresses.
+    global: {
+      branches: 70,
+      functions: 80,
+      lines: 80,
+      statements: 80,
+    },
     "./src/admin/**/*.ts": {
       branches: 80,
       functions: 80,

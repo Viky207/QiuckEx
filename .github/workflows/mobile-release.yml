@@ -102,3 +102,67 @@ jobs:
           GIT_TAG: ${{ github.ref_name }}
         run: |
           eas build --platform ${{ matrix.platform }} --profile ${{ matrix.app_env }} --non-interactive
+
+  maestro-e2e:
+    name: Maestro E2E Flows (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: app/mobile
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: android
+            os: ubuntu-latest
+          - platform: ios
+            os: macos-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Enable KVM (Android emulator acceleration)
+        if: matrix.platform == 'android'
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Run Maestro flows on Android emulator
+        if: matrix.platform == 'android'
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          profile: pixel_6
+          working-directory: app/mobile
+          script: |
+            curl -Ls "https://get.maestro.mobile.dev" | bash
+            export PATH="$PATH:$HOME/.maestro/bin"
+            maestro test .maestro/flows
+        env:
+          MAESTRO_APP_ID: ${{ vars.MAESTRO_APP_ID }}
+          EXPO_PUBLIC_API_URL: ${{ vars.MOCK_API_URL }}
+
+      - name: Run Maestro flows on iOS simulator
+        if: matrix.platform == 'ios'
+        env:
+          MAESTRO_APP_ID: ${{ vars.MAESTRO_APP_ID }}
+          EXPO_PUBLIC_API_URL: ${{ vars.MOCK_API_URL }}
+        run: |
+          curl -Ls "https://get.maestro.mobile.dev" | bash
+          export PATH="$PATH:$HOME/.maestro/bin"
+          maestro test .maestro/flows

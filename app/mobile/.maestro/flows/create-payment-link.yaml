@@ -1,0 +1,46 @@
+appId: com.handsoff.mobile
+---
+# E2E flow: create a payment link and copy it.
+# Runs against the Expo development build (not Expo Go) connected to the
+# mock backend. The API base URL is injected via the MAESTRO_API_URL env var
+# so flows stay deterministic and never hit real Horizon.
+
+- launchApp:
+    clearState: true
+    arguments:
+      EXPO_PUBLIC_API_URL: ${MAESTRO_API_URL}
+
+# Wait for the app shell to finish booting.
+- assertVisible:
+    id: "app-root"
+
+# Navigate to the payment link creation screen.
+- tapOn:
+    id: "tab-payments"
+- assertVisible:
+    id: "payments-screen"
+- tapOn:
+    id: "create-payment-link-button"
+- assertVisible:
+    id: "create-payment-link-screen"
+
+# Fill in the payment link details.
+- tapOn:
+    id: "payment-link-amount-input"
+- inputText: "25.00"
+- tapOn:
+    id: "payment-link-memo-input"
+- inputText: "Maestro E2E payment link"
+
+# Submit and wait for the generated link to appear.
+- tapOn:
+    id: "payment-link-submit-button"
+- assertVisible:
+    id: "payment-link-result"
+- assertVisible:
+    id: "payment-link-url"
+
+# Copy the generated link to the clipboard.
+- tapOn:
+    id: "payment-link-copy-button"
+- assertVisible: "Copied"
