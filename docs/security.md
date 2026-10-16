@@ -1,10 +1,83 @@
 # Security Policy – QuickEx
 
-This document describes the secret-management and secret-scanning practices for the QuickEx repository.
+This document describes the secret-management and secret-scanning practices for the QuickEx repository, and the responsible disclosure process for reporting security vulnerabilities.
 
 ---
 
-## 1. Secret Storage
+## 1. Vulnerability Disclosure Policy
+
+QuickEx handles real funds on mainnet. We take security reports seriously and welcome good-faith research. This section explains how to report a vulnerability responsibly and what you can expect from us in return.
+
+### 1.1 Scope
+
+**In scope** — the following components are covered by this policy:
+
+| Component        | Examples                                                                 |
+| ---------------- | ------------------------------------------------------------------------ |
+| Smart contract   | Soroban contracts, on-chain escrow/payment logic, contract upgrade paths |
+| Backend API      | REST/RPC endpoints, authentication, authorization, data handling         |
+| Frontend         | Web application, wallet integration, client-side key handling            |
+
+**Out of scope** — the following are not covered and should be reported to the relevant third party:
+
+- Third-party infrastructure and services (hosting providers, CDNs, DNS, cloud platforms).
+- Third-party dependencies and libraries (report upstream to the maintainer).
+- Stellar network / protocol itself.
+- Social engineering, physical attacks, and denial-of-service via volumetric traffic.
+- Issues requiring a compromised device, browser extension, or leaked credentials.
+
+### 1.2 Reporting a Vulnerability
+
+**Do not open a public GitHub issue for security vulnerabilities.**
+
+Report privately using one of the following:
+
+- **Email:** `security@quickex.example` (PGP key available on request).
+- **GitHub private security advisory:** open one via the repository's **Security → Advisories → Report a vulnerability** tab.
+
+Please include:
+
+- A description of the vulnerability and its impact.
+- Steps to reproduce (proof-of-concept where possible).
+- Affected component(s) and version/commit.
+- Any suggested remediation.
+
+### 1.3 Response SLA
+
+| Stage          | Target                                                       |
+| -------------- | ------------------------------------------------------------ |
+| Acknowledgement | Within **48 hours** of receipt                              |
+| Triage          | Within **7 days** — severity assigned and reporter updated  |
+| Fix (P0)        | Mitigation or fix within **72 hours** of triage             |
+| Fix (P1)        | Fix within **30 days** of triage                            |
+| Fix (P2/P3)     | Addressed in the normal release cycle                       |
+
+We will keep you informed of progress and coordinate a disclosure date with you.
+
+### 1.4 Severity Classification
+
+Severity uses the same P0–P3 labels as the rest of the repository:
+
+| Label | Meaning                                                                 |
+| ----- | ----------------------------------------------------------------------- |
+| P0    | Critical — direct loss of funds, contract takeover, or full compromise |
+| P1    | High — significant impact, exploitable with limited preconditions      |
+| P2    | Medium — limited impact or requires unusual conditions                 |
+| P3    | Low — minor impact, hardening, or informational                        |
+
+### 1.5 Safe Harbour
+
+We consider security research conducted in good faith to be authorised. If you make a good-faith effort to comply with this policy, we will:
+
+- Not pursue or support legal action against you.
+- Work with you to understand and resolve the issue promptly.
+- Credit you in the disclosure (unless you prefer to remain anonymous).
+
+Good faith means: you do not exploit the vulnerability beyond what is needed to demonstrate it, you do not access or modify data that is not yours, you do not degrade the service, and you give us reasonable time to fix the issue before public disclosure.
+
+---
+
+## 2. Secret Storage
 
 All sensitive credentials **must** be stored outside of version control:
 
@@ -19,7 +92,7 @@ All sensitive credentials **must** be stored outside of version control:
 
 ---
 
-## 2. Pre-commit Hooks
+## 3. Pre-commit Hooks
 
 The repository uses [pre-commit](https://pre-commit.com/) to run secret scanning before every commit.
 
@@ -48,7 +121,7 @@ pre-commit run --all-files
 
 ---
 
-## 3. CI Secret Scanning
+## 4. CI Secret Scanning
 
 The [`.github/workflows/secret-scanning.yml`](../.github/workflows/secret-scanning.yml) workflow runs automatically on every push and pull request.
 
@@ -60,7 +133,7 @@ It consists of three jobs:
 
 ---
 
-## 4. Baseline File
+## 5. Baseline File
 
 The `.secrets.baseline` file is a JSON file that records known false-positive matches (e.g., test tokens in `.env.example`). It is committed to the repo so that CI can verify no _new_ secrets are introduced.
 
@@ -80,7 +153,7 @@ git commit -m "chore: update secret scanning baseline"
 
 ---
 
-## 5. `.env.example` Guidelines
+## 6. `.env.example` Guidelines
 
 The `.env.example` file serves as a template for developers. It must contain **only placeholder values**:
 
@@ -96,7 +169,7 @@ STELLAR_SECRET_KEY=SBFG...
 
 ---
 
-## 6. Incident Response
+## 7. Incident Response
 
 If a secret is accidentally committed:
 
@@ -107,7 +180,7 @@ If a secret is accidentally committed:
 
 ---
 
-## 7. Quick Reference
+## 8. Quick Reference
 
 ```bash
 # Run local secret scan

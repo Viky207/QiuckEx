@@ -19,6 +19,7 @@ graph TD
 - **Frontend:** Next.js app for user interaction
 - **Backend:** NestJS API server
 - **Contracts:** Soroban smart contracts (Rust)
+- **Mobile App:** Expo Router app in `app/mobile` — see [Mobile Architecture](./MOBILE-ARCHITECTURE.md)
 
 ---
 

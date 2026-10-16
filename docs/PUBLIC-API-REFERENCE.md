@@ -234,157 +234,88 @@ If-None-Match: <optional-etag>
       {
         "code": "XLM",
         "issuer": null,
-        "type": "native",
-        "domain": "stellar.org",
-        "decimals": 7
-      },
-      {
-        "code": "USDC",
-        "issuer": "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
-        "type": "credit_alphanum4",
-        "domain": "centre.io",
-        "decimals": 7
+        "decimals": 7,
+        "verified": true
       }
     ]
   }
   ```
 
-#### `POST /stellar/path-preview`
-- **Description**: Computes optimal strict-receive cross-asset paths across Horizon order books and Soroban AMMs.
-- **Authorization**: Public / Optional `X-API-Key`
-- **Request Body**:
-  ```json
-  {
-    "sourceAccount": "GSOURCE...",
-    "destAsset": "USDC:GA5Z...",
-    "destAmount": "100.00"
-  }
-  ```
-- **Response `200 OK`**: Candidate paths, required source amounts, path hops, and estimated slippage.
+---
 
-#### `POST /stellar/soroban-preflight`
-- **Description**: Preflights Soroban contract execution via Soroban RPC simulation.
-- **Authorization**: Public / Optional `X-API-Key`
-- **Feature Gate**: `testnet.contract_writes` (Testnet only; 503 on Mainnet until post-audit).
-- **Request Body**: `{ "sourceAccount": "GSOURCE..." }`
-- **Response `200 OK`**: Simulation results, resource footprint, CPU instructions, and required auth entries.
-- **Error `503 Service Unavailable`**:
-  ```json
-  {
-    "code": "CONTRACT_NOT_CONFIGURED",
-    "message": "Soroban contract ID is not configured on this network."
-  }
-  ```
+## 4. Versioning Policy
+
+The QuickEx public API is versioned so that third-party integrators can track
+changes and migrate safely. This section defines how versions are bumped, the
+deprecation timeline, and how breaking changes are announced.
+
+### 4.1 URL Versioning Strategy
+
+The public API uses **URL path versioning** with a `/v1/` prefix, for example:
+
+```
+https://api.quickex.to/v1/username/alice
+https://api.quickex.to/v1/links/metadata
+```
+
+The version segment is the first path component after the host. Header-based
+versioning (e.g. `Accept: application/vnd.quickex.v1+json`) is **not** used, so
+clients can pin a version simply by choosing the correct base URL. The current
+stable version is **v1**.
+
+### 4.2 Semantic Versioning
+
+API versions follow `vMAJOR` semantics:
+
+- **MAJOR** (`v1` → `v2`): Introduced only for breaking changes. A new major
+  version is published alongside the previous one; the previous version keeps
+  working for the deprecation window described below.
+- **Non-breaking additions** (new optional fields, new endpoints, new optional
+  query parameters) are shipped within the current major version and recorded in
+  [`docs/API-CHANGELOG.md`](./API-CHANGELOG.md) under `Added`.
+
+### 4.3 What Counts as a Breaking Change
+
+A change is **breaking** if it does any of the following:
+
+- Removes a field from a response body.
+- Changes the type of an existing field (e.g. `string` → `number`).
+- Adds a new **required** request field or parameter.
+- Changes an HTTP status code returned for an existing outcome.
+- Removes or renames an endpoint, or changes its HTTP method.
+- Changes authentication or authorization requirements for an existing endpoint.
+
+Breaking changes require a new major version and a changelog entry under
+`Changed`, `Removed`, or `Security` in
+[`docs/API-CHANGELOG.md`](./API-CHANGELOG.md).
+
+### 4.4 Deprecation Timeline
+
+- Deprecated endpoints, fields, or parameters are announced in
+  [`docs/API-CHANGELOG.md`](./API-CHANGELOG.md) under `Deprecated` and marked in
+  this reference.
+- Deprecated surface area remains functional for **at least 6 months** from the
+  date of the deprecation announcement.
+- Deprecated responses include a `Deprecation` header and a `Sunset` header
+  (RFC 8594) indicating the removal date.
+- After the 6-month window, the deprecated surface area may be removed in the
+  next major version.
+
+### 4.5 How Breaking Changes Are Announced
+
+1. A new entry is added to [`docs/API-CHANGELOG.md`](./API-CHANGELOG.md)
+   describing the change and its migration path.
+2. The change is reflected in this reference and in
+   [`docs/BACKEND-CLIENT-CONTRACT-MAP.md`](./BACKEND-CLIENT-CONTRACT-MAP.md) so
+   backend clients can be updated in lockstep.
+3. The new major version is published at its own `/vN/` base URL while the
+   previous version continues to serve traffic for the deprecation window.
+4. Any pull request that modifies `docs/openapi.json` must also update
+   [`docs/API-CHANGELOG.md`](./API-CHANGELOG.md); this is enforced by CI.
 
 ---
 
-### 3.6 Transactions (Non-Custodial Pipeline)
+## 5. Related Documents
 
-#### `GET /transactions`
-- **Description**: Returns paginated transaction history for a given Stellar account address.
-- **Authorization**: Public / Optional `X-API-Key`
-- **Query Parameters**: `accountId` (required), `limit` (default 20, max 100), `cursor`
-- **Response `200 OK`**: Paginated array of decoded Stellar transaction objects.
-
-#### `POST /transactions/compose` (and compatibility alias `POST /transactions/build`)
-- **Description**: Composes an unsigned Stellar transaction envelope for client-side signing. Preserves self-custody.
-- **Authorization**: Optional `X-API-Key`
-- **Feature Gate**: `testnet.contract_writes` on Testnet; disabled on Mainnet.
-- **Request Body**:
-  ```json
-  {
-    "sourceAccount": "GSOURCE...",
-    "destinationAccount": "GDEST...",
-    "amount": "50.00",
-    "asset": "USDC:GA5Z...",
-    "memo": "QuickEx Escrow #12"
-  }
-  ```
-- **Response `200 OK`**:
-  ```json
-  {
-    "unsignedXdr": "AAAAAgAAAAD...",
-    "networkPassphrase": "Test SDF Network ; September 2015",
-    "correlationId": "tx_req_8923a"
-  }
-  ```
-
----
-
-### 3.7 Contract Registry & Rollback Governance
-
-#### `GET /contracts/registry`
-- **Description**: Retrieves currently active Soroban contract IDs and active WASM hashes by network.
-- **Authorization**: Public
-- **Headers Returned**: `ETag: "<registry-hash>"`
-- **Response `200 OK`**:
-  ```json
-  {
-    "network": "testnet",
-    "contractId": "CD2J6K7T3YJ77QXZP3...",
-    "wasmHash": "a1b2c3d4e5f6...",
-    "version": 1,
-    "updatedAt": "2026-09-20T00:00:00Z"
-  }
-  ```
-- **Response `304 Not Modified`**: When client sends matching `If-None-Match`.
-
-#### `POST /contracts/registry/publish`
-- **Description**: Publishes a new contract deployment ID.
-- **Authorization**: Admin Key (`@RequireScopes('admin')`)
-- **Request Body**: `{ "network": "testnet", "contractId": "...", "wasmHash": "...", "version": 2 }`
-- **Response `201 Created`**: Updated registry record.
-
-#### `POST /contracts/registry/rollback`
-- **Description**: Rollback active contract to the preceding verified deployment in the event of an exploit or critical defect.
-- **Authorization**: Admin Key (`@RequireScopes('admin')`)
-- **Response `200 OK`**: Rollback confirmation record.
-
----
-
-### 3.8 Developer Self-Service & Webhooks
-
-#### `GET /api-keys` & `POST /api-keys`
-- **Description**: Manage developer API keys and rate tiers.
-- **Authorization**: Wallet Authenticated
-- **Response `201 Created`**: Includes plaintext API key string **once** upon creation.
-
-#### `POST /webhooks/:publicKey`
-- **Description**: Registers an automated HTTP webhook endpoint for payment event notifications.
-- **Authorization**: API Key
-- **Request Body**:
-  ```json
-  {
-    "targetUrl": "https://merchant.example.com/webhooks/quickex",
-    "events": ["payment.created", "payment.fulfilled", "escrow.funded"]
-  }
-  ```
-- **Response `201 Created`**: Registered webhook with HMAC signing secret.
-
-#### `POST /webhooks/verify-signature`
-- **Description**: Utility endpoint to verify webhook payload HMAC signatures.
-- **Authorization**: Public
-
----
-
-## 4. Error Reference Matrix
-
-| Error Code | HTTP Status | Description |
-|---|---|---|
-| `VALIDATION_ERROR` | 400 | Payload failed schema validation rules. |
-| `UNAUTHORIZED` | 401 | Missing or invalid API key or signature. |
-| `FORBIDDEN` | 403 | Insufficient scope or mainnet feature-gate restriction. |
-| `USERNAME_NOT_FOUND` | 404 | Target username is not registered in registry. |
-| `NONCE_ALREADY_USED` | 409 | Nonce or transaction has already been processed (INV-07). |
-| `RATE_LIMIT_EXCEEDED`| 429 | Exceeded burst or sustained request quota. |
-| `DEPENDENCY_ERROR` | 502 | Upstream Stellar Horizon or Soroban RPC node error. |
-| `SPEC_NOT_READY` | 503 | OpenAPI spec generator is bootstrapping. |
-| `CONTRACT_NOT_CONFIGURED` | 503 | Requested smart contract is not deployed on this network. |
-
----
-
-## 5. Security & Observability Guarantees
-
-- **No Secret Logging**: Winston and Sentry loggers run redaction filters (`redaction.util.ts`) stripping private keys (`S...`), seed phrases, and database connection secrets.
-- **Trace Context**: Every request carries an `X-Request-Id` or `correlationId` logged in JSON format for correlation with client SDKs.
-- **Metrics**: Endpoints export Prometheus counters (`http_requests_total`) and latency histograms (`http_request_duration_seconds`).
+- [`docs/API-CHANGELOG.md`](./API-CHANGELOG.md) — public API changelog.
+- [`docs/BACKEND-CLIENT-CONTRACT-MAP.md`](./BACKEND-CLIENT-CONTRACT-MAP.md) — backend client contract map.
