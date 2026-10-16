@@ -251,3 +251,8 @@ This project is licensed under the MIT License.
 - Have questions? Open an issue or DM @pulsefy.
 
 Built with ❤️ by Pulsefy. Powered by Stellar. 🚀
+
+## Handsoff notes
+
+<!-- handsoff-issue-374 -->
+- #374: bug(contract): Escrow release panics when recipient address is a contract account
