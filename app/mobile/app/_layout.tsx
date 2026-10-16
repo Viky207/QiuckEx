@@ -177,7 +177,16 @@ function AppShell() {
   const [pendingDeepLink, setPendingDeepLink] = useState<DeepLinkRoute | null>(null);
   const [pendingLinkError, setPendingLinkError] = useState<{ message: string; url: string } | null>(null);
 
-  const canRouteDeepLink = !onboardingLoading && hasCompletedOnboarding;
+  // A deep link that resolves to a payment route should bypass onboarding so
+  // recipients arriving from a shared payment link land directly on the flow.
+  const isPaymentDeepLink = (route: DeepLinkRoute | null): boolean => {
+    if (!route) return false;
+    const pathname = route.pathname ?? '';
+    return pathname.startsWith('/pay') || pathname.startsWith('/claim');
+  };
+
+  const canRouteDeepLink =
+    !onboardingLoading && (hasCompletedOnboarding || isPaymentDeepLink(pendingDeepLink));
 
   useEffect(() => {
     if (!canRouteDeepLink) return;
@@ -206,7 +215,7 @@ function AppShell() {
 
   const enqueueRoute = useCallback(
     (route: DeepLinkRoute) => {
-      if (canRouteDeepLink) {
+      if (canRouteDeepLink || isPaymentDeepLink(route)) {
         router.push({ pathname: route.pathname, params: route.params });
         return;
       }
@@ -242,31 +251,13 @@ function AppShell() {
     <>
       <OfflineBanner />
       <Stack screenOptions={{ headerShown: false }}>
-        <Stack.Screen name="onboarding" />
-        <Stack.Screen name="index" />
-        <Stack.Screen name="security" />
-        <Stack.Screen name="wallet-connect" />
-        <Stack.Screen name="scan-to-pay" />
-        <Stack.Screen name="payment-confirmation" />
-        <Stack.Screen name="transactions" />
-        <Stack.Screen name="transaction/[id]" />
-        <Stack.Screen name="escrow/[id]" />
-        <Stack.Screen name="listing/[id]" />
-        <Stack.Screen name="inbox" />
-        <Stack.Screen name="notification-debug" />
-        <Stack.Screen name="deep-link-debug" />
-        <Stack.Screen name="link-error" />
-        <Stack.Screen name="qa-smoke-checklist" />
-        <Stack.Screen name="offline-queue-inspector" />
-        <Stack.Screen name="contacts" />
-        <Stack.Screen name="add-contact" />
-        <Stack.Screen name="edit-contact" />
-        <Stack.Screen name="feedback" />
+        <Stack.Screen name="onboarding" options={{ headerShown: false }} />
       </Stack>
-      {isReady && settings.biometricLockEnabled ? (
+      {isReady && isAppLocked ? (
         <AppLockOverlay
-          visible={isAppLocked}
+          settings={settings}
           onUnlock={unlockApp}
+          getSessionExplanation={getSessionExplanation}
         />
       ) : null}
     </>

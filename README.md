@@ -251,3 +251,8 @@ This project is licensed under the MIT License.
 - Have questions? Open an issue or DM @pulsefy.
 
 Built with ❤️ by Pulsefy. Powered by Stellar. 🚀
+
+## Handsoff notes
+
+<!-- handsoff-issue-395 -->
+- #395: design(frontend): Empty states and loading skeletons for all dashboard data sections
