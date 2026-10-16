@@ -1,0 +1,41 @@
+# cargo-deny configuration for the QuickEx privacy contract.
+# Enforces license compatibility and blocks vulnerable dependencies before
+# they can reach mainnet. See https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+# Check all targets and features so dev/build-only deps are covered too.
+all-features = true
+
+[advisories]
+# Fail the build on any active advisory from the RustSec database.
+vulnerability = "deny"
+# Deny unmaintained crates as well; they are a supply-chain risk.
+unmaintained = "deny"
+# Deny advisories with a CVSS score >= 7.0 (high/critical).
+# Lower-severity advisories are surfaced but do not fail the build.
+severity-threshold = "high"
+# Ignore list: add entries here only with a justification comment, e.g.
+# ignore = [
+#   "RUSTSEC-0000-0000", # <reason this advisory does not affect us>
+# ]
+
+[licenses]
+# Only allow OSI-approved, permissive licenses compatible with our terms.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "ISC",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+]
+# Fail on any license not in the allowlist.
+confidence-threshold = 0.8
+
+[bans]
+# Keep the dependency graph free of duplicate major versions where possible.
+multiple-versions = "warn"
+
+[sources]
+# Only pull crates from crates.io; block unknown registries and git sources.
+unknown-registry = "deny"
+unknown-git = "deny"

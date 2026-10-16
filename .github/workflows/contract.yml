@@ -73,3 +73,92 @@ jobs:
 
       - name: Run tests
         run: cargo test
+
+  security:
+    name: Supply Chain Security
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app/contract
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "app/contract"
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+
+      - name: Run cargo-deny (licenses and advisories)
+        run: cargo deny check
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      - name: Run cargo-audit (vulnerability database)
+        run: cargo audit
+
+  mainnet-gate:
+    name: Mainnet Deployment Gate
+    runs-on: ubuntu-latest
+    needs: [ test, security ]
+    defaults:
+      run:
+        working-directory: app/contract
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "app/contract"
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      - name: Run mainnet deployment gate
+        working-directory: .
+        run: bash app/contract/scripts/mainnet-gate.sh
+
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    needs: [ mainnet-gate ]
+    if: github.ref == 'refs/heads/main'
+    defaults:
+      run:
+        working-directory: app/contract
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy contract
+        run: echo "Deploying contract to mainnet..."
