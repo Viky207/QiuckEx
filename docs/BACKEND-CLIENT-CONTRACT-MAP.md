@@ -18,7 +18,7 @@ Scope: REST contracts between clients and the NestJS backend. For the complete r
 Auth conventions:
 
 - **Public** (rate-throttled, no key): `docs` (`/docs`, `/docs/json`, `/docs/openapi.json`), `health`/`ready`/`status`, `username/*`, `payment-links/status`, `v1/receipts/*`
-- **Optional `X-API-Key`** (higher rate limits via `ApiKeyGuard`): `links/metadata`, `transactions`, `stellar/*`, `analytics/*`, `contracts/registry` reads
+- **Optional `X-API-Key`** (higher rate limits via `ApiKeyGuard`): `links/metadata`, `transactions`, `payments/recent`, `stellar/*`, `analytics/*`, `contracts/registry` reads
 - **Admin-scoped API key** (`@RequireScopes('admin')`): all `admin/*` controllers, contract registry writes (`publish`, `PUT deployments/:name`, `rollback`)
 - Errors follow the global envelope `{ code, message, fields? }` (global `ValidationPipe` in `main.ts`, e.g. `VALIDATION_ERROR`)
 
@@ -100,6 +100,7 @@ Mainnet submission is gated behind `TESTNET_CONTRACT_WRITES_FLAG` (same flag use
 | Link generator — create link | `POST /links/metadata` | `links` (`links.controller.ts`) | `LinkMetadataRequestDto` → `{ success, data: LinkMetadataResponseDto }`; optional `X-API-Key` raises rate limit 20→120 req/min |
 | Link generator — CSV bulk | `POST /links/bulk/generate` | `links` (`bulk-payment-links.controller.ts`, prefix `links/bulk`) | `{ links: [...] }` → per-row results |
 | Dashboard analytics (`hooks/analyticsApi.ts`) | `GET /analytics/report?publicKey&startDate&endDate&interval` | `analytics` (`analytics.controller.ts`) | → summary + asset distribution + time-series; client falls back to empty data on failure |
+| Dashboard recent payments (`hooks/activityFeedApi.ts`) | `GET /payments/recent?address&limit&cursor&since` | `payments` (`payments.controller.ts`) | `{ items, nextCursor? }`; read-only Horizon pages, optional API key for higher limits; see [Recent payments contract](#recent-payments-contract-get-paymentsrecent) |
 | Analytics export | `GET /analytics/export?...&format` | `analytics` | → CSV/PDF stream (tax/accounting report) |
 | Marketplace (`hooks/marketplaceApi.ts`) | `GET /marketplace?limit&cursor`, `GET /marketplace/:listingId/detail?viewerPublicKey` | `marketplace` (`marketplace.controller.ts`) | Cursor-paginated listings; detail view is viewer-aware |
 | Developer settings (`settings/developer/page.tsx`) | `GET/POST /api-keys`, `GET /api-keys/usage`, `DELETE /api-keys/:id`, `POST /api-keys/:id/rotate` | `api-keys` (`api-keys.controller.ts`) | Key CRUD; create/rotate responses include the plaintext `key` once |
@@ -124,6 +125,19 @@ Mainnet submission is gated behind `TESTNET_CONTRACT_WRITES_FLAG` (same flag use
 | Session bootstrap (`services/session-bootstrap.ts`) | `GET /session/bootstrap` (Bearer = publicKey) | `session` (`session.controller.ts`) | Runtime configuration, active feature flags, unread count, and authenticated account context; degrades safely when offline |
 | In-app feedback (`services/feedback.ts`) | ⚠️ `POST /feedback` | — | **No backend controller.** Client intentionally degrades to an exportable payload on failure |
 | Share receipt (`src/screens/ReceiptScreen.tsx`, `hooks/useShareReceipt.ts`) | `${baseUrl}/tx/:receiptHash` | — | A **web** share URL, not an API call. Note the actual receipts API is `GET /v1/receipts/tx/:txHash` — don't confuse the two |
+
+## Recent payments contract (`GET /payments/recent`)
+
+Owned by `app/backend/src/payments/payments.controller.ts`; consumed by the dashboard through `app/frontend/src/hooks/activityFeedApi.ts`.
+
+- Request: required `address` (Stellar `G...` public key); optional `limit` (1–200, default 20), `cursor` (Horizon paging token from `nextCursor`), and `since` (positive epoch milliseconds or ISO timestamp). Pages are newest-first.
+- Response: `{ items: TransactionItem[], nextCursor?: string }`. `nextCursor` is omitted when Horizon has no further page. Existing consumers that only read `items` remain compatible.
+- Authorization: ledger operations are public data, so this endpoint does not claim wallet ownership or require a signature. An optional `X-API-Key` is validated for higher rate limits; an invalid supplied key returns 401 `INVALID_API_KEY`. A valid Stellar address is not proof of ownership. This route never signs, submits, or moves funds.
+- Idempotency/retries: GET is safe to retry with the same address and cursor. Horizon paging tokens anchor the page; the dashboard merges by transaction hash so replayed pages do not duplicate rows. No idempotency key or write rollback is applicable.
+- Stable failures: malformed/missing address, malformed limit/cursor/since → 400 `VALIDATION_ERROR`; Horizon rejects an old/unavailable cursor → 400 `PAYMENTS_CURSOR_EXPIRED` (restart at page one); unknown account → 404 `PAYMENTS_ACCOUNT_NOT_FOUND`; Horizon failure → 503 `PAYMENTS_UNAVAILABLE`. A network retry after 503 can use the same cursor. No local records are mutated on failure.
+- Network/configuration: reads follow backend `NETWORK` and configured `HORIZON_URL`; testnet and mainnet remain isolated by existing runtime configuration. This public read is not feature-gated because it does not perform a write. No new configuration or database migration is introduced; contract writes retain their existing mainnet gates.
+- Observability: `http_requests_total{method,route,status_code}` and `http_request_duration_seconds{method,route,status_code}` cover outcome and latency. `payments.recent.completed` records outcome, duration, page size, and item count only. Request logs omit query strings, so wallet addresses and cursors are not emitted; memos and transaction records are never logged.
+- Operations/recovery: on 503, inspect Horizon health and the `payment_availability` SLO/dependency probes, then retry the same GET. If the cursor is rejected, refresh from the first page. There is no queue, financial rollback, or migration to run. Record these network/custody/compatibility assumptions and run `pnpm --dir app/backend exec jest --config jest.unit.config.ts src/payments/payments.controller.unit.spec.ts --runInBand` and `pnpm --dir app/frontend exec vitest run __tests__/activityFeedApi.test.ts` in the PR description.
 
 ## Profile update contract (`PATCH /username/profile`)
 
@@ -225,7 +239,6 @@ Useful when picking issues — these are "wire the client" opportunities, not ne
 | `GET /username/search`, `/trending`, `/recently-active`, `/featured`, `POST /username/toggle-public` | `usernames` | `app/backend/docs/API-REFERENCE-PUBLIC-PROFILES.md` |
 | `links/recurring/*` | `links` (`recurring-payments.controller.ts`) | `app/backend/docs/RECURRING-PAYMENTS.md` |
 | `GET /v1/receipts/address/:address` | `receipts` | (Address-level listing; single tx verified via `services/receipts.ts`) |
-| `GET /payments/recent` | `payments` | — |
 | `POST /stellar/quote`, `GET /stellar/quote/:quoteId`, `POST /stellar/path-preview/strict-send` | `stellar` | — |
 | `GET /analytics/time-series`, `GET /analytics/assets` | `analytics` | `app/backend/docs/ANALYTICS-API.md` (frontend uses only `report`/`export`) |
 | `notifications/preferences/*` | `notifications` | — |

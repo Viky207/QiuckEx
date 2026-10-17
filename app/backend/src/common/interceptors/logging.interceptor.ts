@@ -50,7 +50,8 @@ export class LoggingInterceptor implements NestInterceptor {
       (request as Record<string, unknown>)['correlationId'] ||
       'N/A';
     const userId = this.extractUserId(request);
-    const routePath = route?.path || url;
+    const safeUrl = typeof url === 'string' ? url.split('?')[0] : url;
+    const routePath = route?.path || safeUrl;
     const now = Date.now();
 
     const sanitizedBody = this.sanitise(body);
@@ -65,7 +66,7 @@ export class LoggingInterceptor implements NestInterceptor {
               userId,
               route: routePath,
               method,
-              url,
+              url: safeUrl,
               duration: `${duration}ms`,
               body: sanitizedBody,
               status: 'success',
@@ -82,7 +83,7 @@ export class LoggingInterceptor implements NestInterceptor {
               userId,
               route: routePath,
               method,
-              url,
+              url: safeUrl,
               duration: `${duration}ms`,
               status: 'error',
               statusCode,

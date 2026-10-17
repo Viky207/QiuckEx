@@ -91,7 +91,7 @@ describe('HorizonService', () => {
                 txHash: 'hash1',
                 pagingToken: 'token1',
             });
-            expect(result.nextCursor).toBe('token2');
+            expect(result.nextCursor).toBeUndefined();
         });
 
         it('should return cached results on subsequent calls', async () => {

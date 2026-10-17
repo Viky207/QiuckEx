@@ -1,6 +1,10 @@
 import { Test, TestingModule } from "@nestjs/testing";
-import { PaymentsController } from "./payments.controller";
+import { BadRequestException, NotFoundException } from "@nestjs/common";
+import { validateSync } from "class-validator";
+import { PaymentsController, RecentPaymentsQuery } from "./payments.controller";
 import { HorizonService } from "../transactions/horizon.service";
+
+const WALLET = `G${"A".repeat(55)}`;
 
 describe("PaymentsController", () => {
   let controller: PaymentsController;
@@ -39,7 +43,7 @@ describe("PaymentsController", () => {
           source: "GSOURCE1",
           destination: "GDEST1",
           status: "Success" as const,
-          pagingToken: "tok1",
+          pagingToken: "100",
         },
         {
           amount: "100.0000000",
@@ -50,7 +54,7 @@ describe("PaymentsController", () => {
           source: "GSOURCE2",
           destination: "GDEST1",
           status: "Success" as const,
-          pagingToken: "tok2",
+          pagingToken: "200",
         },
         {
           amount: "25.0000000",
@@ -61,31 +65,44 @@ describe("PaymentsController", () => {
           source: "GSOURCE3",
           destination: "GDEST1",
           status: "Success" as const,
-          pagingToken: "tok3",
+          pagingToken: "300",
         },
       ],
-      nextCursor: "tok3",
+      nextCursor: "300",
     };
 
-    it("should return empty items when address is not provided", async () => {
-      const result = await controller.recent({ address: "" });
-      expect(result).toEqual({ items: [] });
+    it("rejects missing or malformed addresses before making a Horizon call", () => {
+      const query = Object.assign(new RecentPaymentsQuery(), { address: "" });
+      expect(validateSync(query).some((error) => error.property === "address")).toBe(true);
       expect(horizonService.getPayments).not.toHaveBeenCalled();
+    });
+
+    it("rejects malformed cursors and out-of-range page sizes", () => {
+      const query = Object.assign(new RecentPaymentsQuery(), {
+        address: WALLET,
+        cursor: "cursor/not-numeric",
+        limit: 201,
+      });
+      const invalidFields = validateSync(query).map((error) => error.property);
+
+      expect(invalidFields).toContain("cursor");
+      expect(invalidFields).toContain("limit");
     });
 
     it("should return all payments when no since filter is given", async () => {
       horizonService.getPayments.mockResolvedValue(mockPayments);
 
       const result = await controller.recent({
-        address: "GDEST1",
+        address: WALLET,
         limit: 20,
       });
 
       expect(result.items).toHaveLength(3);
       expect(horizonService.getPayments).toHaveBeenCalledWith(
-        "GDEST1",
+        WALLET,
         undefined,
         20,
+        undefined,
       );
     });
 
@@ -93,7 +110,7 @@ describe("PaymentsController", () => {
       horizonService.getPayments.mockResolvedValue(mockPayments);
 
       const result = await controller.recent({
-        address: "GDEST1",
+        address: WALLET,
         since: "2026-06-10T00:00:00Z",
         limit: 20,
       });
@@ -111,7 +128,7 @@ describe("PaymentsController", () => {
       const sinceMs = new Date("2026-06-10T00:00:00Z").getTime().toString();
 
       const result = await controller.recent({
-        address: "GDEST1",
+        address: WALLET,
         since: sinceMs,
         limit: 20,
       });
@@ -125,12 +142,13 @@ describe("PaymentsController", () => {
         nextCursor: undefined,
       });
 
-      await controller.recent({ address: "GDEST1" });
+      await controller.recent({ address: WALLET });
 
       expect(horizonService.getPayments).toHaveBeenCalledWith(
-        "GDEST1",
+        WALLET,
         undefined,
         20,
+        undefined,
       );
     });
 
@@ -140,21 +158,77 @@ describe("PaymentsController", () => {
         nextCursor: undefined,
       });
 
-      const result = await controller.recent({ address: "GDEST1" });
+      const result = await controller.recent({ address: WALLET });
       expect(result.items).toHaveLength(0);
     });
 
-    it("should handle invalid since value gracefully (return all)", async () => {
+    it("rejects a malformed since timestamp with a stable validation code", async () => {
+      await expect(controller.recent({
+        address: WALLET,
+        since: "not-a-date",
+      })).rejects.toMatchObject({
+        response: { code: "VALIDATION_ERROR" },
+      });
+      expect(horizonService.getPayments).not.toHaveBeenCalled();
+    });
+
+    it("passes the cursor to Horizon and returns its next cursor", async () => {
       horizonService.getPayments.mockResolvedValue(mockPayments);
 
       const result = await controller.recent({
-        address: "GDEST1",
-        since: "not-a-date",
-        limit: 20,
+        address: WALLET,
+        limit: 2,
+        cursor: "12345",
       });
 
-      // parseSince returns undefined for invalid values → no filtering
-      expect(result.items).toHaveLength(3);
+      expect(horizonService.getPayments).toHaveBeenCalledWith(
+        WALLET,
+        undefined,
+        2,
+        "12345",
+      );
+      expect(result.nextCursor).toBe("300");
+    });
+
+    it("returns a stable error for an expired Horizon cursor", async () => {
+      horizonService.getPayments.mockRejectedValue(new BadRequestException());
+
+      await expect(controller.recent({
+        address: WALLET,
+        cursor: "12345",
+      })).rejects.toMatchObject({
+        response: { code: "PAYMENTS_CURSOR_EXPIRED" },
+      });
+    });
+
+    it("returns a stable not-found error for an address absent from Horizon", async () => {
+      horizonService.getPayments.mockRejectedValue(new NotFoundException());
+
+      await expect(controller.recent({ address: WALLET })).rejects.toMatchObject({
+        response: { code: "PAYMENTS_ACCOUNT_NOT_FOUND" },
+      });
+    });
+
+    it("maps dependency failures to a stable unavailable response", async () => {
+      horizonService.getPayments.mockRejectedValue(new Error("Horizon timeout"));
+
+      await expect(controller.recent({ address: WALLET })).rejects.toMatchObject({
+        response: { code: "PAYMENTS_UNAVAILABLE" },
+      });
+    });
+
+    it("recovers on a safe retry after a dependency failure", async () => {
+      horizonService.getPayments
+        .mockRejectedValueOnce(new Error("Horizon timeout"))
+        .mockResolvedValueOnce(mockPayments);
+
+      await expect(controller.recent({ address: WALLET })).rejects.toMatchObject({
+        response: { code: "PAYMENTS_UNAVAILABLE" },
+      });
+      await expect(controller.recent({ address: WALLET })).resolves.toMatchObject({
+        items: mockPayments.items,
+        nextCursor: mockPayments.nextCursor,
+      });
     });
   });
 });

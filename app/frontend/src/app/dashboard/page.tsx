@@ -5,7 +5,6 @@ import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import AnalyticsDashboard from "@/components/AnalyticsDashboard";
 import { NetworkBadge } from "@/components/NetworkBadge";
-import { useApi } from "@/hooks/useApi";
 import { fetchAnalytics, type AnalyticsData } from "@/hooks/analyticsApi";
 import {
   fetchUserBids,
@@ -15,8 +14,10 @@ import {
   type UserListing,
 } from "@/hooks/marketplaceApi";
 import {
+  appendUniqueActivityItems,
   fetchActivityFeed,
   type ActivityFeedItem,
+  type ActivityFeedResponse,
 } from "@/hooks/activityFeedApi";
 import {
   filterActivityItems,
@@ -25,11 +26,6 @@ import {
 } from "@/lib/activityFilters";
 import { PaymentHistoryFilters } from "@/components/PaymentHistoryFilters";
 import { cacheInvalidator } from "@/lib/cacheInvalidation";
-
-type DashboardResponse = {
-  items: ActivityFeedItem[];
-  degraded: boolean;
-};
 
 function toAnchorId(prefix: string, value: string) {
   return `${prefix}-${value.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
@@ -65,7 +61,10 @@ function formatCurrency(val: number): string {
 
 function DashboardContent() {
   const searchParams = useSearchParams();
-  const { data, error, loading, callApi } = useApi<DashboardResponse>();
+  const [data, setData] = useState<ActivityFeedResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [userBids, setUserBids] = useState<UserBid[]>([]);
   const [userListings, setUserListings] = useState<UserListing[]>([]);
   const [bidsLoading, setBidsLoading] = useState(true);
@@ -74,6 +73,23 @@ function DashboardContent() {
   const [listingsError, setListingsError] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [feedRetryCount, setFeedRetryCount] = useState(0);
+
+  const refreshActivity = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const refreshed = await fetchActivityFeed(20);
+      setData((current) =>
+        refreshed.degraded && current
+          ? { ...current, degraded: true, error: refreshed.error }
+          : refreshed,
+      );
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Activity could not be loaded.");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
   const [metricsData, setMetricsData] = useState<AnalyticsData | null>(null);
   const [metricsLoading, setMetricsLoading] = useState(true);
@@ -103,7 +119,7 @@ function DashboardContent() {
   }, [loadMetrics]);
 
   useEffect(() => {
-    void callApi(() => fetchActivityFeed(20));
+    void refreshActivity();
     void fetchUserBids().then(setUserBids);
     void fetchUserListings().then(setUserListings);
 
@@ -113,12 +129,12 @@ function DashboardContent() {
         event.type === "link_created" ||
         event.type === "activity_feed_cleared"
       ) {
-        void callApi(() => fetchActivityFeed(20));
+        void refreshActivity();
         void loadMetrics();
       }
     });
     return () => unsubscribe();
-  }, [callApi, feedRetryCount, loadMetrics]);
+  }, [feedRetryCount, loadMetrics, refreshActivity]);
 
   useEffect(() => {
     if (!statusMessage) {
@@ -221,6 +237,22 @@ function DashboardContent() {
 
   const handleRetry = () => {
     setFeedRetryCount((prev) => prev + 1);
+  };
+
+  const handleLoadMore = async () => {
+    if (!data?.nextCursor || loadingMore) return;
+    const previousData = data;
+    setLoadingMore(true);
+    try {
+      const nextPage = await fetchActivityFeed(20, previousData.nextCursor);
+      setData({
+        ...nextPage,
+        items: appendUniqueActivityItems(previousData.items, nextPage.items),
+        nextCursor: nextPage.degraded ? previousData.nextCursor : nextPage.nextCursor,
+      });
+    } finally {
+      setLoadingMore(false);
+    }
   };
 
   if (loading) {
@@ -578,6 +610,16 @@ function DashboardContent() {
                   >
                     Clear filters
                   </button>
+                  {data?.nextCursor ? (
+                    <button
+                      type="button"
+                      onClick={handleLoadMore}
+                      disabled={loadingMore}
+                      className={`mt-3 rounded-xl border border-border bg-card px-4 py-2 text-sm font-semibold text-foreground transition hover:border-indigo-300/40 disabled:opacity-50 ${FOCUS_RING_CLASS}`}
+                    >
+                      {loadingMore ? "Loading payments..." : "Load more payments"}
+                    </button>
+                  ) : null}
                 </div>
               ) : (
                 <>
@@ -671,7 +713,17 @@ function DashboardContent() {
                     </table>
                   </div>
 
-                  <div className="bg-surface p-6 text-center sm:p-8">
+                  <div className="flex flex-col items-center gap-4 bg-surface p-6 text-center sm:p-8">
+                    {data?.nextCursor ? (
+                      <button
+                        type="button"
+                        onClick={handleLoadMore}
+                        disabled={loadingMore}
+                        className={`rounded-xl border border-border bg-card px-4 py-2 text-sm font-semibold text-foreground transition hover:border-indigo-300/40 disabled:opacity-50 ${FOCUS_RING_CLASS}`}
+                      >
+                        {loadingMore ? "Loading payments..." : "Load more payments"}
+                      </button>
+                    ) : null}
                     <Link
                       href="/notifications?category=payments"
                       className={`text-sm font-semibold text-muted transition hover:text-foreground ${FOCUS_RING_CLASS}`}

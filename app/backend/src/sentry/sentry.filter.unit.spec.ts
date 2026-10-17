@@ -108,6 +108,30 @@ describe('SentryExceptionFilter', () => {
     expect(body.token).toBe('[REDACTED]');
   });
 
+  it('should omit payment query values and URL query strings from Sentry context', () => {
+    mockRequest.url = '/payments/recent?address=GSECRET&cursor=12345';
+    mockRequest.path = '/payments/recent';
+    mockRequest.query = {
+      address: 'GSECRET',
+      cursor: '12345',
+      memo: 'private memo',
+    };
+    const error = new Error('Crash');
+
+    expect(() => filter.catch(error, mockHost as never)).toThrow(error);
+
+    const capturedExtras = mockSentryService.captureException.mock.calls[0][1] as Record<
+      string,
+      unknown
+    >;
+    expect(capturedExtras.url).toBe('/payments/recent');
+    expect(capturedExtras.query).toEqual({
+      address: '[REDACTED]',
+      cursor: '[REDACTED]',
+      memo: '[REDACTED]',
+    });
+  });
+
   it('should exclude sensitive headers', () => {
     const error = new Error('Crash');
 

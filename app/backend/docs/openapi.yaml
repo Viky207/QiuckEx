@@ -897,6 +897,7 @@ paths:
           required: true
           schema:
             type: string
+            pattern: '^G[A-Z2-7]{55}$'
         - name: since
           in: query
           schema:
@@ -906,7 +907,15 @@ paths:
           in: query
           schema:
             type: integer
+            minimum: 1
+            maximum: 200
             default: 20
+        - name: cursor
+          in: query
+          schema:
+            type: string
+            pattern: '^\d{1,40}$'
+          description: Horizon paging token returned as nextCursor by the previous page
       responses:
         "200":
           description: Recent payments
@@ -919,6 +928,17 @@ paths:
                     type: array
                     items:
                       $ref: "#/components/schemas/TransactionItem"
+                  nextCursor:
+                    type: string
+                    nullable: true
+        "400":
+          description: Validation error or expired Horizon cursor
+        "401":
+          description: Invalid optional API key
+        "404":
+          description: Stellar account not found
+        "503":
+          description: Horizon dependency unavailable
 
   # ---------------------------------------------------------------------------
   # Stellar

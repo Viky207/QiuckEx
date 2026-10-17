@@ -65,7 +65,7 @@ export class SentryExceptionFilter implements ExceptionFilter {
   private buildRequestContext(request: Request): Record<string, unknown> {
     const context: Record<string, unknown> = {
       method: request.method,
-      url: request.url,
+      url: request.path || request.url?.split('?')[0],
       correlationId: (request as Record<string, unknown>)['correlationId'],
       userAgent: request.headers['user-agent'],
       ip: request.ip,
@@ -118,6 +118,11 @@ export class SentryExceptionFilter implements ExceptionFilter {
       'private_key',
       'privateKey',
       'stellar_secret_key',
+      'address',
+      'accountid',
+      'publickey',
+      'cursor',
+      'memo',
     ]);
 
     const sanitised: Record<string, unknown> = {};
