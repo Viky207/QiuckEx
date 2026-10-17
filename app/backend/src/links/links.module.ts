@@ -23,6 +23,9 @@ import { PrivacyModule } from "../privacy/privacy.module";
 import { TransactionsModule } from "../transactions/transactions.module";
 import { AuditModule } from "../audit/audit.module";
 import { MetricsModule } from "../metrics/metrics.module";
+import { MerchantPaymentPreferencesController } from "./merchant-payment-preferences.controller";
+import { MerchantPaymentPreferencesRepository } from "./merchant-payment-preferences.repository";
+import { MerchantPaymentPreferencesService } from "./merchant-payment-preferences.service";
 
 @Module({
   controllers: [
@@ -30,6 +33,7 @@ import { MetricsModule } from "../metrics/metrics.module";
     BulkPaymentLinksController,
     RecurringPaymentsController,
     PaymentLinkController,
+    MerchantPaymentPreferencesController,
   ],
   providers: [
     LinksService,
@@ -43,6 +47,8 @@ import { MetricsModule } from "../metrics/metrics.module";
     RecurringLinkTemplateRepository,
     RecurringLinkTemplateScheduler,
     PaymentLinkService,
+    MerchantPaymentPreferencesRepository,
+    MerchantPaymentPreferencesService,
   ],
   exports: [
     LinksService,

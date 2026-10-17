@@ -185,6 +185,33 @@ effect of an unrelated update.
 
 ---
 
+## Merchant Payment Preference Invariants
+
+Merchant payment preferences are an off-chain configuration for new payment
+links. They do not change contract state, authorize transactions, or transfer
+assets.
+
+INV-22: Preferences Do Not Confer Custody or Authorization
+
+A saved accepted-asset list or preferred requested asset MUST NOT authorize a
+payment, sign a transaction, initiate a path payment, or move funds. Every
+payment continues to require the payer's independent wallet authorization.
+
+INV-23: Settlement Preference Is Accepted and Supported
+
+The preferred requested asset MUST be in the merchant's accepted-asset list.
+Every listed asset MUST be in the current supported asset allow-list. Invalid
+or unsupported preferences MUST fail before persistence or link generation.
+
+INV-24: Preferences Apply Only to New Links
+
+Changing merchant preferences MUST NOT mutate existing links, submitted
+transactions, or any payment's state, authorization, destination, or terminal
+settlement. A disabled preference service MUST degrade to the existing explicit
+link-generation behavior without changing the payment flow.
+
+---
+
 ## Architectural Enforcement References
 
 - [CUSTODY-TRUST-THREAT-MODEL.md](./CUSTODY-TRUST-THREAT-MODEL.md): Full threat modeling, trust assumptions, and cryptographic custody boundary enforcement for INV-01 through INV-10.

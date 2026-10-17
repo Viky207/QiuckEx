@@ -8,6 +8,7 @@ import { LocaleSwitcher } from "@/components/LocaleSwitcher";
 import '@/lib/i18n';
 import { useTranslation } from "react-i18next";
 import { resolveAuthenticatedPublicKey } from "@/lib/publicKey";
+import { MerchantPaymentPreferencesPanel } from "@/components/settings/MerchantPaymentPreferencesPanel";
 import {
   fetchProfileSettings,
   ProfileSettingsRequestError,
@@ -433,6 +434,7 @@ export default function Settings() {
             </div>
           )}
         </div>
+        <MerchantPaymentPreferencesPanel initialPublicKey={walletPublicKey} />
       </main>
 
       {/* MOBILE BOTTOM BAR */}

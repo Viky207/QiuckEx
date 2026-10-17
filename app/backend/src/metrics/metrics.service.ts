@@ -28,6 +28,7 @@ export class MetricsService implements OnModuleInit {
   private abuseSignalsByOutcome: client.Counter<string>;
   private abuseScoresHistogram: client.Histogram<string>;
   private paymentLinksExpired: client.Counter<string>;
+  private merchantPaymentPreferencesRequests: client.Counter<string>;
   // Escrow state transition metrics
   private escrowStateTransitions: client.Counter<string>;
   private escrowStateTransitionDuration: client.Histogram<string>;
@@ -200,6 +201,12 @@ export class MetricsService implements OnModuleInit {
         help: "Total number of payment links marked as expired by the expiry sweep",
       });
 
+      this.merchantPaymentPreferencesRequests = new client.Counter({
+        name: "quickex_merchant_payment_preferences_requests_total",
+        help: "Merchant payment preference requests by operation and stable outcome",
+        labelNames: ["operation", "outcome", "code"],
+      });
+
       // Escrow state transition metrics
       this.escrowStateTransitions = new client.Counter({
         name: "escrow_state_transitions_total",
@@ -268,6 +275,7 @@ export class MetricsService implements OnModuleInit {
       this.register.registerMetric(this.abuseSignalsByOutcome);
       this.register.registerMetric(this.abuseScoresHistogram);
       this.register.registerMetric(this.paymentLinksExpired);
+      this.register.registerMetric(this.merchantPaymentPreferencesRequests);
       // Escrow state transition metrics
       this.register.registerMetric(this.escrowStateTransitions);
       this.register.registerMetric(this.escrowStateTransitionDuration);
@@ -612,6 +620,17 @@ export class MetricsService implements OnModuleInit {
     try {
       this.paymentLinksExpired.inc();
     } catch (error) {}
+  }
+
+  recordMerchantPaymentPreferencesRequest(
+    operation: "read" | "save",
+    outcome: "success" | "replayed" | "failure",
+    code = "none",
+  ) {
+    if (!this.initialized || !this.merchantPaymentPreferencesRequests) return;
+    try {
+      this.merchantPaymentPreferencesRequests.labels(operation, outcome, code).inc();
+    } catch {}
   }
 
   // Escrow state transition metrics

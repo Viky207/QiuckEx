@@ -86,18 +86,59 @@ Mainnet submission is gated behind `TESTNET_CONTRACT_WRITES_FLAG` (same flag use
 - No database migration is required; idempotency records are keyed by `(sourceAccount, idempotencyKey)` and expire after the transaction's `timeBounds` window.
 - Operational procedure: on sustained `HORIZON_UNAVAILABLE`, check Horizon status, then replay queued retries via `POST /transactions/:hash/retry`; confirm reconciliation in the `tx_confirm_latency_ms` dashboard.
 
+## Merchant payment preferences
+
+The `links` module stores wallet-authorized payment preferences off-chain. The accepted-asset list controls what is offered on newly generated links; `settlementAsset` is the merchant's preferred requested asset for new links. It is not a standing order, payment authorization, or automatic conversion. Every payment still requires the payer's own wallet approval. Existing links and the contract settlement state machine are unaffected.
+
+### Endpoints
+
+| Endpoint | Auth / behavior |
+|---|---|
+| `GET /merchant/payment-preferences?publicKey=G...` | Public read of the non-sensitive preference snapshot; an unset wallet receives the XLM default with `version: 0`. |
+| `PUT /merchant/payment-preferences` | Requires a valid Ed25519 signature from `publicKey`, a fresh `signedAt`, and `Idempotency-Key`; no API key or secret key is sent to the backend. |
+
+Request fields are `publicKey`, `expectedVersion` (0 for first save), `acceptedAssets` (1-8 unique codes from `XLM`, `USDC`, `AQUA`, `yXLM`), `settlementAsset` (must be in `acceptedAssets`), `signedAt` (Unix milliseconds), and base64 `signature`. The signature is over:
+
+```text
+QuickEx merchant payment preferences\n{publicKey}\n{expectedVersion}\n{signedAt}\n{sha256(JSON.stringify({acceptedAssets: sortedAssets, settlementAsset}))}
+```
+
+The write is accepted only on Stellar testnet when `merchant.payment_preferences` is enabled. The feature flag defaults enabled in development/test environments and is disabled in production; the service also rejects every non-testnet network. A successful write increments the version exactly once when values change. The same idempotency key and semantic payload replays the original response; reuse with a different wallet or payload conflicts. Idempotency records expire after 24 hours. The database function serializes writes per wallet and commits preference/version/idempotency state atomically.
+
+### Stable errors
+
+| Condition | HTTP | `code` |
+|---|---:|---|
+| Invalid wallet key, assets, settlement choice, or idempotency key | 400 | `MERCHANT_PREFERENCES_MALFORMED` (DTO validation may use global `VALIDATION_ERROR`) |
+| Missing or invalid wallet signature | 401 | `MERCHANT_PREFERENCES_UNAUTHORIZED` |
+| Signed authorization older than five minutes | 410 | `MERCHANT_PREFERENCES_EXPIRED` |
+| Stale version or idempotency key reused with a different payload | 409 | `MERCHANT_PREFERENCES_CONFLICT` |
+| Feature flag off, production environment, or non-testnet network | 503 | `MERCHANT_PREFERENCES_DISABLED` |
+| Supabase or feature-flag dependency failure | 503 | `MERCHANT_PREFERENCES_DEPENDENCY_FAILURE` |
+
+Clients retain the last successful version. On `409`, refetch before applying a change; do not retry with a new version without the merchant's confirmation. On dependency errors, leave the existing form values intact and allow a later read/save retry. New-link generation degrades to the caller's existing explicit asset selection if preference reads are disabled or unavailable.
+
+### Configuration, migration, and operations
+
+- Flag: `merchant.payment_preferences`; testnet only, enabled in development/test, off in production. Keep it disabled for mainnet; enabling requires a separate custody/settlement audit and release approval.
+- Forward migration: `app/backend/supabase/migrations/20261017000000_merchant_payment_preferences.sql`. Rollback: `app/backend/supabase/migrations/rollback/20261017000000_down_merchant_payment_preferences.sql`.
+- Before testnet enablement, apply the forward migration and run `pnpm --dir app/backend test:unit -- merchant-payment-preferences.service.unit.spec.ts --runInBand` plus `node app/backend/scripts/verify-migrations.js`.
+- Monitor `quickex_merchant_payment_preferences_requests_total{operation,outcome,code}`, `external_call_duration_seconds{service="merchant_payment_preferences"}`, and `error_total{service="merchant_payment_preferences"}`. Structured `merchant_payment_preferences.*` logs contain stable outcome, version, and latency only; they omit wallet identifiers and signatures.
+- For an incident, set the flag's kill switch (or disable the flag) first. Reads/writes then return `503 MERCHANT_PREFERENCES_DISABLED`, and link generators fall back. Preserve a database backup before rollback: applying the paired down migration drops preference and idempotency records. No queued payments or on-chain state require replay or compensation.
+
 ## Frontend endpoint map
 
 | Screen / feature | Endpoint | Owning backend module | Request → response summary |
 |---|---|---|---|
 | Public profile page (`app/[username]/page.tsx`) | `GET /username/:username` | `usernames` (`usernames.controller.ts`) | Path param → `{ id, username, publicKey, isPublic, lastActiveAt, createdAt }`; private profiles return only `{ username, isPublic: false }`; 404 if unknown |
 | Profile editing (`settings/profile/page.tsx`) | `PATCH /username/profile` | `usernames` (`usernames.controller.ts`) | Authenticated profile update; see [Profile update contract](#profile-update-contract-patch-usernameprofile) |
+| Merchant payment preferences (`settings/page.tsx`) | `GET/PUT /merchant/payment-preferences` | `links` (`merchant-payment-preferences.controller.ts`) | Reads wallet defaults; PUT is wallet-signed and idempotent. See [Merchant payment preferences](#merchant-payment-preferences). |
 | Pay page (`pay/PaymentPageClient.tsx`) + SSR OG previews (`lib/og-metadata.ts`) | `GET /payment-links/status?username&amount&asset&memo&acceptedAssets` | `links` (`payment-link.controller.ts`) | Query params → `PaymentLinkStatusDto` (active / expired / paid / refunded) |
 | Link generator (`generator/page.tsx`) | `GET /stellar/verified-assets` | `stellar` (`stellar.controller.ts`) | → `AssetListResponseDto` (verified assets + TOML branding metadata) |
 | Link generator — wallet capability discovery | `GET /stellar/wallet-capabilities?publicKey` | `stellar` | → `WalletCapabilitiesDto`; drives unsupported-wallet UI gating (see above) |
 | Link generator — cross-asset preview | `POST /stellar/path-preview` | `stellar` | `{ destAsset, destAmount, sourceAccount... }` → candidate paths + estimated source amounts (strict-receive) |
 | Link generator — contract preflight | `POST /stellar/soroban-preflight` | `stellar` | `{ sourceAccount }` → compose-pipeline `health_check` simulation. Gated: `NetworkSafetyGuard` + `TESTNET_CONTRACT_WRITES_FLAG`; 503 `CONTRACT_NOT_CONFIGURED` if `QUICKEX_CONTRACT_ID` unset |
-| Link generator — create link | `POST /links/metadata` | `links` (`links.controller.ts`) | `LinkMetadataRequestDto` → `{ success, data: LinkMetadataResponseDto }`; optional `X-API-Key` raises rate limit 20→120 req/min |
+| Link generator — create link | `POST /links/metadata` | `links` (`links.controller.ts`) | `LinkMetadataRequestDto` → `{ success, data: LinkMetadataResponseDto }`; optional `X-API-Key` raises rate limit 20→120 req/min. New-link defaults may include destination wallet preferences. |
 | Link generator — CSV bulk | `POST /links/bulk/generate` | `links` (`bulk-payment-links.controller.ts`, prefix `links/bulk`) | `{ links: [...] }` → per-row results |
 | Dashboard analytics (`hooks/analyticsApi.ts`) | `GET /analytics/report?publicKey&startDate&endDate&interval` | `analytics` (`analytics.controller.ts`) | → summary + asset distribution + time-series; client falls back to empty data on failure |
 | Analytics export | `GET /analytics/export?...&format` | `analytics` | → CSV/PDF stream (tax/accounting report) |
@@ -116,7 +157,7 @@ Mainnet submission is gated behind `TESTNET_CONTRACT_WRITES_FLAG` (same flag use
 | Transaction submission (`services/transactions.ts`) | `POST /transactions/submit` | `transactions` | Signed XDR → `{ hash, status }`; see [Transaction submission, confirmation & retry orchestration](#transaction-submission-confirmation--retry-orchestration) |
 | Transaction confirmation (`services/transactions.ts`) | `GET /transactions/:hash/status` | `transactions` | Polls confirmation state; terminal states stop polling |
 | Transaction retry (`services/transactions.ts`) | `POST /transactions/:hash/retry` | `transactions` | Re-submits a failed envelope; idempotent |
-| Link creation (`services/link-metadata.ts`, `app/link-generator.tsx`) | `POST /links/metadata` | `links` | Same contract as frontend — paths **match** ✅ |
+| Link creation (`services/link-metadata.ts`, `app/link-generator.tsx`) | `POST /links/metadata`; `GET /merchant/payment-preferences?publicKey` | `links` | Same metadata contract as frontend; testnet preference reads default new links for that destination wallet. |
 | Wallet capability discovery (`services/wallet-capabilities.ts`) | `GET /stellar/wallet-capabilities?publicKey` | `stellar` | Same contract as frontend ✅; drives unsupported-wallet gating on escrow confirmation |
 | Asset picker (`app/link-generator.tsx`) | `GET /stellar/verified-assets` | `stellar` | Same as frontend ✅ |
 | Notification center (`services/in-app-notifications.ts`) | `GET /notifications/in-app?publicKey`, `POST /notifications/in-app/:id/read`, `POST /notifications/in-app/read-all?publicKey` | `notifications` (`notifications.controller.ts`) | List + read-state; client tolerates both a plain array and a Supabase-style list envelope (defensive drift handling) |

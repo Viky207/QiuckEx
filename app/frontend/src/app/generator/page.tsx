@@ -38,6 +38,7 @@ import {
   validateMemoInput,
 } from '@/lib/linkGenerator';
 import { notifyLinkCreated } from '@/lib/cacheInvalidation';
+import { MerchantPaymentPreferences } from '@/hooks/merchantPaymentPreferencesApi';
 
 type ValidationErrors = Partial<
   Record<"amount" | "asset" | "destination" | "memo", string>
@@ -78,6 +79,7 @@ type LinkMetadataSuccess = {
     amount: string;
     asset: string;
     destination?: string | null;
+    acceptedAssets?: string[] | null;
     memo: string | null;
     metadata?: Record<string, unknown>;
   };
@@ -138,6 +140,7 @@ export default function Generator() {
   });
 
   const [recipientAssetCode, setRecipientAssetCode] = useState("USDC");
+  const [merchantAcceptedAssets, setMerchantAcceptedAssets] = useState<string[] | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [sourceAssetCodes, setSourceAssetCodes] = useState<Set<string>>(
     () => new Set(["XLM", "USDC"]),
@@ -291,6 +294,29 @@ export default function Generator() {
       setRecipientAssetCode(assetOptions[0].code);
     }
   }, [assetOptions, recipientAssetCode]);
+
+  useEffect(() => {
+    setMerchantAcceptedAssets(null);
+    setRecipientAssetCode("USDC");
+    if (!/^G[A-Z2-7]{55}$/.test(form.destination)) return;
+    let active = true;
+    const url = new URL(`${apiBase}/merchant/payment-preferences`);
+    url.searchParams.set('publicKey', form.destination);
+    void fetch(url.toString(), { cache: 'no-store' })
+      .then(async (response) => response.ok ? response.json() : null)
+      .then((result: { preferences?: MerchantPaymentPreferences } | null) => {
+        const preferences = result?.preferences;
+        if (!active || !preferences || preferences.version < 1) return;
+        setMerchantAcceptedAssets(preferences.acceptedAssets);
+        setRecipientAssetCode(preferences.settlementAsset);
+      })
+      .catch(() => {
+        if (active) setMerchantAcceptedAssets(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, [apiBase, form.destination]);
 
   const recipientRef = useMemo(() => {
     const a = verifiedAssets.find(
@@ -536,6 +562,7 @@ export default function Generator() {
           asset: recipientAssetCode,
           destination: form.destination,
           memo: form.memo || undefined,
+          acceptedAssets: merchantAcceptedAssets ?? undefined,
         }),
       });
       const json = await res.json();

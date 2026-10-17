@@ -59,6 +59,7 @@ export default function LinkGeneratorScreen() {
   const [recipientAssetCode, setRecipientAssetCode] = useState("USDC");
   const [verifiedAssets, setVerifiedAssets] = useState<VerifiedAsset[]>([]);
   const [assetsLoading, setAssetsLoading] = useState(true);
+  const [merchantAcceptedAssets, setMerchantAcceptedAssets] = useState<string[] | null>(null);
 
   const [loading, setLoading] = useState(false);
   const [canonicalData, setCanonicalData] = useState<string | null>(null);
@@ -90,6 +91,35 @@ export default function LinkGeneratorScreen() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (!StrKey.isValidEd25519PublicKey(form.destination)) {
+      setMerchantAcceptedAssets(null);
+      return;
+    }
+    let cancelled = false;
+    setMerchantAcceptedAssets(null);
+    setRecipientAssetCode("USDC");
+    const url = new URL(`${API_BASE_URL}/merchant/payment-preferences`);
+    url.searchParams.set("publicKey", form.destination);
+    void fetch(url.toString(), { cache: "no-store" })
+      .then(async (response) => {
+        if (!response.ok) return null;
+        return response.json();
+      })
+      .then((result) => {
+        const preferences = result?.preferences;
+        if (cancelled || !preferences || preferences.version < 1) return;
+        setMerchantAcceptedAssets(preferences.acceptedAssets);
+        setRecipientAssetCode(preferences.settlementAsset);
+      })
+      .catch(() => {
+        if (!cancelled) setMerchantAcceptedAssets(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [form.destination]);
 
   const isValidDestination = useMemo(() => {
     if (!form.destination) return false;
@@ -136,6 +166,7 @@ export default function LinkGeneratorScreen() {
           asset: recipientAssetCode,
           destination: form.destination,
           memo: form.memo || undefined,
+          acceptedAssets: merchantAcceptedAssets ?? undefined,
         }),
       });
 

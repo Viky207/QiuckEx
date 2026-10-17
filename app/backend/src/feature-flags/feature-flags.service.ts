@@ -262,6 +262,21 @@ const DEFAULT_FLAGS: FeatureFlagRecord[] = [
     updatedAt: new Date(0).toISOString(),
     updatedBy: 'bootstrap',
   },
+  {
+    key: 'merchant.payment_preferences',
+    name: 'Merchant Payment Preferences',
+    description:
+      'Enables wallet-authorized accepted asset and settlement preference management on Stellar testnet. ' +
+      'This setting never initiates or authorizes a payment or asset conversion.',
+    enabled: true,
+    killSwitch: false,
+    rolloutPercentage: 100,
+    allowedUsers: [],
+    environments: ['development', 'test'],
+    metadata: { highRisk: false, flow: 'merchant_payment_preferences', network: 'testnet' },
+    updatedAt: new Date(0).toISOString(),
+    updatedBy: 'bootstrap',
+  },
 ];
 
 @Injectable()

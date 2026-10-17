@@ -159,6 +159,21 @@ If-None-Match: <optional-etag>
 
 ### 3.4 Payment Links
 
+#### `GET /merchant/payment-preferences?publicKey=G...`
+- **Description**: Reads the public, non-sensitive accepted-asset and preferred requested-asset settings for a Stellar wallet. An unconfigured wallet receives `{ acceptedAssets: ["XLM"], settlementAsset: "XLM", version: 0 }`.
+- **Authorization**: Public; wallet public key is required and validated.
+- **Feature gate**: Stellar testnet only, and `merchant.payment_preferences` must be enabled.
+- **Response `200 OK`**: `{ "preferences": { "publicKey": "G...", "acceptedAssets": ["XLM", "USDC"], "settlementAsset": "USDC", "version": 1 } }`.
+- **Errors**: `400 MERCHANT_PREFERENCES_MALFORMED`; `503 MERCHANT_PREFERENCES_DISABLED` or `MERCHANT_PREFERENCES_DEPENDENCY_FAILURE`.
+
+#### `PUT /merchant/payment-preferences`
+- **Description**: Saves wallet-authorized defaults for newly generated payment links. These preferences do not authorize a payment, initiate a path payment, move funds, or mutate existing links.
+- **Authorization**: Ed25519 signature from `publicKey`; `Idempotency-Key` is required (16-128 URL-safe characters). No secret key or API key is sent.
+- **Request Body**: `{ "publicKey": "G...", "expectedVersion": 0, "acceptedAssets": ["XLM", "USDC"], "settlementAsset": "USDC", "signedAt": 1792252800000, "signature": "<base64>" }`. The signature covers `QuickEx merchant payment preferences\n{publicKey}\n{expectedVersion}\n{signedAt}\n{sha256(JSON.stringify({acceptedAssets: sortedAssets, settlementAsset}))}`. Authorization expires after five minutes; an identical committed idempotent retry is replayable for 24 hours.
+- **Validation**: `acceptedAssets` contains 1-8 unique members of `XLM`, `USDC`, `AQUA`, `yXLM`; `settlementAsset` must be included. Updates use optimistic `expectedVersion` and apply atomically with the idempotency record.
+- **Errors**: `400 MERCHANT_PREFERENCES_MALFORMED`; `401 MERCHANT_PREFERENCES_UNAUTHORIZED`; `409 MERCHANT_PREFERENCES_CONFLICT`; `410 MERCHANT_PREFERENCES_EXPIRED`; `503 MERCHANT_PREFERENCES_DISABLED` or `MERCHANT_PREFERENCES_DEPENDENCY_FAILURE`.
+- **Feature gate**: `merchant.payment_preferences` is enabled by default only in development/test and all writes are rejected outside testnet. Keep disabled on mainnet.
+
 #### `POST /links/metadata`
 - **Description**: Generates canonical payment link metadata, validation hashes, and accepted payment route parameters.
 - **Authorization**: Public / Optional `X-API-Key`

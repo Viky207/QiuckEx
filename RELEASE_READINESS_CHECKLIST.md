@@ -120,6 +120,8 @@ Ephemeral contributor previews must not leak into a release:
 ## 7. Backend checks
 
 - [ ] Backend CI green for the release commit; database migrations for the target environment applied exactly once (see [cd.yml](.github/workflows/cd.yml) `db:migrate` step)
+- [ ] Merchant payment preferences: testnet unit and migration forward/rollback checks pass; `merchant.payment_preferences` remains disabled on production/mainnet, and the preference endpoints reject mainnet regardless of stored flag state
+- [ ] Merchant payment preference operations reviewed: monitor request outcome/latency metrics and confirm disabling the flag degrades new-link generation to its explicit asset selection
 - [ ] `GET /health` readiness probes all pass on the deployed target
 - [ ] Environment parity checks pass (network configuration, Stellar/Supabase config, feature flags, base URL) — surfaced as the `environment` section of the RC validation report
 
