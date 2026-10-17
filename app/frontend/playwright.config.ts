@@ -1,7 +1,8 @@
 import { defineConfig } from "@playwright/test";
 
 export default defineConfig({
-  testDir: "./visual",
+  testDir: ".",
+  testMatch: ["visual/**/*.spec.ts", "__tests__/**/*.spec.ts"],
   fullyParallel: true,
   reporter: process.env.CI ? "github" : "list",
   use: {

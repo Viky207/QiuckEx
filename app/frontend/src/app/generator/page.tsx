@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { QRPreview } from "@/components/QRPreview";
+import { PaymentWizard } from "@/components/PaymentWizard/PaymentWizard";
 import { NetworkBadge } from "@/components/NetworkBadge";
 import { useApi } from "@/hooks/useApi";
 import { getQuickexApiBase } from "@/lib/api";
@@ -1039,7 +1040,13 @@ export default function Generator() {
           </p>
         </header>
 
-        <div className="grid grid-cols-1 xl:grid-cols-[1.2fr_0.8fr] gap-12 xl:gap-20 max-w-7xl">
+        <PaymentWizard />
+
+        <details className="mt-10 max-w-7xl border-t border-border-strong pt-5">
+          <summary className="cursor-pointer text-sm font-semibold text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-300">
+            Open advanced payment builder
+          </summary>
+        <div className="mt-6 grid grid-cols-1 xl:grid-cols-[1.2fr_0.8fr] gap-12 xl:gap-20 max-w-7xl">
           <div className="space-y-12">
             <section className="space-y-6">
               <div>
@@ -1535,6 +1542,7 @@ export default function Generator() {
             </div>
           </div>
         </div>
+        </details>
 
         <section className="mt-20 max-w-7xl space-y-8">
           <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
