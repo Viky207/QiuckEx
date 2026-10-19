@@ -12,10 +12,10 @@ readme = "README.md"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-soroban-sdk = "28"
+soroban-sdk = "29"
 
 [dev-dependencies]
-soroban-sdk = { version = "28", features = ["testutils"] }
+soroban-sdk = { version = "29", features = ["testutils"] }
 proptest = { version = "1.5.0", default-features = false, features = ["std"] }
 
 [profile.release]
