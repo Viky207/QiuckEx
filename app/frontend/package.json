@@ -30,7 +30,7 @@
     "@axe-core/playwright": "^4.10.2",
     "@eslint/eslintrc": "^3",
     "@playwright/test": "^1.63.0",
-    "@size-limit/preset-app": "12.0.0",
+    "@size-limit/preset-app": "14.2.0",
     "@storybook/addon-a11y": "9.1.10",
     "@storybook/addon-docs": "9.1.10",
     "@storybook/nextjs-vite": "9.1.10",
