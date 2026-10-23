@@ -245,6 +245,10 @@ Contributions are welcome and encouraged to help evolve QuickEx! To get started:
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the full contribution workflow.
 
+## Security
+
+For information about reporting security vulnerabilities, please see our [Security Policy](SECURITY.md).
+
 ## License
 This project is licensed under the MIT License.
 
