@@ -211,6 +211,13 @@ Helper functions:
 - `create_amount_commitment(owner: Address, amount: i128, salt: Bytes) -> Bytes` - Create a deterministic commitment hash
 - `verify_amount_commitment(commitment: Bytes, owner: Address, amount: i128, salt: Bytes) -> bool` - Verify a commitment against claimed values
 
+### X-Ray Proof Verification (testnet stub, issue #456)
+
+- `verify_proof(commitment: BytesN<32>, proof: Bytes) -> bool` - Verify a versioned X-Ray proof. Version `0x01` is a SHA-256 hash-commitment opening (**not ZK**); Groth16 is reserved as `0x02`.
+- `create_xray_commitment(amount: i128, blinding: BytesN<32>) -> BytesN<32>` - Reference commitment helper for client conformance.
+
+See [docs/ZK-PROOF-SPEC.md](docs/ZK-PROOF-SPEC.md) for the byte-level format and test vector.
+
 ## Amount Commitments API
 
 ### Overview
