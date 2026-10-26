@@ -59,6 +59,9 @@ mod test_context;
 mod types;
 #[cfg(test)]
 mod upgrade_test;
+mod zk_verifier;
+#[cfg(test)]
+mod zk_verifier_test;
 
 use errors::QuickexError;
 use pause_policy::{EntryPoint, PauseChangeReason};
@@ -344,6 +347,43 @@ impl QuickexContract {
         salt: Bytes,
     ) -> bool {
         commitment::verify_amount_commitment(&env, commitment, owner, amount, salt)
+    }
+
+    /// Verify an X-Ray privacy proof against a 32-byte commitment (issue #456).
+    ///
+    /// **Testnet MVP stub — not zero-knowledge.** Version `0x01` proofs are a
+    /// SHA-256 hash-commitment opening: `version || BE128(amount) || blinding[32]`
+    /// (49 bytes), checked against
+    /// `SHA256("QUICKEX_XRAY_COMMIT_V1" || 0x01 || BE128(amount) || blinding)`.
+    /// Version `0x02` is reserved for a future Groth16 verifier.
+    ///
+    /// Pure view: no storage, no auth, no events. Malformed proofs return `false`
+    /// rather than erroring. See `app/contract/docs/ZK-PROOF-SPEC.md`.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    /// * `commitment` - 32-byte X-Ray commitment
+    /// * `proof` - Versioned proof bytes
+    pub fn verify_proof(env: Env, commitment: BytesN<32>, proof: Bytes) -> bool {
+        zk_verifier::verify_proof(&env, &commitment, &proof)
+    }
+
+    /// Compute an X-Ray commitment for `amount` and a 32-byte `blinding` factor.
+    ///
+    /// Reference helper (read-only) so clients can check their off-chain
+    /// implementation of the format consumed by
+    /// [`verify_proof`](QuickexContract::verify_proof). Prefer computing
+    /// commitments off-chain: simulating this call sends the amount and
+    /// blinding to the RPC node.
+    ///
+    /// # Errors
+    /// * `InvalidAmount` - Amount is negative
+    pub fn create_xray_commitment(
+        env: Env,
+        amount: i128,
+        blinding: BytesN<32>,
+    ) -> Result<BytesN<32>, QuickexError> {
+        zk_verifier::compute_commitment(&env, amount, &blinding).ok_or(QuickexError::InvalidAmount)
     }
 
     /// Create an escrow record and increment the global escrow counter.
