@@ -29,7 +29,7 @@ pass() {
 }
 
 # --- Gate 1: cargo test passes with 0 failures -------------------------------
-echo "==> [1/5] cargo test"
+echo "==> [1/6] cargo test"
 if (cd "${CONTRACT_DIR}" && cargo test --workspace); then
   pass "cargo test"
 else
@@ -37,7 +37,7 @@ else
 fi
 
 # --- Gate 2: cargo clippy -- -D warnings -------------------------------------
-echo "==> [2/5] cargo clippy -- -D warnings"
+echo "==> [2/6] cargo clippy -- -D warnings"
 if (cd "${CONTRACT_DIR}" && cargo clippy --workspace --all-targets -- -D warnings); then
   pass "cargo clippy"
 else
@@ -45,7 +45,7 @@ else
 fi
 
 # --- Gate 3: cargo audit, no active advisories with CVSS >= 7.0 --------------
-echo "==> [3/5] cargo audit (CVSS >= 7.0)"
+echo "==> [3/6] cargo audit (CVSS >= 7.0)"
 if ! command -v cargo-audit >/dev/null 2>&1; then
   fail "cargo-audit is not installed; cannot verify advisories"
 else
@@ -90,7 +90,7 @@ for item in high:
 fi
 
 # --- Gate 4: contract version higher than last deployed version --------------
-echo "==> [4/5] contract version vs deployed version"
+echo "==> [4/6] contract version vs deployed version"
 CURRENT_VERSION="$(cd "${CONTRACT_DIR}" && cargo metadata --no-deps --format-version 1 2>/dev/null | python3 -c '
 import json, sys
 
@@ -144,8 +144,24 @@ print("yes" if current > deployed else "no")
   fi
 fi
 
-# --- Gate 5: mainnet.* feature flags verified against backend ---------------
-echo "==> [5/5] mainnet.* feature flags"
+# --- Gate 5: build provenance attestation for the contract WASM artifact -----
+echo "==> [5/6] build provenance attestation"
+ATTESTATION_VERIFIER="${REPO_ROOT}/scripts/verify-attestation.sh"
+WASM_ARTIFACT="${CONTRACT_DIR}/target/wasm32-unknown-unknown/release/quickex.wasm"
+if [ ! -x "${ATTESTATION_VERIFIER}" ]; then
+  fail "attestation verifier not found or not executable: ${ATTESTATION_VERIFIER}"
+elif [ ! -f "${WASM_ARTIFACT}" ]; then
+  fail "contract WASM artifact not found: ${WASM_ARTIFACT} (build it before running the gate)"
+else
+  if "${ATTESTATION_VERIFIER}" "${WASM_ARTIFACT}"; then
+    pass "build provenance attestation verified for ${WASM_ARTIFACT}"
+  else
+    fail "build provenance attestation verification failed for ${WASM_ARTIFACT}"
+  fi
+fi
+
+# --- Gate 6: mainnet.* feature flags verified against backend ---------------
+echo "==> [6/6] mainnet.* feature flags"
 if [ ! -d "${FEATURE_FLAGS_DIR}" ]; then
   fail "feature flags directory not found: ${FEATURE_FLAGS_DIR}"
 else

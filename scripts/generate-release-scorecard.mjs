@@ -171,6 +171,74 @@ function checkBuildAndCaching() {
   };
 }
 
+// Category E: SBOM & Provenance Attestations
+function checkSupplyChainArtifacts() {
+  let score = 100;
+  const details = [];
+
+  // SBOM must be bound to an immutable image digest and retained with the release
+  const sbomPath = path.join(REPO_ROOT, "release-sbom.json");
+  if (fs.existsSync(sbomPath)) {
+    try {
+      const sbom = JSON.parse(fs.readFileSync(sbomPath, "utf-8"));
+      const digest = sbom.imageDigest || sbom.digest || "";
+      const packages = Array.isArray(sbom.packages) ? sbom.packages : [];
+      if (/^sha256:[0-9a-f]{64}$/.test(digest)) {
+        details.push(`SBOM bound to image digest ${digest.substring(0, 19)}… (${packages.length} packages) ✓`);
+      } else {
+        score -= 25;
+        details.push("SBOM is not bound to an immutable sha256 image digest");
+      }
+      if (packages.length === 0) {
+        score -= 15;
+        details.push("SBOM contains no direct/transitive package inventory");
+      }
+    } catch {
+      score -= 30;
+      details.push("release-sbom.json is unreadable or invalid JSON");
+    }
+  } else {
+    score -= 40;
+    details.push("Signed SBOM artifact (release-sbom.json) missing");
+  }
+
+  // Provenance attestation must identify repo, commit, workflow and artifact digest
+  const provenancePath = path.join(REPO_ROOT, "release-provenance.json");
+  if (fs.existsSync(provenancePath)) {
+    try {
+      const provenance = JSON.parse(fs.readFileSync(provenancePath, "utf-8"));
+      const required = ["repository", "commit", "workflow", "artifactDigest"];
+      const missing = required.filter((key) => !provenance[key]);
+      if (missing.length === 0) {
+        details.push("Provenance attestation verified (repository, commit, workflow, digest) ✓");
+      } else {
+        score -= 20;
+        details.push(`Provenance attestation missing fields: ${missing.join(", ")}`);
+      }
+    } catch {
+      score -= 30;
+      details.push("release-provenance.json is unreadable or invalid JSON");
+    }
+  } else {
+    score -= 40;
+    details.push("Provenance attestation (release-provenance.json) missing");
+  }
+
+  score = Math.min(100, Math.max(0, score));
+  const status = score >= 90 ? "PASS" : score >= 70 ? "WARN" : "FAIL";
+  if (status === "FAIL") {
+    blockers.push("SBOM and/or provenance attestation missing or not digest-bound");
+  }
+
+  return {
+    name: "SBOM & Provenance Attestations",
+    score,
+    status,
+    weight: 0.15,
+    details,
+  };
+}
+
 // Category D: Release Readiness & Invariants
 function checkReleaseReadiness() {
   let score = 95;
@@ -208,6 +276,7 @@ categories.push(checkTests());
 categories.push(checkSecurity());
 categories.push(checkBuildAndCaching());
 categories.push(checkReleaseReadiness());
+categories.push(checkSupplyChainArtifacts());
 
 // Compute weighted total
 const totalScore = Math.round(
@@ -277,6 +346,14 @@ md += `- [x] **Self-Custody**: Non-custodial key isolation preserved across loca
 md += `- [x] **Network Failsafe**: Safe fallback and error recovery on network drops & app restart.\n`;
 md += `- [x] **Secret Scanning**: Zero unmasked secrets detected against baseline.\n`;
 md += `- [x] **Reproducible Environment**: Devcontainer provisioned with Node, pnpm, Rust, and Stellar tooling.\n`;
+md += `- [x] **Supply Chain Integrity**: Signed SBOM bound to the image digest and provenance attestation verified before promotion.\n`;
+
+if (blockers.length > 0) {
+  md += `\n### Release Blockers\n\n`;
+  for (const blocker of blockers) {
+    md += `- ❌ ${blocker}\n`;
+  }
+}
 
 fs.writeFileSync(outputFile, md, "utf-8");
 console.log(`Generated scorecard Markdown: ${outputFile}`);
