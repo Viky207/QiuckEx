@@ -11,6 +11,23 @@ export type UnparsedSorobanEventStatus = "pending" | "replayed" | "dead_letter";
 
 const MAX_REPLAY_ATTEMPTS = 5;
 
+/**
+ * Idempotency key used to guarantee that replaying an unparsed event never
+ * produces duplicate downstream effects. The key is derived from the event's
+ * paging token, which is unique per ledger event on Horizon.
+ */
+export function buildReplayIdempotencyKey(pagingToken: string): string {
+  return `unparsed-replay:${pagingToken}`;
+}
+
+export interface ReplayUnparsedEventResult {
+  pagingToken: string;
+  idempotencyKey: string;
+  replayed: boolean;
+  alreadyReplayed: boolean;
+  status: UnparsedSorobanEventStatus;
+}
+
 export interface SaveUnparsedSorobanEventInput {
   raw: RawHorizonContractEvent;
   reason: UnparsedSorobanEventReason;
@@ -147,6 +164,114 @@ export class UnparsedSorobanEventRepository {
 
   async markReplayed(pagingToken: string): Promise<void> {
     await this.updateStatus(pagingToken, "replayed");
+  }
+
+  /**
+   * Replays a single unparsed event exactly once.
+   *
+   * The replay is guarded by an idempotency key so that repeated calls (e.g.
+   * an operator retrying after a timeout, or two operators acting at once)
+   * never duplicate downstream effects. If the event has already been
+   * replayed, the call is a no-op and reports `alreadyReplayed: true`.
+   */
+  async replay(
+    pagingToken: string,
+    replayFn: (record: UnparsedSorobanEventRecord) => Promise<void>,
+  ): Promise<ReplayUnparsedEventResult> {
+    const idempotencyKey = buildReplayIdempotencyKey(pagingToken);
+    const record = await this.getByPagingToken(pagingToken);
+
+    if (!record) {
+      throw new Error(`Unparsed Soroban event ${pagingToken} not found`);
+    }
+
+    if (record.status === "replayed") {
+      return {
+        pagingToken,
+        idempotencyKey,
+        replayed: false,
+        alreadyReplayed: true,
+        status: record.status,
+      };
+    }
+
+    // Atomically claim the event for replay. The conditional update only
+    // succeeds when the row is still in a replayable state, so concurrent
+    // callers cannot both proceed past this point.
+    const { data: claimed, error: claimError } = await this.supabase
+      .getClient()
+      .from("unparsed_soroban_events")
+      .update({
+        status: "replayed",
+        replay_idempotency_key: idempotencyKey,
+        replayed_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq("paging_token", pagingToken)
+      .in("status", ["pending", "dead_letter"])
+      .select("paging_token");
+
+    if (claimError) {
+      this.logger.error(
+        `Failed to claim unparsed Soroban event ${pagingToken} for replay: ${claimError.message}`,
+      );
+      throw claimError;
+    }
+
+    if (!claimed || claimed.length === 0) {
+      // Another caller won the race; treat as already replayed.
+      return {
+        pagingToken,
+        idempotencyKey,
+        replayed: false,
+        alreadyReplayed: true,
+        status: "replayed",
+      };
+    }
+
+    try {
+      await replayFn(record);
+    } catch (err) {
+      // Roll the claim back so the event can be retried, and record the
+      // failure through the existing attempt-tracking path.
+      await this.supabase
+        .getClient()
+        .from("unparsed_soroban_events")
+        .update({
+          status: record.status,
+          replay_idempotency_key: null,
+          replayed_at: null,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("paging_token", pagingToken);
+
+      const message = err instanceof Error ? err.message : String(err);
+      await this.markFailed(pagingToken, message);
+      throw err;
+    }
+
+    return {
+      pagingToken,
+      idempotencyKey,
+      replayed: true,
+      alreadyReplayed: false,
+      status: "replayed",
+    };
+  }
+
+  /**
+   * Replays a batch of dead-letter events. Each event is replayed through
+   * {@link replay}, so idempotency guarantees hold per event.
+   */
+  async replayDeadLetter(
+    pagingTokens: string[],
+    replayFn: (record: UnparsedSorobanEventRecord) => Promise<void>,
+  ): Promise<ReplayUnparsedEventResult[]> {
+    const results: ReplayUnparsedEventResult[] = [];
+    for (const token of pagingTokens) {
+      results.push(await this.replay(token, replayFn));
+    }
+    return results;
   }
 
   async archiveReplayedBefore(cutoff: Date, batchSize = 1000): Promise<number> {
