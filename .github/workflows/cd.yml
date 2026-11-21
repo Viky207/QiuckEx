@@ -4,9 +4,14 @@ on:
   push:
     branches: [ main ]
 
+# No workflow-wide token scopes: every job declares its exact needs below.
+permissions: {}
+
 jobs:
   build-and-push-image:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -44,6 +49,8 @@ jobs:
   rc-validate:
     name: Release candidate validation
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -78,6 +85,8 @@ jobs:
   migration-smoke-test:
     name: Migration Smoke Test
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -108,6 +117,8 @@ jobs:
 
   release:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     needs: [build-and-push-image, rc-validate, migration-smoke-test]
     steps:
       - name: Checkout Code

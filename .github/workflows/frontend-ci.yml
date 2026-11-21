@@ -11,10 +11,15 @@ on:
       - 'app/frontend/**'
       - '.github/workflows/frontend-ci.yml'
 
+# No workflow-wide token scopes: every job declares its exact needs below.
+permissions: {}
+
 jobs:
   lint-and-test:
     name: Lint & Unit Tests
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     defaults:
       run:
         working-directory: app/frontend
@@ -43,6 +48,8 @@ jobs:
   visual-regression:
     name: Visual Regression
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     defaults:
       run:
         working-directory: app/frontend

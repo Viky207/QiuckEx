@@ -10,10 +10,15 @@ on:
     paths:
       - 'app/contract/**'
 
+# No workflow-wide token scopes: every job declares its exact needs below.
+permissions: {}
+
 jobs:
   test:
     name: Test Suite
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     defaults:
       run:
         working-directory: app/contract
@@ -77,6 +82,8 @@ jobs:
   upgrade-regression:
     name: Upgrade Regression (Soroban sandbox)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     timeout-minutes: 10
     defaults:
       run:
@@ -108,6 +115,8 @@ jobs:
   security:
     name: Supply Chain Security
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     defaults:
       run:
         working-directory: app/contract
@@ -145,6 +154,8 @@ jobs:
   mainnet-gate:
     name: Mainnet Deployment Gate
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     needs: [ test, security, upgrade-regression ]
     defaults:
       run:
@@ -181,6 +192,8 @@ jobs:
   deploy:
     name: Deploy
     runs-on: ubuntu-latest
+    # Placeholder deployment step needs no GitHub token scopes.
+    permissions: {}
     needs: [ mainnet-gate ]
     if: github.ref == 'refs/heads/main'
     defaults:

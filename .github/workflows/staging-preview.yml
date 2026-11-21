@@ -8,9 +8,8 @@ concurrency:
   group: staging-preview-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
-permissions:
-  contents: read
-  pull-requests: write
+# No workflow-wide token scopes: only the preview/comment job needs PR write.
+permissions: {}
 
 env:
   STELLAR_NETWORK: testnet
@@ -20,6 +19,8 @@ jobs:
   guard:
     name: Enforce testnet-only staging
     runs-on: ubuntu-latest
+    # Static checks only; no repository or API access required.
+    permissions: {}
     steps:
       - name: Verify STELLAR_NETWORK is testnet
         run: |
@@ -39,6 +40,10 @@ jobs:
     needs: guard
     if: github.event.action != 'closed'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Required to post the preview URL comment on the pull request
+      pull-requests: write
     outputs:
       frontend_url: ${{ steps.frontend.outputs.url }}
       backend_url: ${{ steps.backend.outputs.url }}
@@ -130,6 +135,8 @@ jobs:
     name: Tear down preview
     if: github.event.action == 'closed'
     runs-on: ubuntu-latest
+    # External Vercel/deploy-hook tokens are supplied as secrets, not GITHUB_TOKEN.
+    permissions: {}
     steps:
       - name: Remove frontend preview
         env:

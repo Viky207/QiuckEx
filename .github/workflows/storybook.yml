@@ -13,10 +13,8 @@ on:
       - "packages/design-tokens/**"
   workflow_dispatch:
 
-permissions:
-  contents: read
-  pages: write
-  id-token: write
+# No workflow-wide token scopes: only the Pages deploy job needs write access.
+permissions: {}
 
 concurrency:
   group: storybook-pages
@@ -25,6 +23,8 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     defaults:
       run:
         working-directory: app/frontend
@@ -44,6 +44,9 @@ jobs:
     if: github.event_name != 'pull_request'
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

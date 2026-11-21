@@ -6,10 +6,15 @@ on:
     branches:
       - main
 
+# No workflow-wide token scopes: the E2E job only reads the repository.
+permissions: {}
+
 jobs:
   e2e-testnet:
     name: E2E Testnet Contract Flows
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout code
@@ -33,7 +38,7 @@ jobs:
 
       - name: Skip Soroban E2E Flow (missing secrets)
         if: ${{ secrets.E2E_WALLET_SECRET == '' || secrets.QUICKEX_CONTRACT_ID == '' }}
-        run: echo "Skipping Soroban E2E Flow: missing E2E_WALLET_SECRET or QUICKEX_CONTRACT_ID."
+        run: 'echo "Skipping Soroban E2E Flow: missing E2E_WALLET_SECRET or QUICKEX_CONTRACT_ID."'
 
       - name: Run Soroban E2E Flow
         if: ${{ secrets.E2E_WALLET_SECRET != '' && secrets.QUICKEX_CONTRACT_ID != '' }}
