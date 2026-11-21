@@ -1,7 +1,10 @@
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from '../src/app.module';
 import { ApiCompatibilityService } from '../src/api-compatibility/api-compatibility.service';
-import { ApiCompatibilityReport } from '../src/api-compatibility/api-compatibility.types';
+import {
+  AliasDeprecationEntry,
+  ApiCompatibilityReport,
+} from '../src/api-compatibility/api-compatibility.types';
 
 interface CliOptions {
   baselinePath?: string;
@@ -64,6 +67,26 @@ Options:
 `);
 }
 
+function formatAliasDeprecation(entry: AliasDeprecationEntry): string[] {
+  const lines: string[] = [];
+
+  const status = entry.warningPeriodActive ? 'WARNING ACTIVE' : 'WARNING EXPIRED';
+  lines.push(`  [${status}] ${entry.aliasPath} -> ${entry.replacementPath}`);
+  lines.push(`             replacement endpoint: ${entry.replacementEndpoint}`);
+  lines.push(`             warning period: ${entry.warningPeriodStatus}`);
+  if (entry.deprecatedSince) {
+    lines.push(`             deprecated since: ${entry.deprecatedSince}`);
+  }
+  if (entry.removalNotBefore) {
+    lines.push(`             removal not before: ${entry.removalNotBefore}`);
+  }
+  if (entry.details) {
+    lines.push(`             ${entry.details}`);
+  }
+
+  return lines;
+}
+
 function formatReport(report: ApiCompatibilityReport): string {
   const lines: string[] = [];
 
@@ -71,7 +94,13 @@ function formatReport(report: ApiCompatibilityReport): string {
   lines.push('========================');
   lines.push('');
 
-  if (report.breakingChanges.length === 0 && report.nonBreakingChanges.length === 0) {
+  const aliasDeprecations = report.aliasDeprecations ?? [];
+
+  if (
+    report.breakingChanges.length === 0 &&
+    report.nonBreakingChanges.length === 0 &&
+    aliasDeprecations.length === 0
+  ) {
     lines.push('No changes detected against the baseline.');
     return lines.join('\n');
   }
@@ -109,6 +138,14 @@ function formatReport(report: ApiCompatibilityReport): string {
     lines.push('');
   }
 
+  if (aliasDeprecations.length > 0) {
+    lines.push(`Alias deprecations (${aliasDeprecations.length}):`);
+    for (const entry of aliasDeprecations) {
+      lines.push(...formatAliasDeprecation(entry));
+    }
+    lines.push('');
+  }
+
   return lines.join('\n');
 }
 
@@ -128,7 +165,16 @@ async function main(): Promise<void> {
     });
 
     if (options.json) {
-      console.log(JSON.stringify(report, null, 2));
+      console.log(
+        JSON.stringify(
+          {
+            ...report,
+            aliasDeprecations: report.aliasDeprecations ?? [],
+          },
+          null,
+          2,
+        ),
+      );
     } else {
       console.log(formatReport(report));
     }

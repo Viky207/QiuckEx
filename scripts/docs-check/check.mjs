@@ -12,17 +12,17 @@
  *
  * Usage:
  *   node scripts/docs-check/check.mjs                     # all checks
- *   node scripts/docs-check/check.mjs --only contract     # openapi|contract|mobile
+ *   node scripts/docs-check/check.mjs --only contract     # openapi|contract|mobile|migration
  *   node scripts/docs-check/check.mjs --json              # machine-readable report
  *
  * Exit codes: 0 = no errors, 1 = errors, 2 = usage error.
  */
 import { REPO_ROOT } from "./lib/shared.mjs";
-import { checkOpenApiStructure } from "./lib/openapi.mjs";
+import { checkOpenApiStructure, checkMigrationGuide } from "./lib/openapi.mjs";
 import { checkContractDrift, checkGlobalPrefixInvariant } from "./lib/contract.mjs";
 import { checkMobileDocs } from "./lib/mobile.mjs";
 
-const VALID_TARGETS = ["all", "openapi", "contract", "mobile"];
+const VALID_TARGETS = ["all", "openapi", "contract", "mobile", "migration"];
 
 export function runCheck(root = REPO_ROOT, { only = "all" } = {}) {
   const checks = {};
@@ -43,6 +43,9 @@ export function runCheck(root = REPO_ROOT, { only = "all" } = {}) {
   }
   if (only === "all" || only === "mobile") {
     checks.mobile = checkMobileDocs(root);
+  }
+  if (only === "all" || only === "migration") {
+    checks.migration = checkMigrationGuide(root);
   }
 
   const errors = Object.entries(checks).flatMap(([name, result]) =>
