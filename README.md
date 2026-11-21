@@ -25,6 +25,19 @@ This tool is ideal for freelancers invoicing clients, creators accepting tips, i
 - Fiat on/off-ramps (MoneyGram, Banxa).
 - Notifications (email/Telegram)..
 
+## Empty States
+
+Charts, transaction lists, and notification panels distinguish four empty states so users can tell whether data is absent, filtered out, restricted, or temporarily unavailable. Each state explains the reason and offers only a valid next action; none of them fabricate sample financial data.
+
+| State | When it appears | What the user sees | Valid next action |
+| --- | --- | --- | --- |
+| **First-use empty** | The account has no data yet (no transactions, no notifications, no chart history). | A short explanation that nothing has been recorded yet. | Create a payment link or share your username to receive the first payment. |
+| **Filtered empty** | Data exists but the active filters/search exclude all of it. | A note that no results match the current filters. | Clear or adjust the filters. |
+| **Permission-limited** | The wallet is not connected or lacks the scope needed to read the data. | A note that access is limited by wallet permissions. | Connect or re-authorise the wallet. |
+| **Service-unavailable** | The API or Horizon is unreachable or returning errors. | A note that data could not be loaded right now. | Retry the request. |
+
+Loading is shown separately (skeleton/spinner) and is never presented as an empty state, so a blank panel always carries a reason and an action.
+
 ## Tech Stack
 - **Frontend**: Next.js 16 (`app/frontend`), Tailwind CSS, deployable to Vercel.
 - **Backend**: NestJS 12 API (`app/backend`), Supabase (usernames/storage), Horizon API (transactions), Prometheus metrics via `prom-client`, Sentry.
@@ -131,137 +144,4 @@ Environment files are **per package**, not at the repository root.
    cd app/mobile && npx expo start
    ```
 
-4. **Contracts (`app/contract`)** — Cargo/Rust. Add `app/contract/.env` if you need contract-specific variables (e.g. `STELLAR_NETWORK=testnet`).
-
-5. Fund a testnet account at [laboratory.stellar.org](https://laboratory.stellar.org) so you can claim a username and exercise payment flows. Never reuse a mainnet secret key in a local checkout.
-
-### Running Locally
-1. Launch all JS services using Turborepo:
-   ```
-   pnpm dev
-   ```
-   This starts the frontend (`app/frontend`, http://localhost:3000) and the backend (`app/backend`, http://localhost:4000). To run one app only:
-   ```bash
-   pnpm --filter frontend dev
-   pnpm --filter @quickex/backend dev
-   ```
-2. Check backend health: `curl http://localhost:4000/health`.
-3. For the mobile app:
-   ```
-   cd app/mobile && npx expo start        # then press i / a, or use npx expo start --ios
-   ```
-4. For contracts (testing/deploying):
-   ```
-   cd app/contract && cargo test  # Run unit tests
-   # Deploy to testnet: use the Soroban CLI per the Stellar Soroban docs
-   ```
-
-Connect your wallet in the app to claim a username and test features.
-
-### Testing
-
-The root `test` script delegates to Turborepo, so `pnpm <task>` is the canonical entry point:
-
-1. Lint and type-check the whole workspace:
-   ```bash
-   pnpm lint
-   pnpm type-check
-   ```
-   Scope to one app with `pnpm --filter @quickex/backend lint`, `pnpm --filter @quickex/backend type-check`, etc.
-
-2. Backend tests (Jest). These are the tests that actually execute today — the `frontend` and `mobile` packages currently no-op their `test` script so the monorepo-wide run stays green:
-   ```bash
-   pnpm test                                    # all backend Jest suites
-   pnpm --filter @quickex/backend test:unit     # unit only
-   pnpm --filter @quickex/backend test:int      # integration only
-   pnpm --filter @quickex/backend test:e2e      # e2e
-   pnpm --filter @quickex/backend test:fuzz     # property/fuzz suites
-   ```
-   E2E and smoke suites talk to Horizon/Soroban and need `STELLAR_NETWORK=testnet` plus reachable endpoints; see [docs/RUNTIME-CONFIG-MATRIX.md](docs/RUNTIME-CONFIG-MATRIX.md).
-
-3. Contract tests (Rust, outside pnpm):
-   ```bash
-   cd app/contract && cargo test
-   ```
-
-4. Secret scanning:
-   ```bash
-   pnpm secret-scan:verify
-   ```
-
-4. Validate a release candidate with one command — the same gate CI runs:
-   ```bash
-   pnpm rc:validate          # full gate
-   pnpm rc:validate:quick    # fast subset while iterating
-   pnpm rc:stages            # list the stages
-   ```
-   See [docs/RELEASE-CANDIDATE-VALIDATION.md](docs/RELEASE-CANDIDATE-VALIDATION.md).
-
-### Deployment
-Deployment is automated for most components, but requires platform-specific configuration:
-
-1. **Frontend and Backend**:
-   - Frontend: connect the GitHub repository to Vercel via the dashboard. Pushes to `main` trigger auto-deploys; set a custom domain in the Vercel project settings.
-   - Backend: `.github/workflows/cd.yml` runs the release pipeline on `main` (release metadata → dependency install → migrations → deploy hook). Migration execution is delegated to `.github/actions/run-migrations`, and the composite deploy + health check lives in `.github/actions/deploy-app`.
-   - Configure the platform secrets the workflows expect (`PRODUCTION_DATABASE_URL`, `DEPLOY_TOKEN`, `APP_URL`) as GitHub **environment secrets**, never as committed files.
-
-2. **Mobile (Expo/EAS)**
-   - Install Expo CLI if needed: `npm install -g @expo/cli`.
-   - For internal testing builds, use EAS and the GitHub workflow defined in `./.github/workflows/mobile-release.yml`.
-   - From `app/mobile`: run `npx eas build --profile production --platform android` or `npx eas build --profile production --platform ios` when credentials are configured.
-   - Ensure `EAS_TOKEN` is stored in GitHub secrets and not exposed in logs.
-
-3. **Contracts (Soroban)**
-   - CI for the Rust workspace lives in `.github/workflows/contract.yml`.
-   - For testnet: `cd app/contract && soroban contract deploy --network testnet`.
-   - The contract is **not deployed to mainnet**; every `mainnet.*` feature flag defaults to disabled. See [docs/CAPABILITY-MAP.md](docs/CAPABILITY-MAP.md) and the checklist in [RELEASE_READINESS_CHECKLIST.md](RELEASE_READINESS_CHECKLIST.md).
-
-Before promoting anything to production, work through [RELEASE_READINESS_CHECKLIST.md](RELEASE_READINESS_CHECKLIST.md) and follow the promotion procedure in [RELEASE_PROMOTION_FLOW.md](RELEASE_PROMOTION_FLOW.md).
-
-Automated release-gate checks live in [`scripts/rc-validate.sh`](scripts/rc-validate.sh) — run it before promoting, and see [docs/RELEASE-CANDIDATE-VALIDATION.md](docs/RELEASE-CANDIDATE-VALIDATION.md) for the stage list and exit-code contract. Promotion itself follows [RELEASE_PROMOTION_FLOW.md](RELEASE_PROMOTION_FLOW.md).
-
-## Usage
-1. **Claim Username**: Connect your wallet in the app, select a name, and confirm the on-chain transaction.
-2. **Generate Link**: In the dashboard, input amount, memo, and privacy options, then copy the generated link or QR code.
-3. **Receive Payment**: Share the link; the payer clicks or scans to send funds directly to your wallet.
-4. **Enable Privacy**: Toggle X-Ray mode to shield transactions (deploys Rust contract on mainnet).
-
-## Contributing
-Contributions are welcome and encouraged to help evolve QuickEx! To get started:
-
-- **Report Issues**: Use GitHub Issues with one of the templates in `.github/ISSUE_TEMPLATE`. Include reproduction steps, environment details, and screenshots where possible.
-- **Propose Features**: Start a Discussion thread to align on ideas before coding.
-- **Submit Pull Requests**:
-  1. Fork the repository and create a branch following the convention in [CONTRIBUTING.md](CONTRIBUTING.md) (`feat/`, `fix/`, `docs/`, `chore/`).
-  2. Implement changes, ensuring they pass linting and tests.
-  3. Commit with clear [Conventional Commits](https://www.conventionalcommits.org/) messages (e.g. `feat: add multi-asset swap support`).
-  4. Push and open a PR against `main`. Reference the issue number in the PR body (`closes #123`) so it auto-closes on merge.
-- **Monorepo Best Practices**:
-  - Use `pnpm build`, `pnpm lint`, `pnpm type-check`, and `pnpm test` from the repository root; these delegate to Turborepo across all workspace packages.
-  - Filter by **package name**, not directory: `pnpm --filter @quickex/backend test:unit`, `pnpm --filter frontend lint`.
-  - `app/contract` sits outside the pnpm workspace — use `cargo test` / `cargo clippy` there.
-  - If a change alters what is actually shipped, update the matching row in [docs/CAPABILITY-MAP.md](docs/CAPABILITY-MAP.md) in the same PR.
-- **Dependency review**: PRs that introduce new npm or Cargo dependencies are automatically checked for high/critical CVEs and disallowed licenses. Any exception must be recorded with a GHSA ID and a written justification. See [docs/policies/DEPENDENCY-PROVENANCE-POLICY.md](docs/policies/DEPENDENCY-PROVENANCE-POLICY.md).
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the full contribution workflow.
-
-## Security
-
-For information about reporting security vulnerabilities, please see our [Security Policy](SECURITY.md).
-
-## License
-This project is licensed under the MIT License.
-
-## Support & Community
-- Join the [QuickEx Discord](https://discord.gg/gBmApTNVV) for real-time help, discussions, and updates.
-- Have questions? Open an issue or DM @pulsefy.
-
-Built with ❤️ by Pulsefy. Powered by Stellar. 🚀
-
-## Handsoff notes
-
-<!-- handsoff-issue-371 -->
-- #371: feat(contract): Add contract upgrade safety gate with version registry
-
-<!-- handsoff-issue-462 -->
-- #462: [Docs] Update CAPABILITY-MAP.md to reflect current feature flag states
+4. **Contracts (`app/contract`)** — Cargo/Rust. Build with `cargo` as shown above; no `.env` is required for local contract tests.

@@ -100,6 +100,40 @@ means and what to alert on.
   )
   ```
 
+## Data freshness
+
+Analytics and account-activity views may serve cached values when an upstream
+dependency is unavailable. Cached responses are surfaced to clients with a
+freshness signal so that stale values are never mistaken for live data.
+
+### `app_cache_served_total`
+
+- **Type:** counter
+- **Labels:** `surface` (`analytics`, `account_activity`), `reason` (`fresh`, `stale`)
+- **Description:** Number of read responses served from cache, partitioned by
+  the user-facing surface and whether the cached value was still considered
+  fresh or was served stale (e.g. during a dependency outage).
+- **Example query** — share of stale responses per surface over 5m:
+
+  ```promql
+  sum by (surface) (rate(app_cache_served_total{reason="stale"}[5m]))
+    /
+  sum by (surface) (rate(app_cache_served_total[5m]))
+  ```
+
+### `app_cache_stale_age_seconds`
+
+- **Type:** gauge
+- **Labels:** `surface` (`analytics`, `account_activity`)
+- **Description:** Age in seconds of the most recently served stale cached
+  value. This is the same timestamp surfaced to clients in the stale-data
+  label, so on-call can correlate the UI indicator with backend state.
+- **Example query** — current stale age per surface:
+
+  ```promql
+  app_cache_stale_age_seconds
+  ```
+
 ## Runtime metrics (default collectors)
 
 These are emitted by `prom-client`'s default collectors and are useful for
@@ -188,6 +222,16 @@ histogram_quantile(
 ```
 
 - `for: 10m`
+- Severity: `warning`
+
+**Stale data served** — any surface serving stale cached data for 5 minutes,
+indicating a sustained dependency outage:
+
+```promql
+sum by (surface) (rate(app_cache_served_total{reason="stale"}[5m])) > 0
+```
+
+- `for: 5m`
 - Severity: `warning`
 
 **Event loop lag** — event loop lag above 100ms for 10 minutes:

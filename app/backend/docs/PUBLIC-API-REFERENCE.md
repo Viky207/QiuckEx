@@ -10,6 +10,28 @@ Authorization: Bearer <access_token>
 
 ---
 
+## Data freshness
+
+Some read endpoints may serve cached data when an upstream dependency (for example the Stellar network) is temporarily unavailable. When this happens the response is still `200 OK`, but it is marked as stale so clients can distinguish cached values from live data.
+
+Stale responses include a `freshness` object:
+
+```json
+{
+  "freshness": {
+    "is_stale": true,
+    "as_of": "2024-01-01T00:00:00.000Z"
+  }
+}
+```
+
+- `is_stale` — `true` when the payload was served from cache because live data could not be fetched.
+- `as_of` — ISO 8601 timestamp of when the cached data was originally captured.
+
+When live data is available, `is_stale` is `false` and `as_of` reflects the time the data was fetched. Clients should surface the stale state (a text label plus the `as_of` timestamp) to users, and return to the normal presentation once `is_stale` is `false` again.
+
+---
+
 ## Webhooks
 
 Register a webhook URL to receive a `POST` request whenever a payment to one of your QuickEx links is confirmed on the Stellar network.

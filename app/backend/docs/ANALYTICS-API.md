@@ -14,6 +14,16 @@ The Analytics API provides aggregated usage and financial metrics for the Develo
 - **Organization scoping**: Data automatically filtered to authenticated organization
 - **Caching**: 5-minute cache on aggregations reduces database load
 
+### Data Freshness
+
+Analytics responses may be served from cache. To make cached data visually distinct from live data, every response includes freshness metadata so clients can render a subtle but clear indicator:
+
+- `metadata.generatedAt` — ISO 8601 timestamp of when the underlying aggregation was computed. Clients display this as the "as of" timestamp next to the data.
+- `metadata.cacheStatus` — `"live"` when the response was computed for this request, or `"cached"` when served from the cache.
+- `metadata.cacheAgeSeconds` — number of seconds since the cached aggregation was generated (`0` for live responses).
+
+When `cacheStatus` is `"cached"`, clients must show a text label (e.g. "Cached data") together with the `generatedAt` timestamp, and expose the same information to assistive technology (e.g. `aria-label="Cached data as of <timestamp>"`). When a subsequent request returns `cacheStatus: "live"`, the normal (non-stale) styling is restored. This prevents cached values from appearing current during a dependency outage.
+
 ## Endpoints
 
 ### 0. Get Per-Username Earnings
@@ -44,6 +54,8 @@ The Analytics API provides aggregated usage and financial metrics for the Develo
 | `day` | 60s |
 | `week` | 300s |
 | `month` | 900s |
+
+Cached earnings responses report their freshness via the `X-Cache-Status` (`HIT`/`MISS`) and `X-Cache-Age` (seconds) response headers, and include `generatedAt` in each bucket's enclosing payload metadata. Clients render the same stale-data label and timestamp treatment described in [Data Freshness](#data-freshness).
 
 **Response Format**:
 
@@ -183,6 +195,8 @@ curl -X GET "http://localhost:3000/analytics/alice/earnings?period=month&from=20
     "granularity": "daily",
     "assetFilter": ["XLM", "USDC:GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXUSMIQ6KUVNNBI5I7AD3H"],
     "generatedAt": "2026-04-28T15:30:45.123Z",
+    "cacheStatus": "cached",
+    "cacheAgeSeconds": 42,
     "executionTimeMs": 187
   }
 }
@@ -232,91 +246,6 @@ curl -X GET "http://localhost:3000/analytics/stats?startDate=2026-01-01T00:00:00
 {
   "current": {
     "period": "2026-04-15T00:00:00Z",
-    "totalVolume": "3500.0000000",
-    "totalFees": "0.0003500",
-    "successRate": 94.5,
-    "totalActiveLinks": 85,
-    "totalPaidLinks": 78,
-    "averageTransaction": "44.8700000",
-    "transactionCount": 78,
-    "assetBreakdown": [
-      {
-        "asset": "XLM",
-        "volume": "2400.0000000",
-        "fees": "0.0002400",
-        "successRate": 95.8,
-        "activeLinks": 55,
-        "paidLinks": 52,
-        "averageTransaction": "46.1500000",
-        "transactionCount": 52
-      },
-      {
-        "asset": "USDC:GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXUSMIQ6KUVNNBI5I7AD3H",
-        "volume": "1100.0000000",
-        "fees": "0.0001100",
-        "successRate": 91.7,
-        "activeLinks": 30,
-        "paidLinks": 26,
-        "averageTransaction": "42.3000000",
-        "transactionCount": 26
-      }
-    ]
-  },
-  "previous": {
-    "period": "2026-04-08T00:00:00Z",
-    "totalVolume": "3000.0000000",
-    "totalFees": "0.0003000",
-    "successRate": 91.2,
-    "totalActiveLinks": 78,
-    "totalPaidLinks": 71,
-    "averageTransaction": "42.2500000",
-    "transactionCount": 71,
-    "assetBreakdown": []
-  },
-  "comparison": {
-    "previousPeriod": "2026-04-08T00:00:00Z",
-    "volumeChangePercent": 16.67,
-    "successRateChangePercent": 3.3,
-    "activeLinksChangePercent": 8.97,
-    "paidLinksChangePercent": 9.86,
-    "averageTransactionChangePercent": 6.13,
-    "transactionCountChange": 7
-  },
-  "metadata": {
-    "generatedAt": "2026-04-28T15:30:45.123Z",
-    "executionTimeMs": 234
-  }
-}
-```
+    "totalVolum
 
-**Example Requests**:
-
-```bash
-# Compare current week vs previous week
-curl -X GET "http://localhost:3000/analytics/stats/comparison?startDate=2026-04-22T00:00:00Z&endDate=2026-04-28T23:59:59Z&grouping=weekly" \
-  -H "X-API-Key: your-api-key"
-
-# Compare current month vs previous month
-curl -X GET "http://localhost:3000/analytics/stats/comparison?startDate=2026-04-01T00:00:00Z&endDate=2026-04-30T23:59:59Z&grouping=monthly&breakdownByAsset=true" \
-  -H "X-API-Key: your-api-key"
-```
-
----
-
-## Metrics Reference
-
-### Volume (`totalVolume` / `volume`)
-- **Definition**: Sum of all transaction amounts in the period
-- **Unit**: Asset units (e.g., XLM, USDC)
-- **Notes**: Only counts successful transactions
-
-### Fees (`totalFees` / `fees`)
-- **Definition**: Total transaction fees paid
-- **Unit**: XLM (Stellar's native asset)
-- **Notes**: Includes Horizon API fees and network fees
-
-### Success Rate (`successRate`)
-- **Definition**: Percentage of transactions that completed successfully
-- **Formula**: `(successful_transactions / total_transactions) * 100`
-- **Range**: 0–100%
-- **Notes**: Only counts transactions that reached a terminal state
+/* … truncated 2642 chars — edit only what you need near the top … */
