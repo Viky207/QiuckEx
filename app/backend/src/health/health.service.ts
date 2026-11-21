@@ -31,6 +31,23 @@ export type CompositeHealth = {
   checks: Record<string, DependencyCheckResult>;
 };
 
+/**
+ * Result of a blue-green target readiness probe.
+ *
+ * `ready` is only true when the composite health report is fully healthy
+ * (no degraded or unhealthy dependencies). `reason` carries a stable,
+ * redacted explanation when the target is not ready so the traffic
+ * controller can decide whether to retry or abort the switch.
+ */
+export type SlotReadinessResult = {
+  ready: boolean;
+  slot: string;
+  status: DependencyStatus;
+  reason?: string;
+  checks: Record<string, DependencyCheckResult>;
+  checkedAt: string;
+};
+
 const HEALTH_CACHE_TTL_MS = 5_000;
 
 /**
@@ -499,6 +516,110 @@ export class HealthService {
     }
 
     return result;
+  }
+
+  /**
+   * Probes whether a blue-green target slot is ready to receive traffic.
+   *
+   * The traffic controller must call this before every switch attempt,
+   * including retries after an uncertain (timed-out) switch result, so it
+   * never routes traffic to an unready target. The probe bypasses the
+   * short-lived composite cache so a slot that just recovered is observed
+   * immediately, and it never throws: dependency failures are folded into
+   * a `ready: false` result with a stable, redacted reason.
+   */
+  async checkSlotReadiness(slot: string): Promise<SlotReadinessResult> {
+    const checkedAt = new Date().toISOString();
+    try {
+      const health = await this.getHealthStatusUncached();
+      const ready = Object.values(health.checks).every(
+        (check) => check.status === "healthy",
+      );
+
+      const unhealthy = Object.entries(health.checks)
+        .filter(([, check]) => check.status !== "healthy")
+        .map(([name, check]) => `${name}:${check.status}`);
+
+      return {
+        ready,
+        slot,
+        status: health.status,
+        reason: ready
+          ? undefined
+          : `slot_not_ready (${unhealthy.join(", ") || "unknown"})`,
+        checks: health.checks,
+        checkedAt,
+      };
+    } catch (err) {
+      const safeMessage = this.toDependencyError(err);
+      this.logger.warn(
+        `Slot readiness probe failed for ${slot}: ${safeMessage}`,
+      );
+      return {
+        ready: false,
+        slot,
+        status: "unhealthy",
+        reason: `readiness_probe_failed (${safeMessage})`,
+        checks: {},
+        checkedAt,
+      };
+    }
+  }
+
+  /**
+   * Computes the composite health report without consulting or populating
+   * the 5s cache. Used by readiness probes that must observe the current
+   * state of a slot immediately after a switch or timeout.
+   */
+  private async getHealthStatusUncached(): Promise<CompositeHealth> {
+    const [supabase, horizon, sorobanRpc, redis] = await Promise.all([
+      this.checkSupabase(),
+      this.checkHorizon(),
+      this.checkSorobanRpc(),
+      this.checkRedis(),
+    ]);
+
+    const checks: Record<string, DependencyCheckResult> = {
+      supabase: {
+        status: this.toDependencyStatus(supabase.status),
+        latency: supabase.latency,
+        error: supabase.status === "down" ? supabase.details : undefined,
+        lastSuccess: supabase.lastSuccess,
+      },
+      horizon: {
+        status: this.toDependencyStatus(horizon.status),
+        latency: horizon.latency,
+        error: horizon.status === "down" ? horizon.details : undefined,
+        lastSuccess: horizon.lastSuccess,
+      },
+      soroban_rpc: {
+        status: this.toDependencyStatus(sorobanRpc.status),
+        latency: sorobanRpc.latency,
+        error: sorobanRpc.status === "down" ? sorobanRpc.details : undefined,
+        lastSuccess: sorobanRpc.lastSuccess,
+      },
+      redis: {
+        status: this.toDependencyStatus(redis.status),
+        latency: redis.latency,
+        error: redis.status === "down" ? redis.details : undefined,
+        lastSuccess: redis.lastSuccess,
+      },
+    };
+
+    const statuses = Object.values(checks).map((c) => c.status);
+    const overall: DependencyStatus = statuses.includes("unhealthy")
+      ? "unhealthy"
+      : statuses.includes("degraded")
+        ? "degraded"
+        : "healthy";
+
+    return {
+      status: overall,
+      version: this.version,
+      uptime: Math.floor((Date.now() - this.startTime) / 1000),
+      timestamp: new Date().toISOString(),
+      checks,
+    };
   }
 
   /**

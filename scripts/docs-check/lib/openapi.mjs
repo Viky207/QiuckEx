@@ -8,7 +8,19 @@
  * Every rule here is internal to the document (it never needs the server to be
  * running), which is what lets the gate run on a fresh clone in CI.
  */
-import { PATHS, readJson, unique } from "./shared.mjs";
+import { PATHS, readJson, readText, unique } from "./shared.mjs";
+
+/**
+ * Canonical payment intent lifecycle states — issue #568.
+ *
+ * These are the implemented stable values from the backend contract. The
+ * lifecycle document and the OpenAPI schema must both agree with this list,
+ * otherwise client and operator docs drift from the delivered behavior.
+ */
+export const PAYMENT_INTENT_STATES = ["pending", "submitted", "confirmed", "expired", "failed"];
+
+/** Terminal states: no further transitions are possible from these. */
+export const PAYMENT_INTENT_TERMINAL_STATES = ["confirmed", "expired", "failed"];
 
 const HTTP_METHODS = ["get", "put", "post", "delete", "patch", "options", "head", "trace"];
 
@@ -135,5 +147,111 @@ export function checkOpenApiStructure(root) {
     }
   }
 
+  const lifecycle = checkPaymentIntentStates(root, document);
+  errors.push(...lifecycle.errors);
+  warnings.push(...lifecycle.warnings);
+
   return { errors, warnings, summary };
+}
+
+/**
+ * Find every schema property that enumerates payment intent states.
+ *
+ * A property qualifies when its name mentions `status`/`state` and it carries
+ * an `enum` whose values overlap the canonical state list. This keeps the rule
+ * scoped to payment intent state enums without hard-coding a schema name.
+ */
+export function collectPaymentIntentStateEnums(document) {
+  const found = [];
+  const schemas = document.components?.schemas ?? {};
+  for (const [schemaName, schema] of Object.entries(schemas)) {
+    for (const [propertyName, property] of Object.entries(schema?.properties ?? {})) {
+      if (!/status|state/i.test(propertyName)) continue;
+      if (!Array.isArray(property?.enum)) continue;
+      if (!property.enum.some((value) => PAYMENT_INTENT_STATES.includes(value))) continue;
+      found.push({ schemaName, propertyName, values: property.enum });
+    }
+  }
+  return found;
+}
+
+/**
+ * Validate that payment intent state enums match the canonical lifecycle.
+ *
+ * Returns errors for missing/extra states and warnings for terminal states that
+ * are not documented as terminal in the lifecycle document.
+ */
+export function checkPaymentIntentStates(root, document) {
+  const errors = [];
+  const warnings = [];
+  const enums = collectPaymentIntentStateEnums(document);
+
+  if (enums.length === 0) {
+    errors.push(
+      `${PATHS.openapi}: no payment intent state enum found; expected one of ${PAYMENT_INTENT_STATES.join(", ")}`,
+    );
+    return { errors, warnings };
+  }
+
+  for (const { schemaName, propertyName, values } of enums) {
+    const where = `${schemaName}.${propertyName}`;
+    const missing = PAYMENT_INTENT_STATES.filter((state) => !values.includes(state));
+    const extra = values.filter((value) => !PAYMENT_INTENT_STATES.includes(value));
+    if (missing.length > 0) {
+      errors.push(`${PATHS.openapi}: ${where} is missing payment intent state(s): ${missing.join(", ")}`);
+    }
+    if (extra.length > 0) {
+      errors.push(`${PATHS.openapi}: ${where} declares unknown payment intent state(s): ${extra.join(", ")}`);
+    }
+  }
+
+  const lifecycle = readLifecycleDocument(root);
+  if (lifecycle.error) {
+    errors.push(lifecycle.error);
+  } else {
+    const documented = new Set(lifecycle.states);
+    for (const state of PAYMENT_INTENT_STATES) {
+      if (!documented.has(state)) {
+        errors.push(`${PATHS.openapi}: lifecycle document does not document the "${state}" state`);
+      }
+    }
+    for (const state of lifecycle.states) {
+      if (!PAYMENT_INTENT_STATES.includes(state)) {
+        errors.push(`${PATHS.openapi}: lifecycle document documents unknown state "${state}"`);
+      }
+    }
+    for (const state of PAYMENT_INTENT_TERMINAL_STATES) {
+      if (!lifecycle.terminal.has(state)) {
+        warnings.push(`${PATHS.openapi}: lifecycle document does not mark "${state}" as terminal`);
+      }
+    }
+  }
+
+  return { errors, warnings };
+}
+
+/**
+ * Read the canonical lifecycle document and extract the states it lists.
+ *
+ * The document is expected to contain a fenced block or list of state names;
+ * we extract every canonical state token that appears in it so the check stays
+ * robust to formatting changes while still catching omissions.
+ */
+export function readLifecycleDocument(root) {
+  let text;
+  try {
+    text = readText(root, PATHS.paymentIntentLifecycle);
+  } catch (error) {
+    return { error: `${PATHS.paymentIntentLifecycle} is missing or unreadable: ${error.message}`, states: [], terminal: new Set() };
+  }
+
+  const states = PAYMENT_INTENT_STATES.filter((state) =>
+    new RegExp(`\\b${state}\\b`, "i").test(text),
+  );
+  const terminal = new Set(
+    PAYMENT_INTENT_TERMINAL_STATES.filter((state) =>
+      new RegExp(`\\b${state}\\b[^\\n]*\\bterminal\\b`, "i").test(text),
+    ),
+  );
+  return { states, terminal };
 }

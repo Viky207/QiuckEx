@@ -119,6 +119,44 @@ function validateGate(gate, options) {
   }
 }
 
+function validateDeployFreeze(freeze, options) {
+  const { now = Date.now(), requireOverride = false } = options;
+  if (freeze === undefined || freeze === null) {
+    if (requireOverride) throw new Error('Deploy freeze state is required when an override is claimed');
+    return;
+  }
+  if (typeof freeze !== 'object' || Array.isArray(freeze)) {
+    throw new Error('Deploy freeze state must be an object');
+  }
+  if (typeof freeze.frozen !== 'boolean') throw new Error('Deploy freeze state must declare a boolean frozen flag');
+  if (!freeze.frozen) {
+    if (freeze.override !== undefined && freeze.override !== null) {
+      throw new Error('Deploy freeze override must not be present when the environment is not frozen');
+    }
+    return;
+  }
+  const override = freeze.override;
+  if (override === undefined || override === null) {
+    throw new Error('Production promotion is blocked by an active deploy freeze');
+  }
+  if (typeof override !== 'object' || Array.isArray(override)) {
+    throw new Error('Deploy freeze override must be an object');
+  }
+  if (typeof override.actor !== 'string' || override.actor.trim() === '') {
+    throw new Error('Deploy freeze override must record the authorizing actor');
+  }
+  if (typeof override.reason !== 'string' || override.reason.trim() === '') {
+    throw new Error('Deploy freeze override must record a reason');
+  }
+  const overrideAt = Date.parse(override.timestamp);
+  if (!Number.isFinite(overrideAt) || overrideAt > now) {
+    throw new Error('Deploy freeze override must record a valid timestamp that is not in the future');
+  }
+  if (override.approved !== true) {
+    throw new Error('Deploy freeze override must be explicitly approved');
+  }
+}
+
 function readReviewerKeys() {
   let keys;
   try {
@@ -165,6 +203,12 @@ function main() {
     auditReportSha256: sha256(args['audit-report']),
     reviewerKeys: readReviewerKeys(),
   });
+  const freeze = args['deploy-freeze'] ? JSON.parse(fs.readFileSync(args['deploy-freeze'], 'utf8')) : undefined;
+  validateDeployFreeze(freeze, { requireOverride: Boolean(args['deploy-freeze']) });
+  if (freeze?.frozen) {
+    console.log(`Mainnet deployment gate approved for ${commit} (WASM SHA-256 ${wasmHash}) under logged deploy freeze override by ${freeze.override.actor}.`);
+    return;
+  }
   console.log(`Mainnet deployment gate approved for ${commit} (WASM SHA-256 ${wasmHash}).`);
 }
 
@@ -177,4 +221,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { canonicalJson, validateGate };
+module.exports = { canonicalJson, validateGate, validateDeployFreeze };

@@ -122,6 +122,70 @@ jobs:
       - name: Horizon-Backed Endpoints Performance Regression Tests
         run: pnpm run test:perf:horizon
 
+      - name: Deploy Freeze and Override Tests
+        run: pnpm run test:unit -- deploy-freeze
+        env:
+          NODE_ENV: test
+          STELLAR_NETWORK: testnet
+          SUPABASE_URL: https://test.supabase.co
+          SUPABASE_ANON_KEY: test-key
+
+      - name: Payment Lifecycle Documentation Check
+        run: pnpm run docs:check:payment-lifecycle
+        env:
+          NODE_ENV: test
+          NETWORK: testnet
+          SUPABASE_URL: https://spec-export.supabase.co
+          SUPABASE_ANON_KEY: spec-export-key
+
+      - name: Event Indexer Runbook Check
+        run: pnpm run docs:check:indexer-runbook
+        env:
+          NODE_ENV: test
+          NETWORK: testnet
+          SUPABASE_URL: https://spec-export.supabase.co
+          SUPABASE_ANON_KEY: spec-export-key
+
+  blue-green-fault-injection:
+    name: Blue-Green Traffic Switching Fault Injection
+    runs-on: ubuntu-latest
+    # Staging-only fault-injection suite covering traffic controller timeout,
+    # malformed response, and retry after an uncertain switch result.
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    environment: staging
+    defaults:
+      run:
+        working-directory: app/backend
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Run blue-green traffic switching fault-injection tests
+        run: pnpm run test:int -- blue-green-traffic-switch.int.spec.ts
+        env:
+          NODE_ENV: test
+          DEPLOY_ENV: staging
+          STELLAR_NETWORK: testnet
+          SUPABASE_URL: ${{ secrets.SUPABASE_TEST_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_TEST_ANON_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_TEST_SERVICE_ROLE_KEY }}
+          TRAFFIC_CONTROLLER_URL: ${{ secrets.STAGING_TRAFFIC_CONTROLLER_URL }}
+          TRAFFIC_CONTROLLER_TOKEN: ${{ secrets.STAGING_TRAFFIC_CONTROLLER_TOKEN }}
+
   payment-lifecycle-integration:
     name: Payment Lifecycle Integration Tests
     runs-on: ubuntu-latest
