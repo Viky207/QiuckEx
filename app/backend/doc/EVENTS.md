@@ -82,6 +82,30 @@ Table: `receipt_status_conflicts`
 
 Each recorded conflict also emits a `receipt_status_conflict` event with the same identifying fields so that alerting and dashboards can react without polling the table.
 
+## Multi-Step Escrow Event Ordering
+
+Some escrow operations perform more than one state update in a single call (for example, releasing funds and then marking the escrow settled). Indexers may infer lifecycle order from the emitted events, so the following contract is guaranteed.
+
+### Ordering guarantees
+
+- **Committed state only:** An event is emitted only after the state change it describes has been committed. Events never describe state that was rolled back.
+- **Stable ordering:** For a given operation, events are emitted in a fixed, documented order. The order is deterministic across retries and does not depend on handler registration order.
+- **No partial sequences on failure:** If any step of a multi-step operation fails, the operation is rolled back and **no** lifecycle events from that operation are emitted. Consumers never observe a prefix of a lifecycle sequence for a failed operation.
+
+### Multi-event operations
+
+| Operation | Emitted events (in order) |
+| :--- | :--- |
+| Escrow release | `escrow.released` → `escrow.settled` |
+| Escrow refund | `escrow.refunded` → `escrow.settled` |
+| Escrow dispute resolution | `escrow.disputed` → `escrow.resolved` → `escrow.settled` |
+
+### Payload consistency
+
+- Every event in a multi-step sequence carries the same `escrowId` and `operationId` so consumers can correlate the sequence.
+- Payloads reflect the committed state at the time of emission; a later event in the sequence reflects the state after all preceding steps have been applied.
+- Events are emitted at most once per committed operation; retries of a failed operation emit a fresh, complete sequence only after the retry commits.
+
 ## How to add new handlers
 1. Inject `NotificationService` (or create a new service).
 2. Use the `@OnEvent('event_name', { async: true })` decorator.

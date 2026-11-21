@@ -107,6 +107,64 @@ npm run test:e2e
 - Coverage includes all major services and repositories
 - Tests use Jest framework with NestJS testing utilities
 
+### Escrow Invariant Tests
+
+Escrow state invariants are verified after every failed invocation so that a
+failure in a late validation branch cannot leave a partially updated record.
+
+- **Snapshot before failure**: Each test snapshots the relevant storage
+  (escrow records, balances, cursors) before triggering a representative
+  failure at each transition stage (deposit, withdraw, refund).
+- **Assert unchanged on failure**: After the failed call, the test asserts that
+  every invariant-relevant value matches the pre-failure snapshot.
+- **Failure classes covered**:
+  - Authorization errors (unauthorized caller, missing signer, wrong owner)
+  - Downstream transfer errors (insufficient balance, transfer rejection,
+    Horizon/Soroban submission failure)
+
+These tests live alongside the escrow service specs and run as part of
+`npm run test:unit`.
+
+### Escrow Event Ordering Tests
+
+Multi-step escrow operations (deposit, withdraw, refund) may emit more than one
+event per invocation. Indexers rely on the emitted sequence to reconstruct
+lifecycle order, so the order and payloads are treated as part of the contract.
+
+- **Committed state only**: Events are emitted only after the corresponding
+  state transition has been committed. No event is emitted for a step that did
+  not persist.
+- **Stable ordering**: For a given operation the emitted event sequence is
+  deterministic and documented below; tests assert the exact order.
+- **No partial sequences on failure**: If an operation fails at any step, no
+  lifecycle events from that invocation are emitted (no partial sequence).
+- **Payload consistency**: Each event's payload matches the committed record
+  (escrow id, amounts, participants) at the time of emission.
+
+These tests live alongside the escrow service specs and run as part of
+`npm run test:unit`.
+
+### Contract Budget Regression Tests
+
+Contract budget regression tests exercise the worst-case call paths under the
+declared limits (maximum participants, maximum amounts, maximum event payload
+size) and assert that CPU and storage growth stay within a fixed budget.
+
+- **Reproducible inputs**: Each case builds its inputs deterministically from
+  the declared limits, so the same case produces the same measurement on every
+  run and on every machine.
+- **Regression threshold**: Each case records a budget threshold. Exceeding the
+  threshold fails the contract CI job; the job does not warn-and-continue.
+- **Threshold changes require review**: Any change to a recorded threshold must
+  be accompanied by an explicit review note explaining why the budget moved.
+  Silent threshold bumps are rejected in review.
+- **Boundary coverage**: Cases include the exact-limit input (passes) and the
+  limit-plus-one input (rejected by validation) so the boundary is covered on
+  both sides.
+
+These tests run as part of the contract CI job and are not part of
+`npm run test:unit`.
+
 ## Event System
 
 ### Event Types
@@ -115,6 +173,20 @@ npm run test:e2e
 - `stellar.EscrowRefunded` - Escrow refund events
 - `payment.received` - Payment received events
 - `username.claimed` - Username claim events
+
+### Escrow Event Ordering
+
+For operations that emit multiple events, the emission order is stable and
+reflects committed state transitions:
+
+- **Deposit**: `stellar.EscrowDeposited` (single lifecycle event).
+- **Withdraw**: `stellar.EscrowWithdrawn` (single lifecycle event).
+- **Refund**: `stellar.EscrowRefunded` (single lifecycle event).
+
+When an operation performs additional state updates (e.g. balance or cursor
+updates), those are committed before the corresponding lifecycle event is
+emitted. If the operation fails, no lifecycle event is emitted for that
+invocation.
 
 ### Event Flow
 1. StellarIngestionService streams events from Horizon
@@ -137,6 +209,14 @@ npm run test:e2e
 - HTTP exception filters for standardized error responses
 - Winston logging for structured logging
 - Graceful degradation for external service failures
+
+### Escrow Failure Semantics
+- A failed escrow invocation (authorization or downstream transfer error)
+  must leave escrow storage and balances unchanged.
+- Rollback is expected to be atomic; the invariant tests above guard against
+  regressions where a late validation branch partially mutates state.
+- A failed invocation emits no lifecycle events, so indexers never observe a
+  partial sequence for an operation that did not commit.
 
 ### Rate Limiting
 - Built-in rate limiting for API endpoints
@@ -170,154 +250,4 @@ npm run start
 - `http_requests_total` - Total HTTP requests by method, route, status
 - `http_rate_limited_requests_total` - Rate-limited requests by method, route, group
 - `http_active_connections` - Current active connections
-- `ingestion_lag_seconds` - Lag between current ledger and last ingested ledger
-- `webhook_retry_total` - Webhook retry attempts by event type, status
-- `webhook_delivery_duration_seconds` - Webhook delivery latency by event type, status
-- `external_call_duration_seconds` - External API call latency by service, operation
-- `error_total` - Error count by service, error type
-
-### Logging
-- Structured logging with Winston
-- Correlation IDs for request tracing
-- Different log levels for development and production
-- All logs include: `request_id`, `user_id`, `route`, `method`, `duration`, `status`
-
-## Runbook
-
-### Observability
-
-#### Checking Request Traces
-1. Extract `correlationId` from request headers (`x-correlation-id`)
-2. Search logs for the correlation ID to trace full request lifecycle
-3. Check `logs/combined.log` for structured JSON logs
-4. Check `logs/error.log` for error-specific logs
-
-#### Monitoring Ingestion Lag
-1. Query `ingestion_lag_seconds` metric for contract ID
-2. Alert if lag exceeds 60 seconds (indicates stalled ingestion)
-3. Check ingestion service logs for stream errors
-4. Verify Horizon API connectivity
-
-#### Debugging Webhook Failures
-1. Check `webhook_retry_total` metric for retry counts
-2. Query `webhook_delivery_duration_seconds` for latency patterns
-3. Review notification logs in database for specific webhook URLs
-4. Use `GET /webhooks/delivery-logs` endpoint for detailed logs
-5. Trigger manual redelivery via `POST /webhooks/redeliver`
-
-#### Identifying Slow External Dependencies
-1. Query `external_call_duration_seconds` by service label
-2. High latency on `horizon` operations indicates network issues
-3. High latency on `webhook` operations indicates endpoint issues
-4. Check `error_total` metric for error types by service
-
-### Reconciliation
-
-#### Manual Reconciliation Trigger
-```bash
-# Trigger reconciliation run
-curl -X POST http://localhost:4000/reconciliation/trigger
-
-# Check reconciliation status
-curl http://localhost:4000/reconciliation/status
-```
-
-#### Interpreting Reconciliation Reports
-- `processed` - Total records checked
-- `updated` - Records updated to match on-chain state
-- `noOp` - Records already consistent with on-chain state
-- `skipped` - Records skipped due to Horizon unavailability
-- `irreconcilable` - Records requiring manual review
-
-#### Handling Irreconcilable Records
-1. Check logs for `IRRECONCILABLE` error messages
-2. Verify on-chain state using Stellar expert or Horizon directly
-3. For escrows: Check if account exists, balance, and expiry
-4. For payments: Verify transaction hash on-chain
-5. Manual database update may be required after verification
-
-#### Backfill Operations
-```bash
-# Trigger backfill for specific ledger range
-curl -X POST http://localhost:4000/reconciliation/backfill \
-  -H "Content-Type: application/json" \
-  -d '{"startLedger": 1000, "endLedger": 2000}'
-
-# Monitor backfill progress
-curl http://localhost:4000/reconciliation/backfill/status
-```
-
-### Common Issues
-
-#### Ingestion Stream Stalled
-- Symptom: `ingestion_lag_seconds` increasing continuously
-- Resolution: Check Horizon API status, restart ingestion service
-- Prevention: Monitor lag metric, set up alerts at 60s threshold
-
-#### High Webhook Failure Rate
-- Symptom: `webhook_retry_total` increasing, `error_total{service="webhook"}` high
-- Resolution: Check webhook URL accessibility, verify secret configuration
-- Prevention: Monitor webhook delivery logs, test endpoints before registration
-
-#### Reconciliation Discrepancies
-- Symptom: High `irreconcilable` count in reconciliation report
-- Resolution: Manual review of flagged records, verify on-chain state
-- Prevention: Regular reconciliation runs, monitor Horizon API health
-
-#### Horizon API Latency
-- Symptom: High `external_call_duration_seconds{service="horizon"}`
-- Resolution: Check Horizon status, consider failover to backup instance
-- Prevention: Implement failover logic, monitor Horizon response times
-
-## Security
-
-### Features
-- Helmet for security headers
-- CORS configuration
-- Input validation and sanitization
-- Environment variable validation
-
-### Best Practices
-- Principle of least privilege
-- Secure secret management
-- Regular dependency updates
-
-## Development
-
-### Getting Started
-```bash
-# Install dependencies
-npm install
-
-# Minimal local env required for boot
-export NETWORK=testnet
-export SUPABASE_URL=http://127.0.0.1:54321
-export SUPABASE_ANON_KEY=your_supabase_anon_key
-
-# Run development server
-npm run start:dev
-
-# Run linting
-npm run lint
-
-# Run type checking
-npm run type-check
-```
-
-### Code Style
-- ESLint configuration for consistent code style
-- Prettier for code formatting
-- TypeScript for type safety
-
-## Contributing
-
-### Guidelines
-- Follow existing code patterns and conventions
-- Write comprehensive tests for new features
-- Update documentation for API changes
-- Ensure all tests pass before submitting PRs
-
-### Git Workflow
-- Feature branches for new development
-- Pull requests for code review
-- Semantic versioning for releases
+- `ingestion_lag_seconds` - L

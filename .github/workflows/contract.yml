@@ -63,6 +63,11 @@ jobs:
         env:
           QUICKEX_BENCH_ARTIFACT_DIR: target/quickex-budget-report
 
+      - name: Enforce contract budget regression for worst-case inputs
+        run: cargo test -p quickex bench_worst_case_budget -- --nocapture
+        env:
+          QUICKEX_BENCH_ARTIFACT_DIR: target/quickex-budget-report
+
       - name: Upload contract budget report
         if: always()
         uses: actions/upload-artifact@v4

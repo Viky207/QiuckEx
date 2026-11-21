@@ -265,3 +265,6 @@ Built with ❤️ by Pulsefy. Powered by Stellar. 🚀
 
 <!-- handsoff-issue-462 -->
 - #462: [Docs] Update CAPABILITY-MAP.md to reflect current feature flag states
+
+<!-- handsoff-issue-628 -->
+- #628: Add explicit tests for contract storage key versioning

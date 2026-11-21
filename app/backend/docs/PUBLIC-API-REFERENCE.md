@@ -158,3 +158,42 @@ def quickex_hook():
     # handle event...
     return "ok", 200
 ```
+
+---
+
+## Escrow state invariants
+
+Escrow operations are atomic: a failed invocation must leave all invariant-relevant state unchanged. This applies to both authorization failures (e.g. caller is not the escrow owner or signer) and downstream transfer failures (e.g. the token transfer reverts or the destination rejects the payment).
+
+When an invocation fails, the following are guaranteed to be unchanged from their pre-call values:
+
+- The escrow record (status, amounts, parties, and timestamps).
+- The associated storage entries and their versioned keys.
+- Account balances for both the source and destination parties.
+
+Clients should treat any non-`2xx` response as a no-op and may safely retry idempotent operations. Failed invocations do not emit `payment.completed` webhooks.
+
+---
+
+## Escrow event ordering
+
+Some escrow operations perform multiple state updates in a single invocation (for example, releasing funds and marking the escrow as settled). Indexers may rely on the order of emitted events to reconstruct the lifecycle, so the following guarantees apply.
+
+### Guarantees
+
+- **Committed state only.** Events are emitted only after the corresponding state change has been committed. An event never describes state that was rolled back.
+- **Stable ordering.** When a single invocation emits multiple events, they are emitted in a fixed, documented order (see below). The order does not depend on map iteration, storage layout, or caller input.
+- **No partial sequences on failure.** If an invocation fails at any point — authorization, validation, or a downstream transfer — no lifecycle events are emitted for that invocation. Indexers will never observe a prefix of a multi-event sequence without its completion.
+
+### Multi-event operations
+
+For operations that emit more than one event, the emission order is:
+
+1. `escrow.updated` — reflects the escrow record transition (e.g. `funded` → `released`).
+2. `payment.completed` — reflects the settled transfer, including the final `amount`, `asset`, `from`, `to`, and `transaction_hash`.
+
+Each event in the sequence carries the same `escrow_id` and `transaction_hash`, so consumers can correlate them. Payload fields are consistent across the sequence: the `amount` and `asset` reported in `payment.completed` match the values recorded in the `escrow.updated` event for the same invocation.
+
+### Failure behavior
+
+If the invocation fails, neither `escrow.updated` nor `payment.completed` is emitted. Consumers should not infer a lifecycle transition from the absence of events; instead, treat the failed response as a no-op (see [Escrow state invariants](#escrow-state-invariants)).
