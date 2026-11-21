@@ -16,9 +16,14 @@ set -euo pipefail
 #     --wasm target/wasm32v1-none/release/quickex.wasm \
 #     [--rpc-url https://soroban-testnet.stellar.org] \
 #     [--passphrase "Test SDF Network ; September 2015"] \
-#     [--out-dir docs/deployment-artifacts]
+#     [--out-dir docs/deployment-artifacts] \
+#     [--require-attestation]
 #
 # Mainnet additionally requires --mainnet-gate, --testnet-manifest, and --audit-report.
+#
+# --require-attestation verifies the WASM artifact's build provenance with
+# `gh attestation verify` before any promotion step. It is mandatory for
+# mainnet deployments and optional (but recommended) for testnet.
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 NETWORK=""
@@ -34,6 +39,10 @@ AUDIT_REPORT="${AUDIT_REPORT:-}"
 STELLAR_BIN="${STELLAR_BIN:-stellar}"
 SKIP_BUILD="${SKIP_BUILD:-0}"
 DRY_RUN="${DRY_RUN:-0}"
+REQUIRE_ATTESTATION="${REQUIRE_ATTESTATION:-0}"
+ATTESTATION_REPO="${ATTESTATION_REPO:-}"
+ATTESTATION_SIGNER_WORKFLOW="${ATTESTATION_SIGNER_WORKFLOW:-}"
+GH_BIN="${GH_BIN:-gh}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -49,6 +58,9 @@ while [[ $# -gt 0 ]]; do
     --audit-report) AUDIT_REPORT="$2"; shift 2 ;;
     --skip-build) SKIP_BUILD=1;   shift ;;
     --dry-run)    DRY_RUN=1;      shift ;;
+    --require-attestation) REQUIRE_ATTESTATION=1; shift ;;
+    --attestation-repo) ATTESTATION_REPO="$2"; shift 2 ;;
+    --attestation-signer-workflow) ATTESTATION_SIGNER_WORKFLOW="$2"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 1 ;;
   esac
 done
@@ -92,6 +104,33 @@ fi
 
 WASM_SHA="$(sha256sum "$WASM_PATH" | awk '{print $1}')"
 echo "WASM SHA-256: 0x${WASM_SHA}"
+
+# ── Provenance attestation verification ─────────────────────────────────────
+# Verifies that the WASM artifact was produced by a trusted GitHub Actions
+# workflow. Runs before the mainnet gate so unverified artifacts never reach
+# promotion. Mainnet deployments always require a verified attestation.
+
+if [[ "$NETWORK" == "mainnet" ]]; then
+  REQUIRE_ATTESTATION=1
+fi
+
+if [[ "$REQUIRE_ATTESTATION" == "1" ]]; then
+  need "$GH_BIN"
+  ATTESTATION_ARGS=(attestation verify "$WASM_PATH")
+  if [[ -n "$ATTESTATION_REPO" ]]; then
+    ATTESTATION_ARGS+=(--repo "$ATTESTATION_REPO")
+  fi
+  if [[ -n "$ATTESTATION_SIGNER_WORKFLOW" ]]; then
+    ATTESTATION_ARGS+=(--signer-workflow "$ATTESTATION_SIGNER_WORKFLOW")
+  fi
+  echo "==> Verifying build provenance attestation for $WASM_PATH"
+  if ! "$GH_BIN" "${ATTESTATION_ARGS[@]}" 2>&1; then
+    echo "error: no verified provenance attestation found for $WASM_PATH" >&2
+    echo "       refusing to promote an artifact with unverified provenance" >&2
+    exit 1
+  fi
+  echo "Provenance attestation verified"
+fi
 
 if [[ "$NETWORK" == "mainnet" && "$DRY_RUN" != "1" ]]; then
   need node

@@ -1,12 +1,19 @@
 name: Run Supabase Migrations
-description: Applies pending Supabase migrations exactly once and logs the result.
+description: >-
+  Applies pending Supabase migrations exactly once and logs the result.
+  Production invocations must pass the environment-scoped Supabase service key
+  from the protected `production` environment (required reviewers gate the
+  secret); staging and preview invocations use their own scope and secrets.
 
 inputs:
   supabase_url:
     description: Supabase project URL
     required: true
   supabase_service_key:
-    description: Supabase service-role key
+    description: >-
+      Supabase service-role key. For environment=production this must be the
+      environment-scoped secret from the protected `production` environment
+      (only available after approval); staging/preview use their own scope.
     required: true
   environment:
     description: Target environment (staging | production)
@@ -22,6 +29,17 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Guard production environment secret
+      shell: bash
+      env:
+        TARGET_ENV: ${{ inputs.environment }}
+        SUPABASE_SERVICE_KEY: ${{ inputs.supabase_service_key }}
+      run: |
+        if [ "$TARGET_ENV" = "production" ] && [ -z "$SUPABASE_SERVICE_KEY" ]; then
+          echo "::error title=Missing production secret::environment=production requires the environment-scoped Supabase service key from the protected 'production' environment (approval gate). Refusing to run migrations."
+          exit 1
+        fi
+
     - name: Install Supabase CLI
       shell: bash
       run: |
