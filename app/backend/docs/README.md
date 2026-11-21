@@ -123,6 +123,33 @@ npm run test:e2e
 4. NotificationService listens for relevant events
 5. Notifications are dispatched based on user preferences
 
+## Escrow Semantics
+
+### Self-Directed Escrows (Creator == Recipient)
+
+Same-account escrows, where the escrow creator and the recipient are the same
+account, are **allowed**. This is an explicit, supported configuration rather
+than an error case. The following invariants hold:
+
+- **Create**: A creator may open an escrow where `creator == recipient`. The
+  deposited amount is debited from the account and held by the escrow contract
+  exactly as in the two-party case.
+- **Release**: Releasing a self-directed escrow credits the held amount back to
+  the same account. The net balance change across create + release is zero, so
+  balances conserve.
+- **Refund**: Refunding a self-directed escrow returns the held amount to the
+  creator (who is also the recipient). The net balance change across create +
+  refund is zero, so balances conserve.
+- **Authorization**: Role checks are still enforced. Only the designated
+  recipient may release and only the creator may refund; the fact that both
+  roles resolve to the same account does not bypass either check. A caller that
+  is neither the creator nor the recipient is rejected on both paths.
+
+These behaviors are covered by focused automated tests that exercise create,
+release, and refund for the same-account case, assert balance conservation, and
+include the failure case where an unrelated account attempts to release or
+refund.
+
 ## Database Schema
 
 ### Key Tables
@@ -242,82 +269,4 @@ curl http://localhost:4000/reconciliation/status
 curl -X POST http://localhost:4000/reconciliation/backfill \
   -H "Content-Type: application/json" \
   -d '{"startLedger": 1000, "endLedger": 2000}'
-
-# Monitor backfill progress
-curl http://localhost:4000/reconciliation/backfill/status
 ```
-
-### Common Issues
-
-#### Ingestion Stream Stalled
-- Symptom: `ingestion_lag_seconds` increasing continuously
-- Resolution: Check Horizon API status, restart ingestion service
-- Prevention: Monitor lag metric, set up alerts at 60s threshold
-
-#### High Webhook Failure Rate
-- Symptom: `webhook_retry_total` increasing, `error_total{service="webhook"}` high
-- Resolution: Check webhook URL accessibility, verify secret configuration
-- Prevention: Monitor webhook delivery logs, test endpoints before registration
-
-#### Reconciliation Discrepancies
-- Symptom: High `irreconcilable` count in reconciliation report
-- Resolution: Manual review of flagged records, verify on-chain state
-- Prevention: Regular reconciliation runs, monitor Horizon API health
-
-#### Horizon API Latency
-- Symptom: High `external_call_duration_seconds{service="horizon"}`
-- Resolution: Check Horizon status, consider failover to backup instance
-- Prevention: Implement failover logic, monitor Horizon response times
-
-## Security
-
-### Features
-- Helmet for security headers
-- CORS configuration
-- Input validation and sanitization
-- Environment variable validation
-
-### Best Practices
-- Principle of least privilege
-- Secure secret management
-- Regular dependency updates
-
-## Development
-
-### Getting Started
-```bash
-# Install dependencies
-npm install
-
-# Minimal local env required for boot
-export NETWORK=testnet
-export SUPABASE_URL=http://127.0.0.1:54321
-export SUPABASE_ANON_KEY=your_supabase_anon_key
-
-# Run development server
-npm run start:dev
-
-# Run linting
-npm run lint
-
-# Run type checking
-npm run type-check
-```
-
-### Code Style
-- ESLint configuration for consistent code style
-- Prettier for code formatting
-- TypeScript for type safety
-
-## Contributing
-
-### Guidelines
-- Follow existing code patterns and conventions
-- Write comprehensive tests for new features
-- Update documentation for API changes
-- Ensure all tests pass before submitting PRs
-
-### Git Workflow
-- Feature branches for new development
-- Pull requests for code review
-- Semantic versioning for releases

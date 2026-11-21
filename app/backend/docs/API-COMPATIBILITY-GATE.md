@@ -14,6 +14,8 @@ The gate is intended to catch:
 - Changes to field types or required/optional status.
 - Changes to enum values that are part of the public contract.
 - Changes to authentication or authorization requirements on an endpoint.
+- Changes to contract event topics (event names) or payload shape for public
+  state-transition events consumed by indexers.
 
 Additive, backwards-compatible changes (new endpoints, new optional fields) are
 allowed and do not fail the gate.
@@ -37,6 +39,25 @@ against the baseline. The diff is classified as:
 - **Compatible** — additive changes only; the gate passes.
 - **Breaking** — any incompatible change; the gate fails unless an explicit
   override is present.
+
+## Contract Event Compatibility
+
+Indexer consumers depend on stable event topics (event names) and payload shape
+across contract changes. The gate therefore also pins the public
+state-transition events in a dedicated compatibility test. For each public
+event the test asserts:
+
+- The event topic/name is unchanged.
+- The event schema version is unchanged (or bumped deliberately).
+- The set of indexed identifiers is unchanged.
+- The payload field names, types, and required/optional status are unchanged.
+
+A breaking payload change (removed/renamed field, changed type, changed indexed
+identifiers, or a topic rename) fails the compatibility test. To ship such a
+change you must make an explicit versioning decision: bump the event schema
+version, update the pinned expectations in the test, and document the change in
+the changelog and API versioning notes. Additive changes (new optional payload
+fields) are allowed and do not fail the test.
 
 ## Configuration
 
@@ -88,6 +109,10 @@ part of the same change:
 5. Commit the updated baseline together with the code change.
 6. Document the breaking change in the changelog and, if applicable, the API
    versioning notes.
+
+For contract events, the equivalent migration is bumping the event schema
+version and updating the pinned expectations in the event compatibility test in
+the same change.
 
 The baseline update is the record that the breaking change was reviewed and
 approved. Do not update the baseline without a corresponding code change.

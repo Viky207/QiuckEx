@@ -31,6 +31,36 @@ Decoupled event handling using `@nestjs/event-emitter`.
 | :--- | :--- | :--- |
 | `receipt_status_conflict` | Fired when an observation would regress a receipt's canonical status | `{ receiptId: string, txHash: string, currentStatus: string, observedStatus: string, source: string, observedAt: string }` |
 
+## Event Compatibility Contract
+
+Indexer consumers depend on stable event names (topics) and payload shapes across contract changes. The compatibility test suite pins each public state-transition event so that any breaking change fails CI and requires an explicit versioning decision.
+
+### Pinned events
+
+Each public state-transition event is asserted for its topic name, schema version, indexed identifiers, and payload shape:
+
+| Event Name (topic) | Version | Indexed Identifiers | Payload Fields |
+| :--- | :--- | :--- | :--- |
+| `username_claimed` | `1` | `username` | `username`, `publicKey`, `timestamp` |
+| `payment_received` | `1` | `txHash` | `txHash`, `amount`, `sender` |
+| `recurring.link.created` | `1` | `linkId` | `linkId`, `username?`, `destination?` |
+| `recurring.link.updated` | `1` | `linkId` | `linkId`, `changes` |
+| `recurring.link.cancelled` | `1` | `linkId` | `linkId`, `username?`, `destination?` |
+| `recurring.link.paused` | `1` | `linkId` | `linkId`, `username?`, `destination?` |
+| `recurring.link.resumed` | `1` | `linkId` | `linkId`, `username?`, `destination?` |
+| `recurring.link.completed` | `1` | `linkId` | `linkId`, `totalExecuted` |
+| `recurring.payment.due` | `1` | `linkId`, `executionId` | `linkId`, `executionId`, `amount`, `asset`, `periodNumber` |
+| `recurring.payment.executed` | `1` | `linkId`, `executionId` | `linkId`, `executionId`, `transactionHash`, `periodNumber` |
+| `recurring.payment.failed` | `1` | `linkId`, `executionId` | `linkId`, `executionId`, `failureReason`, `retryCount`, `permanent` |
+| `receipt_status_conflict` | `1` | `receiptId`, `txHash` | `receiptId`, `txHash`, `currentStatus`, `observedStatus`, `source`, `observedAt` |
+
+### Compatibility rules
+
+- **Topic stability:** Renaming an event topic is a breaking change. The compatibility test asserts the exact topic string for every pinned event.
+- **Payload stability:** Adding, removing, renaming, or retyping a payload field is a breaking change. The compatibility test asserts the exact field set and types for every pinned event.
+- **Indexed identifiers:** The set of indexed identifiers is part of the public contract; changing it is a breaking change.
+- **Versioning decision:** Any breaking change must bump the event's `version` and be accompanied by an explicit migration note. Until then, the compatibility test fails and blocks the change.
+
 ## Receipt Status Transitions
 
 Receipt reconciliation enforces monotonic status transitions at the persistence boundary. A late or duplicated chain event must never overwrite a newer receipt state with an earlier status.
