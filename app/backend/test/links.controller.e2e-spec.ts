@@ -149,5 +149,45 @@ describe("LinksController (e2e)", () => {
         })
         .expect(400);
     });
+
+    it("should replay the original response for a retry with the same key and payload", async () => {
+      const payload = { amount: 25, asset: "XLM" };
+      const key = "link_metadata_e2e_replay_001";
+
+      const first = await request(app.getHttpServer())
+        .post("/links/metadata")
+        .set("Idempotency-Key", key)
+        .send(payload)
+        .expect(200);
+      const retry = await request(app.getHttpServer())
+        .post("/links/metadata")
+        .set("Idempotency-Key", key)
+        .send(payload)
+        .expect(200);
+
+      expect(retry.body).toEqual(first.body);
+      expect(retry.body.data.expiresAt).toBe(first.body.data.expiresAt);
+    });
+
+    it("should reject an idempotency key reused with a different payload", async () => {
+      const key = "link_metadata_e2e_conflict_01";
+
+      await request(app.getHttpServer())
+        .post("/links/metadata")
+        .set("Idempotency-Key", key)
+        .send({ amount: 25, asset: "XLM" })
+        .expect(200);
+
+      await request(app.getHttpServer())
+        .post("/links/metadata")
+        .set("Idempotency-Key", key)
+        .send({ amount: 50, asset: "XLM" })
+        .expect(409)
+        .expect((res) => {
+          expect(res.body.code ?? res.body.error?.code).toBe(
+            "IDEMPOTENCY_CONFLICT",
+          );
+        });
+    });
   });
 });

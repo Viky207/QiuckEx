@@ -552,7 +552,19 @@
         ],
         "operationId": "generateLinkMetadata",
         "summary": "Generate canonical link metadata",
-        "description": "Validates payment link parameters and generates canonical metadata.",
+        "description": "Validates payment link parameters and generates canonical metadata. Concurrent or repeated requests with the same optional Idempotency-Key and payload share one generation and replay the original response for five minutes.",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "16-128 url-safe characters. Concurrent or repeated requests with the same key and payload share one generation and replay the original response for five minutes.",
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{16,128}$"
+            }
+          }
+        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -584,6 +596,32 @@
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
+          },
+          "409": {
+            "description": "IDEMPOTENCY_CONFLICT or INVALID_IDEMPOTENCY_KEY",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string",
+                      "enum": [
+                        "IDEMPOTENCY_CONFLICT",
+                        "INVALID_IDEMPOTENCY_KEY"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message"
+                  ]
+                }
+              }
+            }
           },
           "429": {
             "$ref": "#/components/responses/RateLimit"

@@ -119,6 +119,69 @@ function validateGate(gate, options) {
   }
 }
 
+function readImageSigningKeys() {
+  const raw = process.env.QUICKEX_IMAGE_SIGNING_PUBLIC_KEYS ?? process.env.QUICKEX_MAINNET_REVIEWER_PUBLIC_KEYS ?? '{}';
+  let keys;
+  try {
+    keys = JSON.parse(raw);
+  } catch {
+    throw new Error('QUICKEX_IMAGE_SIGNING_PUBLIC_KEYS must be valid JSON');
+  }
+  if (!keys || typeof keys !== 'object' || Array.isArray(keys)) {
+    throw new Error('QUICKEX_IMAGE_SIGNING_PUBLIC_KEYS must map key IDs to public keys');
+  }
+  return keys;
+}
+
+function normalizeDigest(value) {
+  return String(value ?? '').trim().toLowerCase().replace(/^sha256:/, '');
+}
+
+function validateImageSignature(signature, options) {
+  const { imageDigest, commit, signingKeys } = options;
+  const digest = normalizeDigest(imageDigest);
+  if (!/^[a-f0-9]{64}$/.test(digest)) throw new Error('Image digest must be a sha256 digest');
+  if (!signature || typeof signature !== 'object') throw new Error('Image signature is required; refusing to deploy an unsigned image');
+  if (normalizeDigest(signature.digest) !== digest) {
+    throw new Error('Image signature digest does not match the image to deploy');
+  }
+  if (signature.commit !== commit) {
+    throw new Error('Image signature commit does not match the checked-out commit');
+  }
+  const trustedKey = signingKeys?.[signature.key_id];
+  if (!trustedKey) throw new Error(`Untrusted image signing key: ${signature.key_id}`);
+  const publicKey = typeof trustedKey === 'string' ? trustedKey : trustedKey.public_key;
+  const message = Buffer.from(`${digest}\n${commit}`);
+  let sig;
+  try {
+    sig = Buffer.from(signature.signature, 'base64');
+  } catch {
+    throw new Error(`Invalid image signature for ${signature.key_id}`);
+  }
+  if (sig.length !== 64 || !verify(null, message, publicKey, sig)) {
+    throw new Error(`Invalid image signature for ${signature.key_id}`);
+  }
+  return { digest, signer: signature.key_id };
+}
+
+function validateImageProvenance(provenance, options) {
+  const { imageDigest, commit, expectedSourceRepo } = options;
+  const digest = normalizeDigest(imageDigest);
+  if (!provenance || typeof provenance !== 'object') {
+    throw new Error('Image provenance attestation is required');
+  }
+  if (normalizeDigest(provenance.digest) !== digest) {
+    throw new Error('Image provenance digest does not match the image to deploy');
+  }
+  if (provenance.source_repo !== expectedSourceRepo) {
+    throw new Error(`Image provenance source repo ${provenance.source_repo} does not match expected ${expectedSourceRepo}`);
+  }
+  if (provenance.commit !== commit) {
+    throw new Error('Image provenance commit does not match the checked-out commit');
+  }
+  return { digest, sourceRepo: provenance.source_repo };
+}
+
 function readReviewerKeys() {
   let keys;
   try {
@@ -150,7 +213,7 @@ function sha256(filePath) {
 
 function main() {
   const args = parseArgs(process.argv.slice(2));
-  for (const required of ['gate', 'testnet-manifest', 'audit-report', 'wasm']) {
+  for (const required of ['gate', 'testnet-manifest', 'audit-report', 'wasm', 'image-digest', 'image-signature', 'image-provenance', 'expected-source-repo']) {
     if (!args[required]) throw new Error(`--${required} is required`);
   }
   const gate = JSON.parse(fs.readFileSync(args.gate, 'utf8'));
@@ -165,6 +228,20 @@ function main() {
     auditReportSha256: sha256(args['audit-report']),
     reviewerKeys: readReviewerKeys(),
   });
+  const imageSignature = JSON.parse(fs.readFileSync(args['image-signature'], 'utf8'));
+  const imageProvenance = JSON.parse(fs.readFileSync(args['image-provenance'], 'utf8'));
+  const signingKeys = readImageSigningKeys();
+  const signatureResult = validateImageSignature(imageSignature, {
+    imageDigest: args['image-digest'],
+    commit,
+    signingKeys,
+  });
+  const provenanceResult = validateImageProvenance(imageProvenance, {
+    imageDigest: args['image-digest'],
+    commit,
+    expectedSourceRepo: args['expected-source-repo'],
+  });
+  console.log(`Image verification: digest=sha256:${signatureResult.digest} signer=${signatureResult.signer} source=${provenanceResult.sourceRepo} result=verified`);
   console.log(`Mainnet deployment gate approved for ${commit} (WASM SHA-256 ${wasmHash}).`);
 }
 
@@ -177,4 +254,10 @@ if (require.main === module) {
   }
 }
 
-module.exports = { canonicalJson, validateGate };
+module.exports = {
+  canonicalJson,
+  validateGate,
+  validateImageSignature,
+  validateImageProvenance,
+  normalizeDigest,
+};

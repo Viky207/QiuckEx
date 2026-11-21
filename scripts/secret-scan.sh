@@ -16,7 +16,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BASELINE="$REPO_ROOT/.secrets.baseline"
 
-EXCLUDE_FILES='(pnpm-lock\.yaml|package-lock\.json|.*\.lock|node_modules/.*|dist/.*|coverage/.*|.turbo/.*)'
+EXCLUDE_FILES='(pnpm-lock\.yaml|package-lock\.json|.*\.lock|node_modules/.*|dist/.*|coverage/.*|.turbo/.*|.*rotation.*\.log|.*credential.*\.env|.*\.rotation-artifacts/.*)'
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -30,6 +30,7 @@ usage() {
   echo "  --verify   Check for new secrets against existing baseline"
   echo "  --audit    Interactively audit baseline entries"
   echo "  --full     Run both detect-secrets AND gitleaks"
+  echo "  --rotation Check for leaked credential-rotation artifacts"
   exit 0
 }
 
@@ -99,6 +100,37 @@ scan_gitleaks() {
   gitleaks detect --source . --config gitleaks.toml --verbose --no-git || true
 }
 
+# Scan credential-rotation artifacts (rehearsal output, rotation logs, staged
+# env files). Values must never be written to disk, but we scan defensively so
+# an accidental leak fails closed. Only file paths are reported, never values.
+scan_rotation_artifacts() {
+  echo -e "${YELLOW}Scanning credential-rotation artifacts...${NC}"
+
+  local patterns=(
+    "*.rotation.log"
+    "*.rotation-artifacts/*"
+    "*.credential.env"
+  )
+
+  local found=0
+  local file
+  for pattern in "${patterns[@]}"; do
+    while IFS= read -r -d '' file; do
+      found=1
+      # Report path only – never echo file contents.
+      echo -e "${RED}Rotation artifact present: ${file#"$REPO_ROOT"/}${NC}"
+    done < <(find "$REPO_ROOT" -type f -name "$pattern" -not -path "*/node_modules/*" -print0 2>/dev/null)
+  done
+
+  if [ "$found" -eq 0 ]; then
+    echo -e "${GREEN}No rotation artifacts found.${NC}"
+    return 0
+  fi
+
+  echo -e "${RED}Rotation artifacts must not be committed. Remove them before merging.${NC}"
+  return 1
+}
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 check_deps
 
@@ -112,6 +144,10 @@ case "${1:-}" in
   --full)
     scan_generate_baseline
     scan_gitleaks
+    scan_rotation_artifacts
+    ;;
+  --rotation)
+    scan_rotation_artifacts
     ;;
   --help|-h)
     usage

@@ -253,6 +253,75 @@ export class BranchPreviewRepository {
   }
 
   /**
+   * Find expired previews together with their ownership metadata for the
+   * scheduled stale-preview cleanup. Only active, non-exempt, non-shared
+   * previews whose TTL has elapsed are returned.
+   */
+  async findExpiredForCleanup(now: Date = new Date()): Promise<BranchPreviewEnvironment[]> {
+    const client = this.supabaseService.getClient();
+
+    const { data, error } = await client
+      .from(this.TABLE_NAME)
+      .select(
+        'id, branch_name, api_url, frontend_url, network, contract_registry_version, ' +
+          'is_active, is_shared, expiry_exempt, last_activity_at, expires_at, ' +
+          'created_at, updated_at, auto_expired_at, auto_expiry_reason',
+      )
+      .not('expires_at', 'is', null)
+      .lt('expires_at', now.toISOString())
+      .eq('is_active', true)
+      .eq('expiry_exempt', false)
+      .eq('is_shared', false);
+
+    if (error) {
+      this.logger.error(`Error finding expired previews for cleanup: ${error.message}`, error);
+      return [];
+    }
+
+    return (data ?? []).map(this.mapDbToModel);
+  }
+
+  /**
+   * Delete a preview only when its id and ownership metadata match. Returns
+   * true when a row was deleted, false when nothing matched (already cleaned
+   * up or ownership mismatch), keeping the operation idempotent.
+   */
+  async deleteIfOwnedByPreview(
+    id: string,
+    ownership: { branchName: string; expiresAt?: Date },
+  ): Promise<boolean> {
+    const client = this.supabaseService.getClient();
+
+    let query = client
+      .from(this.TABLE_NAME)
+      .delete()
+      .eq('id', id)
+      .eq('branch_name', ownership.branchName.toLowerCase().trim())
+      .eq('is_active', true)
+      .eq('expiry_exempt', false)
+      .eq('is_shared', false);
+
+    if (ownership.expiresAt) {
+      query = query.eq('expires_at', ownership.expiresAt.toISOString());
+    }
+
+    const { data, error } = await query.select('id');
+
+    if (error) {
+      this.logger.error(`Failed to delete expired preview ${id}: ${error.message}`, error);
+      return false;
+    }
+
+    const deleted = Array.isArray(data) && data.length > 0;
+    if (deleted) {
+      this.logger.log(`Deleted expired preview ${id}`);
+    } else {
+      this.logger.debug(`Expired preview ${id} not deleted (no ownership match)`);
+    }
+    return deleted;
+  }
+
+  /**
    * Map database record to internal model
    */
   private mapDbToModel(dbRecord: Record<string, unknown>): BranchPreviewEnvironment {

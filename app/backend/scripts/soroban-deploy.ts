@@ -15,6 +15,9 @@ interface Args {
   mainnetGate?: string;
   testnetManifest?: string;
   auditReport?: string;
+  healthCheckCommand?: string;
+  rollbackCommand?: string;
+  rollbackVerifyCommand?: string;
 }
 
 function parseArgs(argv: string[]): Args {
@@ -52,12 +55,48 @@ function parseArgs(argv: string[]): Args {
     mainnetGate: map.get('mainnet-gate'),
     testnetManifest: map.get('testnet-manifest'),
     auditReport: map.get('audit-report'),
+    healthCheckCommand: map.get('health-check-command'),
+    rollbackCommand: map.get('rollback-command'),
+    rollbackVerifyCommand: map.get('rollback-verify-command'),
   };
 }
 
 function run(command: string, args: string[], dryRun: boolean): string {
   if (dryRun) return [command, ...args].join(' ');
   return execFileSync(command, args, { encoding: 'utf8' }).trim();
+}
+
+interface DeploymentSlot {
+  contractId: string;
+  wasmHash: string;
+}
+
+interface RollbackRecord {
+  attempted: boolean;
+  succeeded: boolean;
+  verified: boolean;
+  reason?: string;
+  previous?: DeploymentSlot;
+  failed?: DeploymentSlot;
+  restored?: DeploymentSlot;
+}
+
+function readPriorSlot(artifactPath: string): DeploymentSlot | undefined {
+  if (!existsSync(artifactPath)) return undefined;
+  try {
+    const prior = JSON.parse(readFileSync(artifactPath, 'utf8')) as Partial<DeploymentSlot>;
+    if (typeof prior.contractId === 'string' && typeof prior.wasmHash === 'string') {
+      return { contractId: prior.contractId, wasmHash: prior.wasmHash };
+    }
+  } catch {
+    // A corrupt prior artifact must not silently be treated as a healthy revision.
+  }
+  return undefined;
+}
+
+function runShell(command: string, dryRun: boolean): string {
+  if (dryRun) return command;
+  return execFileSync('sh', ['-c', command], { encoding: 'utf8' }).trim();
 }
 
 function canonicalJson(value: unknown): string {
@@ -116,6 +155,10 @@ async function main() {
   const installCommand = ['contract', 'install', '--network', args.network, '--source', args.source, '--wasm', wasmPath];
   const deployCommand = ['contract', 'deploy', '--network', args.network, '--source', args.source, '--wasm-hash', wasmHash];
 
+  const outputDir = path.resolve('app/backend/deployments');
+  const artifactPath = path.join(outputDir, `${args.network}-${args.contractName}.json`);
+  const priorSlot = readPriorSlot(artifactPath);
+
   const installResult = run('soroban', installCommand, args.dryRun);
   const contractId = run('soroban', deployCommand, args.dryRun) || '<contract-id>';
 
@@ -128,7 +171,7 @@ async function main() {
     );
   }
 
-  const artifact = {
+  const artifact: Record<string, unknown> = {
     deployedAt: new Date().toISOString(),
     network: args.network,
     networkPassphrase,
@@ -139,9 +182,74 @@ async function main() {
     initResult,
   };
 
-  const outputDir = path.resolve('app/backend/deployments');
   mkdirSync(outputDir, { recursive: true });
-  const artifactPath = path.join(outputDir, `${args.network}-${args.contractName}.json`);
+
+  let rollback: RollbackRecord | undefined;
+  if (args.healthCheckCommand) {
+    let healthError: Error | undefined;
+    try {
+      runShell(args.healthCheckCommand, args.dryRun);
+    } catch (error) {
+      healthError = error instanceof Error ? error : new Error(String(error));
+    }
+
+    if (healthError) {
+      rollback = {
+        attempted: true,
+        succeeded: false,
+        verified: false,
+        reason: `post-deploy health check failed: ${healthError.message}`,
+        previous: priorSlot,
+        failed: { contractId, wasmHash },
+      };
+
+      if (!priorSlot) {
+        rollback.reason += '; no prior healthy revision recorded, cannot roll back';
+      } else if (!args.rollbackCommand) {
+        rollback.reason += '; --rollback-command is required to restore the prior revision';
+      } else {
+        try {
+          runShell(args.rollbackCommand, args.dryRun);
+          rollback.succeeded = true;
+          rollback.restored = priorSlot;
+        } catch (rollbackError) {
+          rollback.reason += `; rollback command failed: ${
+            rollbackError instanceof Error ? rollbackError.message : String(rollbackError)
+          }`;
+        }
+      }
+
+      if (rollback.succeeded) {
+        if (!args.rollbackVerifyCommand) {
+          rollback.reason += '; --rollback-verify-command is required to verify the rollback';
+        } else {
+          try {
+            runShell(args.rollbackVerifyCommand, args.dryRun);
+            rollback.verified = true;
+          } catch (verifyError) {
+            rollback.reason += `; rollback verification failed: ${
+              verifyError instanceof Error ? verifyError.message : String(verifyError)
+            }`;
+          }
+        }
+      }
+
+      artifact.rollback = rollback;
+      artifact.status = rollback.verified ? 'rolled-back' : 'rollback-failed';
+      writeFileSync(artifactPath, JSON.stringify(artifact, null, 2));
+
+      if (!rollback.verified) {
+        throw new Error(
+          `Deployment ${contractId} (${wasmHash}) failed health checks and rollback did not verify: ${rollback.reason}`,
+        );
+      }
+
+      process.stdout.write(`${JSON.stringify({ artifactPath, artifact }, null, 2)}\n`);
+      return;
+    }
+  }
+
+  artifact.status = 'healthy';
   writeFileSync(artifactPath, JSON.stringify(artifact, null, 2));
 
   if (args.registryUrl) {
@@ -188,4 +296,8 @@ async function main() {
   process.stdout.write(`${JSON.stringify({ artifactPath, artifact }, null, 2)}\n`);
 }
 
-void main();
+if (require.main === module) {
+  void main();
+}
+
+export { parseArgs, readPriorSlot, main };
