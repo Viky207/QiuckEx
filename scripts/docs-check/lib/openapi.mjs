@@ -8,6 +8,8 @@
  * Every rule here is internal to the document (it never needs the server to be
  * running), which is what lets the gate run on a fresh clone in CI.
  */
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { PATHS, readJson, unique } from "./shared.mjs";
 
 const HTTP_METHODS = ["get", "put", "post", "delete", "patch", "options", "head", "trace"];
@@ -46,6 +48,118 @@ export function collectRefs(node, found = new Set()) {
     }
   }
   return found;
+}
+
+/**
+ * Parse the deprecation migration guide (issue #580).
+ *
+ * The guide is a Markdown template maintainers fill in per release. We only
+ * understand the small, stable subset of its shape:
+ *
+ *   - a `Guide version: <x.y.z>` line, which must match `info.version`;
+ *   - a table whose header contains `Alias` and `Replacement` columns, where
+ *     each row names a deprecated alias and the endpoint that replaces it.
+ *
+ * Anything else is ignored, so prose can change freely without breaking the
+ * gate. Returns `{ version, rows }` where each row is `{ alias, replacement }`.
+ */
+export function parseMigrationGuide(text) {
+  const versionMatch = text.match(/^\s*Guide version:\s*`?([^`\s]+)`?\s*$/m);
+  const version = versionMatch ? versionMatch[1] : null;
+
+  const rows = [];
+  const lines = text.split(/\r?\n/);
+  let columns = null;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("|")) {
+      columns = null;
+      continue;
+    }
+    const cells = trimmed
+      .replace(/^\|/, "")
+      .replace(/\|$/, "")
+      .split("|")
+      .map((cell) => cell.trim());
+    if (cells.every((cell) => /^:?-{3,}:?$/.test(cell))) continue;
+    if (!columns) {
+      const aliasIndex = cells.findIndex((cell) => /^alias$/i.test(cell));
+      const replacementIndex = cells.findIndex((cell) => /^replacement$/i.test(cell));
+      if (aliasIndex !== -1 && replacementIndex !== -1) columns = { aliasIndex, replacementIndex };
+      continue;
+    }
+    const alias = cells[columns.aliasIndex] ?? "";
+    const replacement = cells[columns.replacementIndex] ?? "";
+    if (!alias || !replacement) continue;
+    rows.push({ alias, replacement });
+  }
+
+  return { version, rows };
+}
+
+/** Extract the path portion of an endpoint cell like `` `GET /v1/things` ``. */
+export function endpointPath(cell) {
+  const match = cell.match(/`?\b(?:GET|PUT|POST|DELETE|PATCH|OPTIONS|HEAD|TRACE)\s+(\/[^\s`]*)`?/i);
+  if (match) return match[1];
+  const bare = cell.match(/`?(\/[^\s`]*)`?/);
+  return bare ? bare[1] : null;
+}
+
+/**
+ * Validate the migration guide against the OpenAPI contract.
+ *
+ * Errors: a documented replacement endpoint that is not in the document.
+ * Warnings: a guide version that has drifted from `info.version`, or a guide
+ * that cannot be parsed at all (so a typo does not silently disable the gate).
+ */
+export function checkMigrationGuide(root) {
+  const errors = [];
+  const warnings = [];
+  const summary = { version: null, rows: 0, checked: 0 };
+
+  let text;
+  try {
+    text = readFileSync(join(root, PATHS.migrationGuide), "utf8");
+  } catch {
+    return { errors, warnings, summary };
+  }
+
+  let document;
+  try {
+    document = readJson(root, PATHS.openapi);
+  } catch {
+    // The structure check already reports an unreadable document.
+    return { errors, warnings, summary };
+  }
+
+  const { version, rows } = parseMigrationGuide(text);
+  summary.version = version;
+  summary.rows = rows.length;
+
+  if (!version) {
+    warnings.push(`${PATHS.migrationGuide}: no \`Guide version:\` line, so it cannot be checked against \`info.version\``);
+  } else if (document.info?.version && version !== document.info.version) {
+    warnings.push(
+      `${PATHS.migrationGuide}: guide version ${version} is stale; \`info.version\` is ${document.info.version}`,
+    );
+  }
+
+  const documentedPaths = new Set(Object.keys(document.paths ?? {}));
+  for (const { alias, replacement } of rows) {
+    const path = endpointPath(replacement);
+    if (!path) {
+      warnings.push(`${PATHS.migrationGuide}: replacement for "${alias}" does not name an endpoint path`);
+      continue;
+    }
+    summary.checked += 1;
+    if (!documentedPaths.has(path)) {
+      errors.push(
+        `${PATHS.migrationGuide}: replacement for "${alias}" points at ${path}, which is not in ${PATHS.openapi}`,
+      );
+    }
+  }
+
+  return { errors, warnings, summary };
 }
 
 export function checkOpenApiStructure(root) {

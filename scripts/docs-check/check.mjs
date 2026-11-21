@@ -18,7 +18,7 @@
  * Exit codes: 0 = no errors, 1 = errors, 2 = usage error.
  */
 import { REPO_ROOT } from "./lib/shared.mjs";
-import { checkOpenApiStructure } from "./lib/openapi.mjs";
+import { checkOpenApiStructure, checkMigrationGuide } from "./lib/openapi.mjs";
 import { checkContractDrift, checkGlobalPrefixInvariant } from "./lib/contract.mjs";
 import { checkMobileDocs } from "./lib/mobile.mjs";
 import { checkEnvPrecedence } from "./lib/env-precedence.mjs";

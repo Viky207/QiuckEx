@@ -466,6 +466,197 @@ describe('ApiCompatibilityService', () => {
     });
   });
 
+  describe('deprecated alias migration', () => {
+    const now = new Date('2025-01-15T00:00:00.000Z');
+
+    const aliasBaseline = {
+      version: '1.0.0',
+      paths: {
+        '/users': {
+          get: {
+            responses: {
+              '200': {
+                description: 'OK',
+                schema: {
+                  type: 'object',
+                  properties: { id: { type: 'string' } },
+                  required: ['id'],
+                },
+              },
+            },
+          },
+        },
+        '/legacy-users': {
+          get: {
+            deprecated: true,
+            'x-replacement-path': '/users',
+            'x-warning-period-end': '2025-06-01T00:00:00.000Z',
+            responses: {
+              '200': {
+                description: 'OK',
+                schema: {
+                  type: 'object',
+                  properties: { id: { type: 'string' } },
+                  required: ['id'],
+                },
+              },
+            },
+          },
+        },
+      },
+    };
+
+    beforeEach(() => {
+      jest.useFakeTimers().setSystemTime(now);
+    });
+
+    afterEach(() => {
+      jest.useRealTimers();
+    });
+
+    it('reports a deprecated alias with a valid replacement and active warning period as non-breaking', async () => {
+      baselineLoader.load.mockResolvedValue(aliasBaseline);
+      dependencyService.check.mockResolvedValue(true);
+      diffEngine.diff.mockReturnValue({
+        compatible: true,
+        changes: [
+          {
+            type: 'DEPRECATED_ALIAS',
+            path: '/legacy-users',
+            method: 'get',
+            replacementPath: '/users',
+            warningPeriodEnd: '2025-06-01T00:00:00.000Z',
+            message:
+              'Path /legacy-users get is deprecated; use /users instead',
+          },
+        ],
+      });
+
+      const result = await service.checkCompatibility('1.0.0', aliasBaseline);
+
+      expect(result.compatible).toBe(true);
+      expect(result.changes).toHaveLength(1);
+      expect(result.changes[0].type).toBe('DEPRECATED_ALIAS');
+      expect(result.changes[0].replacementPath).toBe('/users');
+      expect(result.changes[0].warningPeriodEnd).toBe(
+        '2025-06-01T00:00:00.000Z',
+      );
+    });
+
+    it('reports an alias missing a replacement endpoint as breaking', async () => {
+      baselineLoader.load.mockResolvedValue(aliasBaseline);
+      dependencyService.check.mockResolvedValue(true);
+      diffEngine.diff.mockReturnValue({
+        compatible: false,
+        changes: [
+          {
+            type: 'DEPRECATED_ALIAS_MISSING_REPLACEMENT',
+            path: '/legacy-users',
+            method: 'get',
+            message:
+              'Deprecated path /legacy-users get has no replacement endpoint',
+          },
+        ],
+      });
+
+      const result = await service.checkCompatibility('1.0.0', aliasBaseline);
+
+      expect(result.compatible).toBe(false);
+      expect(result.changes).toHaveLength(1);
+      expect(result.changes[0].type).toBe(
+        'DEPRECATED_ALIAS_MISSING_REPLACEMENT',
+      );
+      expect(result.changes[0].replacementPath).toBeUndefined();
+    });
+
+    it('reports an alias whose warning period has expired as breaking', async () => {
+      baselineLoader.load.mockResolvedValue(aliasBaseline);
+      dependencyService.check.mockResolvedValue(true);
+      diffEngine.diff.mockReturnValue({
+        compatible: false,
+        changes: [
+          {
+            type: 'DEPRECATED_ALIAS_EXPIRED',
+            path: '/legacy-users',
+            method: 'get',
+            replacementPath: '/users',
+            warningPeriodEnd: '2025-01-14T23:59:59.999Z',
+            message:
+              'Deprecated path /legacy-users get warning period ended at 2025-01-14T23:59:59.999Z',
+          },
+        ],
+      });
+
+      const result = await service.checkCompatibility('1.0.0', aliasBaseline);
+
+      expect(result.compatible).toBe(false);
+      expect(result.changes[0].type).toBe('DEPRECATED_ALIAS_EXPIRED');
+      expect(result.changes[0].replacementPath).toBe('/users');
+    });
+
+    it('treats a warning period ending exactly now as expired (boundary)', async () => {
+      baselineLoader.load.mockResolvedValue(aliasBaseline);
+      dependencyService.check.mockResolvedValue(true);
+      diffEngine.diff.mockReturnValue({
+        compatible: false,
+        changes: [
+          {
+            type: 'DEPRECATED_ALIAS_EXPIRED',
+            path: '/legacy-users',
+            method: 'get',
+            replacementPath: '/users',
+            warningPeriodEnd: now.toISOString(),
+            message: `Deprecated path /legacy-users get warning period ended at ${now.toISOString()}`,
+          },
+        ],
+      });
+
+      const result = await service.checkCompatibility('1.0.0', aliasBaseline);
+
+      expect(result.compatible).toBe(false);
+      expect(result.changes[0].type).toBe('DEPRECATED_ALIAS_EXPIRED');
+      expect(result.changes[0].warningPeriodEnd).toBe(now.toISOString());
+    });
+
+    it('preserves deterministic ordering and omits secrets or personal data from messages', async () => {
+      baselineLoader.load.mockResolvedValue(aliasBaseline);
+      dependencyService.check.mockResolvedValue(true);
+      diffEngine.diff.mockReturnValue({
+        compatible: false,
+        changes: [
+          {
+            type: 'DEPRECATED_ALIAS_EXPIRED',
+            path: '/legacy-users',
+            method: 'get',
+            replacementPath: '/users',
+            warningPeriodEnd: '2025-01-01T00:00:00.000Z',
+            message:
+              'Deprecated path /legacy-users get warning period ended at 2025-01-01T00:00:00.000Z',
+          },
+          {
+            type: 'DEPRECATED_ALIAS_MISSING_REPLACEMENT',
+            path: '/legacy-users',
+            method: 'get',
+            message:
+              'Deprecated path /legacy-users get has no replacement endpoint',
+          },
+        ],
+      });
+
+      const result = await service.checkCompatibility('1.0.0', aliasBaseline);
+
+      expect(result.changes.map((c) => c.type)).toEqual([
+        'DEPRECATED_ALIAS_EXPIRED',
+        'DEPRECATED_ALIAS_MISSING_REPLACEMENT',
+      ]);
+
+      const serialized = JSON.stringify(result.changes);
+      expect(serialized).not.toMatch(/authorization|bearer|token|secret/i);
+      expect(serialized).not.toMatch(/password|api[_-]?key/i);
+      expect(serialized).not.toMatch(/[\w.+-]+@[\w-]+\.[\w.-]+/);
+    });
+  });
+
   describe('dependency failure', () => {
     it('throws DependencyFailureError when dependency check fails', async () => {
       baselineLoader.load.mockResolvedValue(validBaseline);
