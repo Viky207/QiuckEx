@@ -12,6 +12,7 @@ Companion docs:
 - [MVP-CONTRACT-SCOPE.md](./MVP-CONTRACT-SCOPE.md) — what is deliberately on-chain vs deferred.
 - [RUNTIME-CONFIG-MATRIX.md](./RUNTIME-CONFIG-MATRIX.md) — environment/config drift that affects whether "Live" flows actually work in your environment.
 - [adr/README.md](./adr/README.md) — architecture decision records: the non-obvious decisions behind this map (self-custody, testnet-first, Supabase as system of record, this status vocabulary) and when a new one is required.
+- [CI-TOKEN-PERMISSIONS.md](./CI-TOKEN-PERMISSIONS.md) — least-privilege `GITHUB_TOKEN` policy for workflow and job permissions.
 - [../CONTRIBUTING.md](../CONTRIBUTING.md) — issue templates, the label vocabulary, and the ADR workflow.
 
 ## Status legend
@@ -156,6 +157,7 @@ Expo/React Native app, 25 screens in `app/mobile/app`. ⚠️ All "Live" rows ar
 | DevContainer reproducible toolchain | `.devcontainer/Dockerfile`, `scripts/verify-devcontainer.sh` | **Live** | Provisions Node 20 LTS, pnpm, Rust toolchain with wasm32 Soroban target, and Stellar CLI cleanly. |
 | Affected-package CI matrix execution | `.github/workflows/ci.yml`, `turbo.json` | **Live** | Parallel matrix execution with Turbo caching (`.turbo/cache`) scoped to affected packages against base ref. |
 | Release-quality scorecard generator | `scripts/generate-release-scorecard.mjs`, `.github/workflows/ci.yml` | **Live** | Generates weighted quality score (A+/A/B/C/F), emits `release-scorecard.md`/`json`, and attaches to CI summary and build artifacts. |
+| Least-privilege workflow token gate | `scripts/check-workflow-permissions.js`, `scripts/check-workflow-permissions.test.js`, `.github/workflows/*.yml` | **Live** | Every workflow declares `permissions: {}` and every job declares exact effective scopes. Read-only jobs get `contents: read` only; write scopes are restricted to the allow-listed publish/comment/scan/deploy jobs in [CI-TOKEN-PERMISSIONS.md](./CI-TOKEN-PERMISSIONS.md). The offline checker runs in `ci.yml` and rejects missing, inherited, or unexpected write permissions. |
 
 
 ## Contract (`app/contract`)

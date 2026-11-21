@@ -10,10 +10,15 @@ on:
     paths:
       - "app/backend/**"
 
+# No workflow-wide token scopes: every job declares its exact needs below.
+permissions: {}
+
 jobs:
   build-and-test:
     name: Build and Test
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     defaults:
       run:
         working-directory: app/backend
@@ -125,6 +130,8 @@ jobs:
   payment-lifecycle-integration:
     name: Payment Lifecycle Integration Tests
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     # Slow end-to-end suite (~30s+) that hits a real Supabase test project and
     # Horizon testnet. Runs on every PR against main and blocks merge, but is
     # kept out of the lint/build job so it never gates linting.

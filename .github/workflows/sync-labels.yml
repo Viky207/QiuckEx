@@ -24,9 +24,8 @@ on:
       - "scripts/sync-labels.sh"
       - ".github/workflows/sync-labels.yml"
 
-permissions:
-  issues: write
-  contents: read
+# No workflow-wide token scopes: only the label sync job needs issues write.
+permissions: {}
 
 concurrency:
   group: sync-labels
@@ -36,6 +35,9 @@ jobs:
   sync:
     name: Apply label definitions
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
     steps:
       - name: Checkout code
         uses: actions/checkout@v4

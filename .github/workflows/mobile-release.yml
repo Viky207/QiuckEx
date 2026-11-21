@@ -11,11 +11,16 @@ on:
         required: false
         default: 'true'
 
+# No workflow-wide token scopes: every job declares its exact needs below.
+permissions: {}
+
 jobs:
   production-release:
     if: github.event_name == 'push'
     name: Production Release Tag Build
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     defaults:
       run:
         working-directory: app/mobile
@@ -61,6 +66,8 @@ jobs:
     if: github.event_name == 'workflow_dispatch'
     name: Environment Matrix Internal Builds
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     defaults:
       run:
         working-directory: app/mobile
@@ -106,6 +113,8 @@ jobs:
   maestro-android:
     name: Maestro UI Tests (Android emulator)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     timeout-minutes: 45
     defaults:
       run:
