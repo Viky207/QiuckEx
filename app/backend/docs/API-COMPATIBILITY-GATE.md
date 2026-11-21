@@ -14,6 +14,9 @@ The gate is intended to catch:
 - Changes to field types or required/optional status.
 - Changes to enum values that are part of the public contract.
 - Changes to authentication or authorization requirements on an endpoint.
+- Changes to the error contract of an endpoint, including the error code and
+  HTTP status returned for a rejected request (for example, a duplicate
+  terminal escrow call).
 
 Additive, backwards-compatible changes (new endpoints, new optional fields) are
 allowed and do not fail the gate.
@@ -143,3 +146,22 @@ If the gate fails unexpectedly or a bad baseline was merged:
 If a breaking change was released and must be undone, follow the standard
 service rollback procedure in addition to reverting the baseline, so that the
 deployed API and the baseline are consistent.
+
+## Terminal Escrow Calls
+
+Escrow release and refund are terminal transitions: once an escrow has been
+released or refunded, it cannot transition again. The gate treats the error
+contract for these calls as part of the public API surface.
+
+- The first terminal call (release or refund) succeeds and moves the escrow to
+  its terminal state.
+- Any later terminal call — a repeated release, a repeated refund, or a call
+  crossing terminal states (release after refund, refund after release) — must
+  be rejected with a stable error code and HTTP status, and must not change
+  balances.
+
+Because retries after a client timeout can replay a terminal call, the
+rejection response is part of the contract: changing its error code or status
+is a breaking change and must go through the migration or override procedure
+above. Automated coverage asserts that exactly one terminal transition succeeds
+and that later calls return the same stable error with unchanged balances.

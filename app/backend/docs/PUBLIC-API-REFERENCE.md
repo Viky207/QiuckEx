@@ -158,3 +158,49 @@ def quickex_hook():
     # handle event...
     return "ok", 200
 ```
+
+---
+
+## Escrow expiry
+
+Escrow links carry an `expires_at` ledger timestamp. Expiry is evaluated against the
+current ledger close time using a strict comparison, so the boundary is deterministic:
+
+| Current ledger time vs `expires_at` | Escrow state |
+| --- | --- |
+| `now < expires_at` (immediately before) | `active` — funds can still be released or refunded |
+| `now == expires_at` (exactly at) | `active` — the escrow is **not** expired at the exact boundary |
+| `now > expires_at` (immediately after) | `expired` — only refund is permitted |
+
+In other words, an escrow expires only once the ledger time is strictly greater than
+`expires_at`. At the exact equality point the escrow remains active, matching the
+documented state-transition table.
+
+---
+
+## Escrow terminal transitions
+
+An escrow has exactly two terminal transitions: **release** and **refund**. Once an
+escrow reaches a terminal state (`released` or `refunded`) it can never transition
+again. This makes retries safe: a client that times out and retries a release or
+refund will never move funds twice.
+
+### Idempotency guarantees
+
+- The **first** terminal call on an `active` escrow succeeds and moves funds exactly
+  once. The escrow state becomes `released` or `refunded` accordingly.
+- **Any subsequent** terminal call — a repeated release, a repeated refund, or a call
+  crossing terminal states (release after refund, refund after release) — is rejected
+  with a stable error and **no balance change**.
+- The rejection error is consistent regardless of which terminal state was reached
+  first, so clients can treat it as a permanent (non-retryable) failure.
+
+| Current state | `release` | `refund` |
+| --- | --- | --- |
+| `active` | succeeds → `released` | succeeds → `refunded` |
+| `released` | rejected (stable error) | rejected (stable error) |
+| `refunded` | rejected (stable error) | rejected (stable error) |
+| `expired` | rejected (stable error) | succeeds → `refunded` |
+
+In every rejected case the escrow balance and the recipient/sender balances are left
+unchanged, so duplicate terminal calls are always safe to retry against.
