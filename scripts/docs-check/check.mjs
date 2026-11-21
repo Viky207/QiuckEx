@@ -21,8 +21,9 @@ import { REPO_ROOT } from "./lib/shared.mjs";
 import { checkOpenApiStructure } from "./lib/openapi.mjs";
 import { checkContractDrift, checkGlobalPrefixInvariant } from "./lib/contract.mjs";
 import { checkMobileDocs } from "./lib/mobile.mjs";
+import { checkApiKeyScopeMatrix } from "./lib/api-keys.mjs";
 
-const VALID_TARGETS = ["all", "openapi", "contract", "mobile"];
+const VALID_TARGETS = ["all", "openapi", "contract", "mobile", "api-keys"];
 
 export function runCheck(root = REPO_ROOT, { only = "all" } = {}) {
   const checks = {};
@@ -43,6 +44,9 @@ export function runCheck(root = REPO_ROOT, { only = "all" } = {}) {
   }
   if (only === "all" || only === "mobile") {
     checks.mobile = checkMobileDocs(root);
+  }
+  if (only === "all" || only === "api-keys") {
+    checks["api-keys"] = checkApiKeyScopeMatrix(root);
   }
 
   const errors = Object.entries(checks).flatMap(([name, result]) =>

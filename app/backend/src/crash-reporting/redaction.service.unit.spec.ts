@@ -286,4 +286,110 @@ describe('RedactionService', () => {
       });
     });
   });
+
+  describe('support-bundle boundary cases', () => {
+    const secretKey = 'SBZVMB74Z76QZ3ZOY3XRXEPNQN754WKRGMAG4OQIPOOB6QMHIDCNVYKY';
+    const publicKey = 'GBRPYHIL2CI3FNQ4BXLFMNDLFJUNPU2HY3ZMFSHONUCEOASW7QC7OX2H';
+    const apiKey = 'test_key_1234567890abcdefghijklmnop';
+    const password = 'mySecretPassword123';
+    const email = 'sensitive@example.com';
+    const ip = '203.0.113.42';
+
+    it('should redact secrets nested deep inside objects and arrays', () => {
+      const payload = {
+        level1: {
+          level2: [
+            { secretKey, note: `key is ${secretKey}` },
+            [{ password, apiKey }],
+          ],
+        },
+      };
+
+      const result = service.redactObject(payload);
+      const serialized = JSON.stringify(result);
+
+      expect(serialized).not.toContain(secretKey);
+      expect(serialized).not.toContain(apiKey);
+      expect(serialized).not.toContain(password);
+    });
+
+    it('should redact secrets embedded in strings inside arrays', () => {
+      const payload = {
+        logs: [
+          `STELLAR_SECRET_KEY=${secretKey}`,
+          `Authorization: Bearer ${apiKey}`,
+          `User ${email} from ${ip}`,
+        ],
+      };
+
+      const result = service.redactObject(payload) as Record<string, string[]>;
+      const serialized = JSON.stringify(result);
+
+      expect(serialized).not.toContain(secretKey);
+      expect(serialized).not.toContain(apiKey);
+      expect(serialized).not.toContain(email);
+      expect(serialized).not.toContain(ip);
+    });
+
+    it('should produce a support-bundle-like payload with no raw private keys or credentials', () => {
+      const bundle = {
+        metadata: {
+          version: '1.0.0',
+          generatedAt: '2024-01-01T00:00:00.000Z',
+          environment: 'production',
+        },
+        config: {
+          stellar: {
+            publicKey,
+            secretKey,
+          },
+          database: {
+            url: 'postgres://user:password@localhost:5432/mydb',
+          },
+          auth: {
+            apiKey,
+            password,
+          },
+        },
+        logs: [
+          `INFO: loaded key ${publicKey}`,
+          `DEBUG: using secret ${secretKey}`,
+          `WARN: request from ${ip} by ${email}`,
+        ],
+        errors: [
+          service.redactError(
+            new Error(`Failed to sign with ${secretKey} using ${apiKey}`),
+          ),
+        ],
+      };
+
+      const result = service.redactObject(bundle);
+      const serialized = JSON.stringify(result);
+
+      expect(serialized).not.toContain(secretKey);
+      expect(serialized).not.toContain(apiKey);
+      expect(serialized).not.toContain(password);
+      expect(serialized).not.toContain('user:password@localhost:5432/mydb');
+      expect(serialized).not.toContain(email);
+      expect(serialized).not.toContain(ip);
+      expect(serialized).toContain('[REDACTED]');
+    });
+
+    it('should leave non-sensitive bundle metadata intact', () => {
+      const bundle = {
+        metadata: {
+          version: '1.0.0',
+          environment: 'production',
+          uptimeSeconds: 3600,
+          healthy: true,
+        },
+      };
+
+      const result = service.redactObject(bundle) as Record<string, Record<string, unknown>>;
+      expect(result.metadata.version).toBe('1.0.0');
+      expect(result.metadata.environment).toBe('production');
+      expect(result.metadata.uptimeSeconds).toBe(3600);
+      expect(result.metadata.healthy).toBe(true);
+    });
+  });
 });

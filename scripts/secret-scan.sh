@@ -24,12 +24,13 @@ YELLOW='\033[1;33m'
 NC='\033[0m'
 
 usage() {
-  echo "Usage: $0 [--verify|--audit|--full]"
+  echo "Usage: $0 [--verify|--audit|--full|--docs]"
   echo ""
   echo "  (no args)  Generate or update the .secrets.baseline file"
   echo "  --verify   Check for new secrets against existing baseline"
   echo "  --audit    Interactively audit baseline entries"
   echo "  --full     Run both detect-secrets AND gitleaks"
+  echo "  --docs     Scan support-bundle guide examples for credential-like patterns"
   exit 0
 }
 
@@ -99,6 +100,54 @@ scan_gitleaks() {
   gitleaks detect --source . --config gitleaks.toml --verbose --no-git || true
 }
 
+# ── Docs example scan ────────────────────────────────────────────────────────
+# Ensures documentation examples never ship real credentials. Fails (non-zero)
+# if any credential-like pattern is found in the support-bundle guide.
+DOCS_SCAN_TARGETS=(
+  "docs/SUPPORT-BUNDLE-PRIVACY-GUIDE.md"
+)
+
+# Patterns that indicate a real credential rather than a placeholder.
+# Stellar secret keys are 56 chars: 'S' followed by 55 base32 chars.
+# Placeholders like SXXX.../S...REDACTED are intentionally allowed.
+DOCS_SECRET_PATTERNS=(
+  'S[A-Z2-7]{55}'                                   # Stellar secret key
+  'Bearer[[:space:]]+[A-Za-z0-9._~+/-]{20,}=*'      # Bearer token
+  '(api[_-]?key|apikey|secret[_-]?key)["'"'"']?[[:space:]]*[:=][[:space:]]*["'"'"']?[A-Za-z0-9._~+/-]{16,}' # API/secret keys
+)
+
+scan_docs() {
+  local failed=0
+  local target
+
+  for target in "${DOCS_SCAN_TARGETS[@]}"; do
+    local path="$REPO_ROOT/$target"
+    if [ ! -f "$path" ]; then
+      echo -e "${YELLOW}Skipping missing docs target: $target${NC}"
+      continue
+    fi
+
+    echo -e "${YELLOW}Scanning $target for credential-like patterns...${NC}"
+    local pattern
+    for pattern in "${DOCS_SECRET_PATTERNS[@]}"; do
+      local matches
+      matches=$(grep -nE "$pattern" "$path" || true)
+      if [ -n "$matches" ]; then
+        echo -e "${RED}Potential credential found in $target (pattern: $pattern):${NC}"
+        echo "$matches"
+        failed=1
+      fi
+    done
+  done
+
+  if [ "$failed" -ne 0 ]; then
+    echo -e "${RED}Docs secret scan failed. Remove real credentials from examples.${NC}"
+    exit 1
+  fi
+
+  echo -e "${GREEN}Docs secret scan passed. No credential-like patterns found.${NC}"
+}
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 check_deps
 
@@ -112,6 +161,10 @@ case "${1:-}" in
   --full)
     scan_generate_baseline
     scan_gitleaks
+    scan_docs
+    ;;
+  --docs)
+    scan_docs
     ;;
   --help|-h)
     usage
