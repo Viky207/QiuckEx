@@ -10,6 +10,7 @@ import { BranchPreviewRepository } from './branch-preview.repository';
 import { BranchPreviewEnvironment } from './branch-preview.model';
 import {
   BRANCH_PREVIEW_AUTO_EXPIRED_EVENT,
+  BRANCH_PREVIEW_CLEANUP_COMPLETED_EVENT,
   PREVIEW_AUTO_EXPIRY_WORKER_ACTOR,
   resolvePreviewExpiryThresholds,
 } from './branch-preview-expiry.config';
@@ -17,6 +18,12 @@ import {
   evaluatePreviewAutoExpiry,
   PreviewAutoExpiryReason,
 } from './branch-preview-expiry.policy';
+import {
+  buildPreviewOwnershipMetadata,
+  PreviewCleanupResource,
+  PreviewCleanupResourceKind,
+  verifyPreviewOwnership,
+} from './branch-preview-cleanup.policy';
 
 @Injectable()
 export class BranchPreviewAutoExpiryService {
@@ -100,6 +107,116 @@ export class BranchPreviewAutoExpiryService {
     }
 
     return deactivated;
+  }
+
+  /**
+   * Scheduled cleanup of stale preview infrastructure and isolated data.
+   *
+   * Discovers expired previews, verifies each resource carries the expected
+   * preview ownership metadata (preview id, PR number, environment tag) and
+   * deletes only those resources. Active previews are never touched and the
+   * sweep is idempotent: resources already gone are skipped on re-run.
+   */
+  @Cron(CronExpression.EVERY_6_HOURS, {
+    name: 'branch-preview-stale-cleanup',
+    timeZone: 'UTC',
+  })
+  async handleCleanupCron(): Promise<void> {
+    const runId = uuidv4();
+    try {
+      const summary = await this.runStalePreviewCleanup(runId);
+      if (summary.deleted > 0 || summary.skipped > 0) {
+        this.logger.log(
+          `Preview cleanup ${runId}: deleted ${summary.deleted} resource(s), skipped ${summary.skipped}`,
+        );
+      }
+    } catch (err) {
+      this.logger.error(`Preview cleanup ${runId} failed: ${(err as Error).message}`);
+    }
+  }
+
+  /**
+   * Deletes stale preview resources that carry the expected ownership metadata.
+   * Idempotent: re-running after a successful deletion is a no-op.
+   */
+  async runStalePreviewCleanup(
+    runId: string,
+    now: Date = new Date(),
+  ): Promise<{ deleted: number; skipped: number }> {
+    const expired = await this.repository.findExpiredForCleanup(now);
+    let deleted = 0;
+    let skipped = 0;
+
+    for (const preview of expired) {
+      // Never delete resources for a preview that is still active.
+      if (preview.isActive) {
+        skipped += 1;
+        continue;
+      }
+
+      const expected = buildPreviewOwnershipMetadata(preview);
+      const resources = await this.repository.findCleanupResources(preview.id);
+
+      for (const resource of resources) {
+        const verification = verifyPreviewOwnership(resource, expected);
+        if (!verification.owned) {
+          skipped += 1;
+          this.logger.warn(
+            `Skipping ${resource.kind} ${resource.id} for preview ${preview.id}: ${verification.reason}`,
+          );
+          continue;
+        }
+
+        const removed = await this.repository.deleteCleanupResource(resource.id);
+        if (!removed) {
+          // Already deleted by a previous run — idempotent no-op.
+          skipped += 1;
+          continue;
+        }
+
+        deleted += 1;
+        await this.recordCleanupAudit(preview, resource, runId, now);
+      }
+    }
+
+    if (deleted > 0) {
+      this.eventEmitter.emit(BRANCH_PREVIEW_CLEANUP_COMPLETED_EVENT, {
+        runId,
+        deleted,
+        skipped,
+      });
+    }
+
+    return { deleted, skipped };
+  }
+
+  private async recordCleanupAudit(
+    preview: BranchPreviewEnvironment,
+    resource: PreviewCleanupResource,
+    runId: string,
+    now: Date,
+  ): Promise<void> {
+    const kind: PreviewCleanupResourceKind = resource.kind;
+    try {
+      await this.auditService.log(
+        PREVIEW_AUTO_EXPIRY_WORKER_ACTOR,
+        'branch_preview.resource_deleted',
+        resource.id,
+        {
+          runId,
+          previewId: preview.id,
+          branchName: preview.branchName,
+          pullRequestNumber: preview.pullRequestNumber ?? null,
+          resourceKind: kind,
+          resourceId: resource.id,
+          deletedAt: now.toISOString(),
+        },
+      );
+    } catch (err) {
+      this.logger.warn(
+        `Failed to record cleanup audit for ${kind} ${resource.id}: ${(err as Error).message}`,
+      );
+    }
   }
 
   private async recordExpiryAudit(

@@ -16,7 +16,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BASELINE="$REPO_ROOT/.secrets.baseline"
 
-EXCLUDE_FILES='(pnpm-lock\.yaml|package-lock\.json|.*\.lock|node_modules/.*|dist/.*|coverage/.*|.turbo/.*)'
+EXCLUDE_FILES='(pnpm-lock\.yaml|package-lock\.json|.*\.lock|node_modules/.*|dist/.*|coverage/.*|.turbo/.*|.*rotation.*\.log|.*credential.*\.env|.*\.rotation-artifacts/.*)'
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -24,13 +24,14 @@ YELLOW='\033[1;33m'
 NC='\033[0m'
 
 usage() {
-  echo "Usage: $0 [--verify|--audit|--full|--docs]"
+  echo "Usage: $0 [--verify|--audit|--full|--docs|--rotation]"
   echo ""
   echo "  (no args)  Generate or update the .secrets.baseline file"
   echo "  --verify   Check for new secrets against existing baseline"
   echo "  --audit    Interactively audit baseline entries"
   echo "  --full     Run both detect-secrets AND gitleaks"
   echo "  --docs     Scan support-bundle guide examples for credential-like patterns"
+  echo "  --rotation Check for leaked credential-rotation artifacts"
   exit 0
 }
 
@@ -148,6 +149,37 @@ scan_docs() {
   echo -e "${GREEN}Docs secret scan passed. No credential-like patterns found.${NC}"
 }
 
+# Scan credential-rotation artifacts (rehearsal output, rotation logs, staged
+# env files). Values must never be written to disk, but we scan defensively so
+# an accidental leak fails closed. Only file paths are reported, never values.
+scan_rotation_artifacts() {
+  echo -e "${YELLOW}Scanning credential-rotation artifacts...${NC}"
+
+  local patterns=(
+    "*.rotation.log"
+    "*.rotation-artifacts/*"
+    "*.credential.env"
+  )
+
+  local found=0
+  local file
+  for pattern in "${patterns[@]}"; do
+    while IFS= read -r -d '' file; do
+      found=1
+      # Report path only – never echo file contents.
+      echo -e "${RED}Rotation artifact present: ${file#"$REPO_ROOT"/}${NC}"
+    done < <(find "$REPO_ROOT" -type f -name "$pattern" -not -path "*/node_modules/*" -print0 2>/dev/null)
+  done
+
+  if [ "$found" -eq 0 ]; then
+    echo -e "${GREEN}No rotation artifacts found.${NC}"
+    return 0
+  fi
+
+  echo -e "${RED}Rotation artifacts must not be committed. Remove them before merging.${NC}"
+  return 1
+}
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 check_deps
 
@@ -162,9 +194,13 @@ case "${1:-}" in
     scan_generate_baseline
     scan_gitleaks
     scan_docs
+    scan_rotation_artifacts
     ;;
   --docs)
     scan_docs
+    ;;
+  --rotation)
+    scan_rotation_artifacts
     ;;
   --help|-h)
     usage

@@ -190,6 +190,54 @@ The following checks are required before a deploy PR can be merged:
 - [ ] Post-deploy validation is defined: metadata view and event smoke test
 - [ ] Environment registry is updated for every affected network
 
+### Upgrade safety gate
+
+Any change that touches deployed contract state (storage keys, value layouts, schema/version metadata, or initialization) must pass the upgrade safety gate before merge. Run it from `app/contract`:
+
+```bash
+# Upgrade harness: prior-state selection, migration, and rollback coverage
+cargo test upgrade_harness_ -- --nocapture
+
+# Storage/version metadata comparison and boundary cases
+cargo test upgrade_ -- --nocapture
+
+# Full suite (includes the gates above)
+cargo test
+```
+
+The gate fails the PR when any of the following hold:
+
+- A storage key or value layout changes without a migration path.
+- The schema version is not bumped for a layout change, or is bumped without a migration.
+- `get_deployment_metadata` no longer reports the expected contract ID, schema version, or wasm hash.
+- The upgrade harness cannot select prior state or cannot restore it after rollback.
+
+### Upgrade rehearsal checklist
+
+Before changing deployed contract state, rehearse the upgrade using [upgrade-rehearsal-checklist.md](upgrade-rehearsal-checklist.md). The checklist is the contributor-facing companion to the upgrade safety gate above and covers:
+
+1. **Select prior state** — capture the current deployed contract ID, wasm hash, schema version, and a storage snapshot from the network being upgraded.
+2. **Run upgrade tests** — execute the upgrade harness against the selected prior state, including the failure/boundary case (missing migration, version mismatch, rollback).
+3. **Compare storage/version metadata** — diff pre- and post-upgrade `get_deployment_metadata` output and storage entries; every difference must be intentional and documented.
+4. **Preserve rollback evidence** — attach the pre-upgrade snapshot, the rollback command, and the post-rollback metadata comparison to the PR.
+
+Required artifacts for an upgrade PR:
+
+- [ ] Prior-state snapshot (contract ID, wasm hash, schema version, storage dump)
+- [ ] Upgrade harness output showing the migration and boundary case passing
+- [ ] Pre/post `get_deployment_metadata` comparison
+- [ ] Rollback evidence: command used and post-rollback metadata comparison
+- [ ] Updated [environment-registry.toml](environment-registry.toml) entry for every affected network
+
+Stop conditions — do not proceed with the upgrade if any apply:
+
+- Prior state cannot be reproduced or the snapshot does not match the deployed wasm hash.
+- The upgrade harness fails, or the boundary/failure case is skipped.
+- Storage or version metadata differs from the documented expectation.
+- Rollback cannot be demonstrated or its evidence is missing.
+- The environment registry is not updated for an affected network.
+=======
+
 ## Recommended local quality checks
 
 ```bash

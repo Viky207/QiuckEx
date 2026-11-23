@@ -175,8 +175,9 @@ If-None-Match: <optional-etag>
 - **Feature gate**: `merchant.payment_preferences` is enabled by default only in development/test and all writes are rejected outside testnet. Keep disabled on mainnet.
 
 #### `POST /links/metadata`
-- **Description**: Generates canonical payment link metadata, validation hashes, and accepted payment route parameters.
+- **Description**: Generates canonical payment link metadata, validation hashes, and accepted payment route parameters. Generation is stateless: no link record is persisted and no funds move, so a repeated call cannot create a duplicate link.
 - **Authorization**: Public / Optional `X-API-Key`
+- **Optional header**: `Idempotency-Key` — 16-128 URL-safe characters (`A-Z`, `a-z`, `0-9`, `_`, `-`). Concurrent requests with the same key and payload share one generation; repeated requests replay the original response for five minutes, including the original `expiresAt`. Reusing the key with a different payload returns `409 IDEMPOTENCY_CONFLICT`. Replay state is process-local and cleared on restart, which is safe because metadata generation is stateless.
 - **Request Body**:
   ```json
   {
@@ -213,6 +214,7 @@ If-None-Match: <optional-etag>
     }
   }
   ```
+- **Idempotency errors**: `400 INVALID_IDEMPOTENCY_KEY` for a missing-pattern key (when supplied) and `409 IDEMPOTENCY_CONFLICT` when a key is reused with a different payload. Neither error mutates replay state.
 
 #### `GET /payment-links/status`
 - **Description**: Checks current lifecycle status of a payment link (Active, Paid, Expired, Refunded).

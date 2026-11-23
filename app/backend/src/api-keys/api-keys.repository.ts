@@ -183,6 +183,26 @@ export class ApiKeysRepository {
     return row as ApiKeyRecord;
   }
 
+  /**
+   * Update only the scopes of an API key and return the updated record.
+   * The secret (key_hash) is never read or written here, so callers can
+   * capture before/after scope state for auditing without touching secrets.
+   */
+  async updateScopes(id: string, scopes: ApiKeyScope[]): Promise<ApiKeyRecord> {
+    const { data: row, error } = await this.client
+      .from('api_keys')
+      .update({ scopes, updated_at: new Date().toISOString() })
+      .eq('id', id)
+      .eq('is_active', true)
+      .select()
+      .single();
+
+    // PGRST116 = "no rows returned" — treat as not found, not an error
+    if (error?.code === 'PGRST116') throw new Error('API key not found');
+    if (error) throw error;
+    return row as ApiKeyRecord;
+  }
+
   async incrementUsage(id: string): Promise<void> {
     const { error } = await this.client.rpc('increment_api_key_usage', {
       key_id: id,

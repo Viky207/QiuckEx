@@ -11,6 +11,7 @@ import { LoadingState } from "@/components/payment-states/LoadingState";
 import { ErrorState } from "@/components/payment-states/ErrorState";
 import { getQuickexApiBase } from "@/lib/api";
 import { notifyPaymentCompleted } from "@/lib/cacheInvalidation";
+import type { PaymentSimulation } from "@/lib/payment/simulationDisclosure";
 
 type LinkState = "ACTIVE" | "EXPIRED" | "PAID" | "REFUNDED" | "DRAFT";
 
@@ -37,6 +38,8 @@ type PaymentLinkStatus = {
   acceptedAssets: string[] | null;
   userMessage: string;
   availableActions: string[];
+  /** Optional, additive simulation payload for the payment review disclosure. */
+  simulation?: PaymentSimulation | null;
 };
 
 type FetchState = "loading" | "success" | "error";
@@ -216,6 +219,7 @@ function PaymentPageContent() {
             status={status}
             onPaymentInitiated={handlePaymentInitiated}
             onPaymentCompleted={handlePaymentCompleted}
+            simulation={status.simulation}
           />
         );
       case "EXPIRED":

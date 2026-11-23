@@ -147,6 +147,12 @@ fn compute_expires_at(env: &Env, timeout_secs: u64) -> Result<u64, QuickexError>
 /// # Errors
 /// - [`InvalidAmount`] – amount ≤ 0.
 /// - [`InvalidSalt`] – salt > 1024 bytes.
+/// - [`InvalidToken`] – `token` is not a valid contract address.
+/// - [`Overflow`] – arithmetic overflow while computing amounts.
+///
+/// # Atomicity
+/// The token transfer is performed before any storage write. If the transfer
+/// fails, no escrow entry, id mapping, or event is produced.
 #[allow(clippy::too_many_arguments)]
 pub fn deposit(
     env: &Env,
@@ -197,6 +203,10 @@ pub fn deposit(
             return Err(QuickexError::CommitmentAlreadyExists);
         }
     }
+    // Atomicity: perform the token transfer BEFORE any storage write so a
+    // failed transfer leaves no escrow entry or id mapping behind.
+    token_client.transfer(&owner, env.current_contract_address(), &amount);
+
     let entry = EscrowEntry {
         token, // moved
         amount_due: amount,
@@ -214,7 +224,6 @@ pub fn deposit(
 
     put_escrow(env, &commitment_bytes, &entry);
     put_escrow_id_mapping(env, &escrow_id, &commitment);
-    token_client.transfer(&owner, env.current_contract_address(), &amount);
 
     let token_address = token_client.address.clone();
     events::publish_escrow_deposited(
@@ -255,6 +264,11 @@ pub fn deposit(
 /// - [`InvalidAmount`] – amount ≤ 0.
 /// - [`CommitmentAlreadyExists`] – commitment already in storage.
 /// - [`InvalidTimeout`] – timeout_secs would overflow u64 when added to now.
+/// - [`InvalidToken`] – `token` is not a valid contract address.
+///
+/// # Atomicity
+/// The token transfer is performed before any storage write. If the transfer
+/// fails, no escrow entry or event is produced.
 #[allow(clippy::too_many_arguments)]
 pub fn deposit_with_commitment(
     env: &Env,
@@ -355,6 +369,11 @@ pub fn deposit_with_commitment(
 /// # Errors
 /// - [`InvalidAmount`] – initial_payment ≤ 0 or amount_due ≤ 0.
 /// - [`InvalidSalt`] – salt > 1024 bytes.
+/// - [`InvalidToken`] – `token` is not a valid contract address.
+///
+/// # Atomicity
+/// The token transfer is performed before any storage write. If the transfer
+/// fails, no escrow entry or event is produced.
 #[allow(clippy::too_many_arguments)]
 pub fn deposit_partial(
     env: &Env,
@@ -395,6 +414,10 @@ pub fn deposit_partial(
 
     let token_client = token::Client::new(env, &token);
     let commitment_bytes: Bytes = commitment.clone().into();
+
+    // Atomicity: transfer first so a failed transfer leaves no escrow entry.
+    token_client.transfer(&owner, env.current_contract_address(), &initial_payment);
+
     let entry = EscrowEntry {
         token, // moved
         amount_due,
@@ -411,7 +434,6 @@ pub fn deposit_partial(
     };
 
     put_escrow(env, &commitment_bytes, &entry);
-    token_client.transfer(&owner, env.current_contract_address(), &initial_payment);
 
     let token_addr = token_client.address.clone();
     events::publish_escrow_deposited(
@@ -456,6 +478,11 @@ pub fn deposit_partial(
 /// - [`CommitmentNotFound`] – no escrow for the given commitment.
 /// - [`AlreadySpent`] – escrow already in a terminal state.
 /// - [`Overpayment`] – payment_amount exceeds the remaining amount due.
+/// - [`Overflow`] – arithmetic overflow while accumulating `amount_paid`.
+///
+/// # Atomicity
+/// The token transfer is performed before mutating `amount_paid` or emitting
+/// events. If the transfer fails, the escrow is left unchanged.
 pub fn partial_payment(
     env: &Env,
     commitment: BytesN<32>,
@@ -495,12 +522,18 @@ pub fn partial_payment(
         return Err(QuickexError::Overpayment);
     }
 
-    // Transfer payment to contract
+    // Checked arithmetic: reject overflow instead of wrapping.
+    let new_amount_paid = entry
+        .amount_paid
+        .checked_add(payment_amount)
+        .ok_or(QuickexError::Overflow)?;
+
+    // Transfer payment to contract (before mutating state for atomicity)
     let token_client = token::Client::new(env, &entry.token);
     token_client.transfer(&payer, env.current_contract_address(), &payment_amount);
 
     // Update amount_paid
-    entry.amount_paid = entry.amount_paid.saturating_add(payment_amount);
+    entry.amount_paid = new_amount_paid;
 
     // Track milestone completion
     let milestone_count = entry.milestones.len();
@@ -571,6 +604,11 @@ pub fn partial_payment(
 /// - [`AlreadySpent`] – escrow already spent or refunded.
 /// - [`InvalidCommitment`] – stored amount_due ≠ requested amount_due.
 /// - [`Overpayment`] – escrow is not fully paid yet.
+/// - [`Overflow`] – arithmetic overflow while computing the payout/fee.
+///
+/// # Atomicity
+/// The payout transfer is performed before the status is set to `Spent`. If the
+/// transfer fails, the escrow remains `Pending` and no success event is emitted.
 pub fn withdraw(
     env: &Env,
     amount: i128,
@@ -629,12 +667,15 @@ pub fn withdraw(
     let amount_paid = entry.amount_paid;
     let owner = entry.owner.clone();
 
+    // Atomicity: route the payout (which performs the token transfer) BEFORE
+    // mutating status. A failed transfer leaves the escrow `Pending` and emits
+    // no success event.
+    let (_payout_amount, fee_amount) =
+        fee_router::route_payout_price_aware(env, &token_ref, &to, amount_paid, None)?;
+
     let mut updated = entry;
     updated.status = EscrowStatus::Spent;
     put_escrow(env, &commitment_bytes, &updated);
-
-    let (_payout_amount, fee_amount) =
-        fee_router::route_payout_price_aware(env, &token_ref, &to, amount_paid, None)?;
 
     events::publish_escrow_withdrawn(
         env,
@@ -679,6 +720,10 @@ pub fn withdraw(
 /// - [`InvalidDisputeState`] – escrow is disputed, funds locked (INV-4).
 /// - [`EscrowNotExpired`] – expiry not set or not yet reached (INV-2).
 /// - [`InvalidOwner`] – caller is not the original owner.
+///
+/// # Atomicity
+/// The refund transfer is performed before the status is set to `Refunded`. If
+/// the transfer fails, the escrow remains `Pending` and no event is emitted.
 pub fn refund(
     env: &Env,
     commitment: BytesN<32>,
@@ -716,12 +761,14 @@ pub fn refund(
     let owner_ref = entry.owner.clone();
     let amount_paid = entry.amount_paid;
 
+    // Atomicity: transfer first so a failed transfer leaves status `Pending`
+    // and emits no refund event.
+    let token_client = token::Client::new(env, &token_ref);
+    token_client.transfer(&env.current_contract_address(), &owner_ref, &amount_paid);
+
     let mut updated = entry;
     updated.status = EscrowStatus::Refunded;
     put_escrow(env, &commitment_bytes, &updated);
-
-    let token_client = token::Client::new(env, &token_ref);
-    token_client.transfer(&env.current_contract_address(), &owner_ref, &amount_paid);
 
     events::publish_escrow_refunded(
         env,
@@ -768,6 +815,10 @@ pub fn refund(
 ///   an escrow that has already been refunded — this call is not repeatable.
 /// - [`InvalidDisputeState`] – escrow is disputed, funds locked (INV-4).
 /// - [`EscrowNotExpired`] – expiry not set or not yet reached (INV-2).
+///
+/// # Atomicity
+/// The refund transfer is performed before the status is set to `Refunded`. If
+/// the transfer fails, the escrow remains `Pending` and no event is emitted.
 pub fn finalize_expired_escrow(env: &Env, commitment: BytesN<32>) -> Result<(), QuickexError> {
     let commitment_bytes: Bytes = commitment.clone().into();
     let entry: EscrowEntry =
@@ -793,12 +844,14 @@ pub fn finalize_expired_escrow(env: &Env, commitment: BytesN<32>) -> Result<(), 
     let amount_paid = entry.amount_paid;
     let expires_at = entry.expires_at;
 
+    // Atomicity: transfer first so a failed transfer leaves status `Pending`
+    // and emits no finalization event.
+    let token_client = token::Client::new(env, &token_ref);
+    token_client.transfer(&env.current_contract_address(), &owner_ref, &amount_paid);
+
     let mut updated = entry;
     updated.status = EscrowStatus::Refunded;
     put_escrow(env, &commitment_bytes, &updated);
-
-    let token_client = token::Client::new(env, &token_ref);
-    token_client.transfer(&env.current_contract_address(), &owner_ref, &amount_paid);
 
     events::publish_refund_finalized(
         env,
@@ -889,6 +942,7 @@ pub fn extend_escrow_ttl(env: &Env, commitment: BytesN<32>) -> Result<(), Quicke
 /// - [`MaxExtensionsReached`] – escrow has already been extended max_extensions times.
 /// - [`ExtensionExceedsMaxLifetime`] – extension would exceed max_lifetime_secs.
 /// - [`InvalidTimeout`] – extension_secs would overflow when added to current expires_at.
+/// - [`Overflow`] – arithmetic overflow while computing the extension fee or count.
 pub fn extend_escrow_expiry(
     env: &Env,
     commitment: BytesN<32>,
@@ -908,12 +962,15 @@ pub fn extend_escrow_expiry(
     let fee = if extension_secs == 0 {
         0
     } else {
-        let raw = (extension_secs as i128).saturating_mul(extension_cfg.fee_per_second);
-        let bounded = raw.max(extension_cfg.min_fee).min(extension_cfg.max_fee);
+        // Checked arithmetic: reject overflow instead of wrapping/saturating.
+        let raw = (extension_secs as i128)
+            .checked_mul(extension_cfg.fee_per_second)
+            .ok_or(QuickexError::Overflow)?;
+        let floored = raw.max(extension_cfg.min_fee);
         if extension_cfg.max_fee > 0 {
-            bounded
+            floored.min(extension_cfg.max_fee)
         } else {
-            raw.max(extension_cfg.min_fee)
+            floored
         }
     };
 
@@ -960,7 +1017,10 @@ pub fn extend_escrow_expiry(
     entry.expires_at = new_expires_at;
     put_escrow(env, &commitment_bytes, &entry);
 
-    extension_record.extension_count += 1;
+    extension_record.extension_count = extension_record
+        .extension_count
+        .checked_add(1)
+        .ok_or(QuickexError::Overflow)?;
     extension_record.last_extended_at = env.ledger().timestamp();
     extension_record.new_expires_at = new_expires_at;
     storage::put_escrow_extension(env, &commitment_bytes, &extension_record);
@@ -1046,6 +1106,10 @@ pub fn cleanup_escrow(env: &Env, commitment: BytesN<32>) -> Result<(), QuickexEr
 /// # Returns
 /// Number of escrows successfully cleaned up.
 ///
+/// # Errors
+/// - [`InvalidAmount`] – batch exceeds the maximum size.
+/// - [`Overflow`] – arithmetic overflow while counting cleaned escrows.
+///
 /// # Events
 /// Emits `EscrowCleaned` event for each successfully cleaned escrow.
 pub fn cleanup_escrow_batch(env: &Env, commitments: Vec<BytesN<32>>) -> Result<u32, QuickexError> {
@@ -1066,7 +1130,9 @@ pub fn cleanup_escrow_batch(env: &Env, commitments: Vec<BytesN<32>>) -> Result<u
             if matches!(entry.status, EscrowStatus::Spent | EscrowStatus::Refunded) {
                 remove_escrow(env, &commitment_bytes);
                 events::publish_escrow_cleaned(env, commitment.clone(), entry.status);
-                cleaned_count += 1;
+                cleaned_count = cleaned_count
+                    .checked_add(1)
+                    .ok_or(QuickexError::Overflow)?;
             }
         }
     }
@@ -1130,6 +1196,11 @@ pub fn dispute(env: &Env, commitment: BytesN<32>) -> Result<(), QuickexError> {
 /// - [`CommitmentNotFound`] – no escrow for the given commitment.
 /// - [`NotArbiter`] – caller is not the assigned arbiter.
 /// - [`InvalidDisputeState`] – escrow is not in `Disputed` status.
+/// - [`Overflow`] – arithmetic overflow while computing the payout/fee.
+///
+/// # Atomicity
+/// The payout/refund transfer is performed before the status is updated. If the
+/// transfer fails, the escrow remains `Disputed` and no success event is emitted.
 pub fn resolve_dispute(
     env: &Env,
     caller: Address,
@@ -1178,10 +1249,8 @@ pub fn resolve_dispute(
         (EscrowStatus::Spent, recipient)
     };
 
-    let mut updated = entry.clone();
-    updated.status = final_status;
-    put_escrow(env, &commitment_bytes, &updated);
-
+    // Atomicity: perform the transfer BEFORE mutating status so a failed
+    // transfer leaves the escrow `Disputed` and emits no success event.
     let fee_amount = if final_status == EscrowStatus::Spent {
         let (_payout_amount, fee) = fee_router::route_payout_price_aware(
             env,
@@ -1201,6 +1270,10 @@ pub fn resolve_dispute(
         );
         0
     };
+
+    let mut updated = entry.clone();
+    updated.status = final_status;
+    put_escrow(env, &commitment_bytes, &updated);
 
     if resolve_for_owner {
         events::publish_escrow_refunded(
@@ -1363,6 +1436,11 @@ pub fn vote_for_dispute(
 /// - [`CommitmentNotFound`] – no escrow for the given commitment.
 /// - [`InvalidDisputeState`] – escrow is not in `Disputed` status.
 /// - [`InsufficientVotes`] – threshold has not been reached yet.
+/// - [`Overflow`] – arithmetic overflow while tallying votes or computing fees.
+///
+/// # Atomicity
+/// The payout/refund transfer is performed before the status is updated. If the
+/// transfer fails, the escrow remains `Disputed` and no success event is emitted.
 pub fn resolve_dispute_multi_sig(
     env: &Env,
     commitment: BytesN<32>,
@@ -1397,9 +1475,13 @@ pub fn resolve_dispute_multi_sig(
     for arbiter in entry.arbiters.iter() {
         if let Some(vote) = get_dispute_vote(env, &commitment_bytes, &arbiter) {
             if vote.resolve_for_owner {
-                votes_for_owner += 1;
+                votes_for_owner = votes_for_owner
+                    .checked_add(1)
+                    .ok_or(QuickexError::Overflow)?;
             } else {
-                votes_for_recipient += 1;
+                votes_for_recipient = votes_for_recipient
+                    .checked_add(1)
+                    .ok_or(QuickexError::Overflow)?;
             }
         }
     }
@@ -1413,10 +1495,8 @@ pub fn resolve_dispute_multi_sig(
         (EscrowStatus::Spent, recipient)
     };
 
-    let mut updated = entry.clone();
-    updated.status = final_status;
-    put_escrow(env, &commitment_bytes, &updated);
-
+    // Atomicity: perform the transfer BEFORE mutating status so a failed
+    // transfer leaves the escrow `Disputed` and emits no success event.
     let fee_amount = if final_status == EscrowStatus::Spent {
         let (_payout_amount, fee) = fee_router::route_payout_price_aware(
             env,
@@ -1435,6 +1515,10 @@ pub fn resolve_dispute_multi_sig(
         );
         0
     };
+
+    let mut updated = entry.clone();
+    updated.status = final_status;
+    put_escrow(env, &commitment_bytes, &updated);
 
     // Emit dispute resolved event
     events::publish_dispute_resolved(

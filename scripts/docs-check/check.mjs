@@ -12,7 +12,7 @@
  *
  * Usage:
  *   node scripts/docs-check/check.mjs                     # all checks
- *   node scripts/docs-check/check.mjs --only contract     # openapi|contract|mobile
+ *   node scripts/docs-check/check.mjs --only contract     # openapi|contract|mobile|env|api-keys
  *   node scripts/docs-check/check.mjs --json              # machine-readable report
  *
  * Exit codes: 0 = no errors, 1 = errors, 2 = usage error.
@@ -22,8 +22,9 @@ import { checkOpenApiStructure } from "./lib/openapi.mjs";
 import { checkContractDrift, checkGlobalPrefixInvariant } from "./lib/contract.mjs";
 import { checkMobileDocs } from "./lib/mobile.mjs";
 import { checkApiKeyScopeMatrix } from "./lib/api-keys.mjs";
+import { checkEnvPrecedence } from "./lib/env-precedence.mjs";
 
-const VALID_TARGETS = ["all", "openapi", "contract", "mobile", "api-keys"];
+const VALID_TARGETS = ["all", "openapi", "contract", "mobile", "api-keys", "env"];
 
 export function runCheck(root = REPO_ROOT, { only = "all" } = {}) {
   const checks = {};
@@ -47,6 +48,9 @@ export function runCheck(root = REPO_ROOT, { only = "all" } = {}) {
   }
   if (only === "all" || only === "api-keys") {
     checks["api-keys"] = checkApiKeyScopeMatrix(root);
+  }
+  if (only === "all" || only === "env") {
+    checks.env = checkEnvPrecedence(root);
   }
 
   const errors = Object.entries(checks).flatMap(([name, result]) =>

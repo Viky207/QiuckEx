@@ -172,4 +172,110 @@ describe('MerchantPaymentPreferencesService', () => {
       status: 503,
     });
   });
+
+  it('returns documented default hints (XLM/XLM, version 0) when no preferences are stored', async () => {
+    repository.get.mockResolvedValueOnce(null);
+    await expect(service.get(keypair.publicKey())).resolves.toEqual({
+      publicKey: keypair.publicKey(),
+      acceptedAssets: ['XLM'],
+      settlementAsset: 'XLM',
+      version: 0,
+    });
+  });
+
+  it('rejects reads and writes on mainnet before touching storage', async () => {
+    config.isTestnet = false;
+    await expect(service.get(keypair.publicKey())).rejects.toMatchObject({
+      code: 'MERCHANT_PREFERENCES_DISABLED',
+      status: 503,
+    });
+    await expect(service.save(makeRequest(), 'merchant-pref-key-0001')).rejects.toMatchObject({
+      code: 'MERCHANT_PREFERENCES_DISABLED',
+      status: 503,
+    });
+    expect(repository.get).not.toHaveBeenCalled();
+    expect(repository.save).not.toHaveBeenCalled();
+    config.isTestnet = true;
+  });
+
+  it('rejects writes when the testnet feature flag is disabled', async () => {
+    featureFlags.evaluateFlagFresh.mockResolvedValueOnce({ enabled: false });
+    await expect(service.save(makeRequest(), 'merchant-pref-key-0001')).rejects.toMatchObject({
+      code: 'MERCHANT_PREFERENCES_DISABLED',
+      status: 503,
+    });
+    expect(repository.save).not.toHaveBeenCalled();
+  });
+
+  it('rejects a missing or malformed idempotency key', async () => {
+    await expect(service.save(makeRequest(), '')).rejects.toMatchObject({
+      code: 'MERCHANT_PREFERENCES_MALFORMED',
+      status: 400,
+    });
+    await expect(service.save(makeRequest(), 'bad key with spaces')).rejects.toMatchObject({
+      code: 'MERCHANT_PREFERENCES_MALFORMED',
+      status: 400,
+    });
+    expect(repository.save).not.toHaveBeenCalled();
+  });
+
+  it('enforces the signature TTL boundary', async () => {
+    const fresh = makeRequest({ signedAt: Date.now() - 60 * 1000 });
+    repository.save.mockResolvedValueOnce({
+      status: 'saved',
+      preferences: {
+        publicKey: keypair.publicKey(),
+        acceptedAssets: ['USDC', 'XLM'],
+        settlementAsset: 'USDC',
+        version: 1,
+      },
+      replayed: false,
+    });
+    await expect(service.save(fresh, 'merchant-pref-key-0001')).resolves.toMatchObject({ version: 1 });
+
+    const expired = makeRequest({ signedAt: Date.now() - 10 * 60 * 1000 });
+    await expect(service.save(expired, 'merchant-pref-key-0002')).rejects.toMatchObject({
+      code: 'MERCHANT_PREFERENCES_EXPIRED',
+      status: 410,
+    });
+  });
+
+  it('distinguishes an idempotent replay from a version conflict', async () => {
+    const preferences = {
+      publicKey: keypair.publicKey(),
+      acceptedAssets: ['USDC', 'XLM'],
+      settlementAsset: 'USDC',
+      version: 1,
+    };
+    repository.findReplay.mockResolvedValueOnce({ status: 'replayed', preferences });
+    await expect(service.save(makeRequest(), 'merchant-pref-key-0001')).resolves.toEqual(preferences);
+    expect(repository.save).not.toHaveBeenCalled();
+
+    repository.findReplay.mockResolvedValueOnce(null);
+    repository.save.mockResolvedValueOnce({ status: 'conflict', replayed: false });
+    await expect(service.save(makeRequest(), 'merchant-pref-key-0001')).rejects.toMatchObject({
+      code: 'MERCHANT_PREFERENCES_CONFLICT',
+      status: 409,
+    });
+  });
+
+  it('records hints only and never triggers conversion or settlement side effects', async () => {
+    repository.save.mockResolvedValueOnce({
+      status: 'saved',
+      preferences: {
+        publicKey: keypair.publicKey(),
+        acceptedAssets: ['USDC', 'XLM'],
+        settlementAsset: 'USDC',
+        version: 1,
+      },
+      replayed: false,
+    });
+
+    await service.save(makeRequest(), 'merchant-pref-key-0001');
+
+    expect(repository.save).toHaveBeenCalledTimes(1);
+    expect(repository.get).not.toHaveBeenCalled();
+    expect(metrics.recordExternalCall).not.toHaveBeenCalled();
+    expect(metrics.recordError).not.toHaveBeenCalled();
+  });
 });

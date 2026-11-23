@@ -39,6 +39,7 @@ import {
   validateMemoInput,
 } from '@/lib/linkGenerator';
 import { notifyLinkCreated } from '@/lib/cacheInvalidation';
+import { createSubmissionKey } from '@/lib/submissionGuard';
 import { MerchantPaymentPreferences } from '@/hooks/merchantPaymentPreferencesApi';
 
 type ValidationErrors = Partial<
@@ -133,6 +134,11 @@ export default function Generator() {
   const apiBase = useMemo(() => getQuickexApiBase(), []);
   const { error, loading, callApi, data } = useApi<LinkMetadataSuccess>();
   const csvInputRef = useRef<HTMLInputElement | null>(null);
+  const submissionScopeRef = useRef(
+    typeof crypto !== 'undefined' && 'randomUUID' in crypto
+      ? crypto.randomUUID()
+      : `session-${Math.random().toString(36).slice(2)}`,
+  );
 
   const [form, setForm] = useState({
     amount: "",
@@ -412,6 +418,29 @@ export default function Generator() {
     return () => window.clearInterval(interval);
   }, [advancedOpen, quoteFetchedAt]);
 
+  // A stable key per payload lets a retry after a timeout reuse the original
+  // operation instead of creating a confusing duplicate link request.
+  const submissionKey = useMemo(
+    () =>
+      createSubmissionKey(
+        {
+          amount: Number(form.amount),
+          asset: recipientAssetCode,
+          destination: form.destination,
+          memo: form.memo,
+          acceptedAssets: merchantAcceptedAssets ?? [],
+        },
+        submissionScopeRef.current,
+      ),
+    [
+      form.amount,
+      form.destination,
+      form.memo,
+      recipientAssetCode,
+      merchantAcceptedAssets,
+    ],
+  );
+
   const validate = () => {
     const newErrors: ValidationErrors = {};
     const previewValidation = validatePaymentLinkPreview({
@@ -557,7 +586,10 @@ export default function Generator() {
     callApi(async () => {
       const res = await fetch(`${apiBase}/links/metadata`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": submissionKey,
+        },
         body: JSON.stringify({
           amount: Number(form.amount),
           asset: recipientAssetCode,
@@ -575,7 +607,7 @@ export default function Generator() {
         throw new Error(typeof msg === "string" ? msg : "Request failed");
       }
       return json as LinkMetadataSuccess;
-    });
+    }, submissionKey);
   };
 
   const runPreflight = async () => {
@@ -1480,6 +1512,7 @@ export default function Generator() {
                 type="button"
                 onClick={handleSubmit}
                 disabled={loading}
+                aria-busy={loading}
                 className={`flex-[2] py-6 bg-card text-foreground text-3xl font-black rounded-3xl hover:bg-surface-strong active:scale-95 transition disabled:opacity-60 ${FOCUS_RING_CLASS}`}
               >
                 {loading ? "Generating…" : "Generate Payment Link"}

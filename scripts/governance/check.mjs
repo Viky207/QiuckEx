@@ -9,7 +9,7 @@
  *
  * Usage:
  *   node scripts/governance/check.mjs                     # all checks
- *   node scripts/governance/check.mjs --only adr           # adr|assets|retention|a11y|docs
+ *   node scripts/governance/check.mjs --only adr           # adr|assets|retention|a11y|branch-protection|docs
  *   node scripts/governance/check.mjs --json               # machine-readable report
  *   node scripts/governance/check.mjs --only a11y --write-baseline
  *
@@ -20,6 +20,7 @@ import { checkAdrs } from "./lib/adr.mjs";
 import { checkAssetListingPolicy } from "./lib/assets.mjs";
 import { checkRetentionSchedule } from "./lib/retention.mjs";
 import { buildBaseline, validateI18n } from "./lib/i18n.mjs";
+import { checkBranchProtection } from "./lib/branch-protection.mjs";
 import { PATHS, REPO_ROOT, missingSections, readText } from "./lib/shared.mjs";
 
 export const GOVERNANCE_DOC_SECTIONS = [
@@ -52,6 +53,9 @@ export function runCheck(root = REPO_ROOT, { only = "all" } = {}) {
       docContent = "";
     }
     checks.a11y = validateI18n(root, { docContent });
+  }
+  if (only === "all" || only === "branch-protection") {
+    checks["branch-protection"] = checkBranchProtection(root);
   }
   if (only === "all" || only === "docs") {
     const errors = [];
@@ -103,7 +107,7 @@ function parseArgs(argv) {
   return options;
 }
 
-const VALID_TARGETS = ["all", "adr", "assets", "retention", "a11y", "docs"];
+const VALID_TARGETS = ["all", "adr", "assets", "retention", "a11y", "branch-protection", "docs"];
 
 function main() {
   const options = parseArgs(process.argv.slice(2));

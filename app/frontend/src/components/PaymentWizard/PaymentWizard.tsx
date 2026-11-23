@@ -10,6 +10,10 @@ import {
   validateAmountInput,
   validateMemoInput,
 } from "@/lib/linkGenerator";
+import {
+  createSubmissionGuard,
+  createSubmissionKey,
+} from "@/lib/submissionGuard";
 
 type StellarAsset = {
   code: string;
@@ -83,6 +87,12 @@ export function PaymentWizard({ onClose }: WizardProps) {
   const [generating, setGenerating] = useState(false);
   const [copyMessage, setCopyMessage] = useState("");
   const stepHeading = useRef<HTMLHeadingElement>(null);
+  const generationGuardRef = useRef(createSubmissionGuard<string>());
+  const submissionScopeRef = useRef(
+    typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : `session-${Math.random().toString(36).slice(2)}`,
+  );
 
   const customAssets = assets.filter(
     (asset) => asset.code !== "USDC" && asset.code !== "XLM",
@@ -224,7 +234,33 @@ export function PaymentWizard({ onClose }: WizardProps) {
           maximumFractionDigits: 2,
         })} USD`;
 
+  const submissionKey = useMemo(
+    () =>
+      createSubmissionKey(
+        {
+          amount: Number(amount),
+          asset: assetCode,
+          recipient: destination.trim(),
+          memo,
+          privacy,
+        },
+        submissionScopeRef.current,
+      ),
+    [amount, assetCode, destination, memo, privacy],
+  );
+
   const handleGenerate = async () => {
+    // The synchronous guard blocks a second click before React can re-render
+    // the disabled state; a successful result is replayed on retry.
+    const attempt = generationGuardRef.current.begin(submissionKey);
+    if (attempt.status === "duplicate") return;
+    if (attempt.status === "replay") {
+      setGeneratedLink(attempt.value);
+      setGenerationError("");
+      setStep(4);
+      return;
+    }
+
     setGenerating(true);
     setGenerationError("");
     setCopyMessage("");
@@ -241,7 +277,10 @@ export function PaymentWizard({ onClose }: WizardProps) {
       };
       const response = await fetch(`${apiBase}/links/metadata`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": submissionKey,
+        },
         body: JSON.stringify(body),
       });
       const result = await response.json();
@@ -249,11 +288,14 @@ export function PaymentWizard({ onClose }: WizardProps) {
         throw new Error(result?.message ?? result?.error ?? "Could not generate the payment link.");
       }
       const canonical = String(result.data.canonical).replace(/^\?/, "");
-      setGeneratedLink(/^https?:\/\//.test(canonical)
+      const link = /^https?:\/\//.test(canonical)
         ? canonical
-        : `${window.location.origin}/pay?${canonical}`);
+        : `${window.location.origin}/pay?${canonical}`;
+      attempt.settle({ ok: true, value: link });
+      setGeneratedLink(link);
       setStep(4);
     } catch (error) {
+      attempt.settle({ ok: false });
       setGenerationError(error instanceof Error ? error.message : "Could not generate the payment link.");
     } finally {
       setGenerating(false);
@@ -272,6 +314,7 @@ export function PaymentWizard({ onClose }: WizardProps) {
       if (!memoValidation.valid || (hasScamWarning && !scamAcknowledged) || scamLoading) return;
       setStep(3);
     } else if (step === 3) {
+      if (generating) return;
       void handleGenerate();
     }
   };

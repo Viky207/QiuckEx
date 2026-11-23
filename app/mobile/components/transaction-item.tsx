@@ -42,6 +42,13 @@ function formatAsset(asset: string): string {
   return colonIdx === -1 ? asset : asset.slice(0, colonIdx);
 }
 
+function getIssuer(asset: string): string | null {
+  const colonIdx = asset.indexOf(":");
+  if (colonIdx === -1) return null;
+  const issuer = asset.slice(colonIdx + 1).trim();
+  return issuer.length > 0 ? issuer : null;
+}
+
 function shortenHash(hash: string): string {
   return `${hash.slice(0, 6)}…${hash.slice(-6)}`;
 }
@@ -56,6 +63,10 @@ export default function TransactionItem({ item }: Props) {
   const { theme } = useTheme();
   const router = useRouter();
   const assetLabel = formatAsset(item.asset);
+  const issuer = getIssuer(item.asset);
+  // Assets without a known/verified issuer are treated as unverified so users
+  // can distinguish them from trusted assets without relying on color alone.
+  const isUnverified = issuer !== null && item.verified !== true;
   const hasAddresses = Boolean(item.source || item.destination);
   const formattedAmount = formatNumber(
     parseFloat(item.amount),
@@ -128,7 +139,39 @@ export default function TransactionItem({ item }: Props) {
               {isSent ? "Sent" : "Received"}
             </Text>
           ) : null}
+          {isUnverified ? (
+            <View
+              style={[styles.unverifiedBadge, { borderColor: theme.border }]}
+              accessible
+              accessibilityRole="text"
+              accessibilityLabel={`Unverified asset. Issuer ${issuer}`}
+            >
+              <Ionicons
+                name="alert-circle-outline"
+                size={12}
+                color={theme.textSecondary}
+              />
+              <Text
+                style={[
+                  styles.unverifiedBadgeText,
+                  { color: theme.textSecondary },
+                ]}
+              >
+                Unverified
+              </Text>
+            </View>
+          ) : null}
         </View>
+        {issuer ? (
+          <Text
+            style={[styles.issuer, { color: theme.textSecondary }]}
+            numberOfLines={1}
+            ellipsizeMode="middle"
+            accessibilityLabel={`Issuer ${issuer}`}
+          >
+            Issuer: {issuer}
+          </Text>
+        ) : null}
         {item.memo ? (
           <Text
             style={[styles.memo, { color: theme.textSecondary }]}
@@ -214,6 +257,23 @@ const styles = StyleSheet.create({
   directionLabel: {
     fontSize: 11,
     fontWeight: "600",
+  },
+  unverifiedBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 3,
+    paddingHorizontal: 6,
+    paddingVertical: 1,
+    borderRadius: 8,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  unverifiedBadgeText: {
+    fontSize: 10,
+    fontWeight: "600",
+  },
+  issuer: {
+    fontSize: 11,
+    fontFamily: "monospace",
   },
   memo: {
     fontSize: 13,

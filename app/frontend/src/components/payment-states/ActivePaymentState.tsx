@@ -2,6 +2,12 @@
 
 import { useState } from "react";
 import { SigningSummary } from "@/components/SigningSummary";
+import { SimulationCostDisclosure } from "@/components/payment-states/SimulationCostDisclosure";
+import {
+  getSimulationIdentity,
+  isFeeReserveReviewStale,
+  type PaymentSimulation,
+} from "@/lib/payment/simulationDisclosure";
 import {
   CheckCircle2,
   Loader2,
@@ -41,6 +47,8 @@ interface ActivePaymentStateProps {
   status: PaymentLinkStatus;
   onPaymentInitiated: () => void;
   onPaymentCompleted: (txHash: string) => void;
+  /** Optional simulation payload; only API-provided values are disclosed. */
+  simulation?: PaymentSimulation | null;
 }
 
 type TransactionStep = "idle" | "simulate" | "sign" | "submit" | "completed";
@@ -51,10 +59,12 @@ export function ActivePaymentState({
   status,
   onPaymentInitiated,
   onPaymentCompleted,
+  simulation,
 }: ActivePaymentStateProps) {
   const [selectedSourceAsset, setSelectedSourceAsset] = useState<string | null>(null);
   const [copyStatus, setCopyStatus] = useState<string | null>(null);
   const [showPreview, setShowPreview] = useState(false);
+  const [reviewedSimulationIdentity, setReviewedSimulationIdentity] = useState<string | null>(null);
 
   // Stepper state
   const [txStep, setTxStep] = useState<TransactionStep>("idle");
@@ -203,9 +213,21 @@ export function ActivePaymentState({
   const handlePay = async () => {
     if (!showPreview) {
       setShowPreview(true);
+      setReviewedSimulationIdentity(getSimulationIdentity(simulation));
+      setAnnouncement("Reviewing payment with the current transaction simulation.");
+      return;
+    }
+    if (reviewIsStale) {
+      setAlertAnnouncement("The simulation changed. Refresh the review before signing.");
       return;
     }
     runPipeline("simulate");
+  };
+
+  const handleRefreshReview = () => {
+    setReviewedSimulationIdentity(getSimulationIdentity(simulation));
+    setAnnouncement("Review refreshed with the current transaction simulation.");
+    setAlertAnnouncement("");
   };
 
   const handleCopyLink = async () => {
@@ -231,6 +253,8 @@ export function ActivePaymentState({
 
   const handleCancel = () => {
     setTxStep("idle");
+    setShowPreview(false);
+    setReviewedSimulationIdentity(null);
     setSimulateStatus("pending");
     setSignStatus("pending");
     setSubmitStatus("pending");
@@ -241,6 +265,7 @@ export function ActivePaymentState({
   };
 
   const hasSwapOptions = status.swapOptions && status.swapOptions.length > 0;
+  const reviewIsStale = isFeeReserveReviewStale(simulation, reviewedSimulationIdentity);
 
   const summaryDetails = [
     { label: "Destination", value: status.destinationPublicKey },
@@ -705,7 +730,7 @@ export function ActivePaymentState({
       )}
 
       {showPreview && (
-        <div className="mb-6">
+        <div className="mb-6 space-y-4">
           <SigningSummary
             action="purchase"
             amount={{ value: parseFloat(status.amount), asset: status.asset }}
@@ -718,13 +743,18 @@ export function ActivePaymentState({
                 ? {
                   value: feeValue,
                   asset: selectedSwapOption.sourceAsset,
-                  label: "Estimated Path Cost",
+                  label: "Estimated Path Cost (route)",
                   percentage: feePercentage,
                   thresholdPercent: 3,
                   isHigh: feePercentage !== undefined && feePercentage >= 3,
                 }
                 : undefined
             }
+          />
+          <SimulationCostDisclosure
+            simulation={simulation}
+            reviewedIdentity={reviewedSimulationIdentity}
+            onRefreshReview={handleRefreshReview}
           />
         </div>
       )}
@@ -733,14 +763,21 @@ export function ActivePaymentState({
         <button
           type="button"
           onClick={handlePay}
+          disabled={reviewIsStale}
           aria-label={
             showPreview
-              ? `Confirm payment to ${status.username}`
+              ? reviewIsStale
+                ? "Refresh review before payment"
+                : `Confirm payment to ${status.username}`
               : `Review payment details for ${status.username}`
           }
-          className="w-full py-4 bg-brand hover:opacity-90 rounded-xl font-bold text-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-300 focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+          className="w-full py-4 bg-brand hover:opacity-90 disabled:bg-surface-strong disabled:text-subtle disabled:cursor-not-allowed rounded-xl font-bold text-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-300 focus-visible:ring-offset-2 focus-visible:ring-offset-background"
         >
-          {showPreview ? "Open Wallet & Pay" : "Review Payment"}
+          {reviewIsStale
+            ? "Refresh Review to Continue"
+            : showPreview
+              ? "Open Wallet & Pay"
+              : "Review Payment"}
         </button>
 
         <button
