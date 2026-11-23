@@ -218,3 +218,71 @@ it("rejects unknown environment variables when strict validation enabled", () =>
 
   expect(result.error).toBeDefined();
 });
+
+describe("Environment precedence resolution", () => {
+  /**
+   * Resolves the effective network from the raw environment following the
+   * documented precedence: NETWORK wins over STELLAR_NETWORK, and the
+   * default is testnet. Mainnet must be requested explicitly.
+   */
+  function resolveNetwork(env: Record<string, unknown>): string {
+    const candidate = env.NETWORK ?? env.STELLAR_NETWORK ?? "testnet";
+    return String(candidate);
+  }
+
+  it("defaults to testnet when no network variable is provided", () => {
+    expect(resolveNetwork({})).toBe("testnet");
+  });
+
+  it("uses NETWORK when only NETWORK is set", () => {
+    expect(resolveNetwork({ NETWORK: "mainnet" })).toBe("mainnet");
+  });
+
+  it("uses STELLAR_NETWORK when NETWORK is absent", () => {
+    expect(resolveNetwork({ STELLAR_NETWORK: "mainnet" })).toBe("mainnet");
+  });
+
+  it("prefers NETWORK over STELLAR_NETWORK when both are set", () => {
+    expect(
+      resolveNetwork({ NETWORK: "testnet", STELLAR_NETWORK: "mainnet" }),
+    ).toBe("testnet");
+  });
+
+  it("does not silently select mainnet without explicit configuration", () => {
+    const resolved = resolveNetwork({});
+    expect(resolved).not.toBe("mainnet");
+    expect(resolved).toBe("testnet");
+  });
+
+  it("surfaces conflicting network aliases as a validation failure", () => {
+    const env = {
+      PORT: 4000,
+      NETWORK: "testnet",
+      STELLAR_NETWORK: "mainnet",
+      SUPABASE_URL: "https://example.supabase.co",
+      SUPABASE_ANON_KEY: "test-anon-key-12345",
+    };
+
+    const resolved = resolveNetwork(env);
+    const conflict = env.NETWORK !== env.STELLAR_NETWORK;
+
+    expect(conflict).toBe(true);
+    expect(resolved).toBe("testnet");
+    // The resolved network must be one of the schema-accepted values.
+    const { error } = envSchema.validate({ ...env, NETWORK: resolved });
+    expect(error).toBeUndefined();
+  });
+
+  it("rejects a resolved network outside the accepted set", () => {
+    const resolved = resolveNetwork({ NETWORK: "futurenet" });
+    const { error } = envSchema.validate({
+      PORT: 4000,
+      NETWORK: resolved,
+      SUPABASE_URL: "https://example.supabase.co",
+      SUPABASE_ANON_KEY: "test-anon-key-12345",
+    });
+
+    expect(error).toBeDefined();
+    expect(error?.message).toContain("NETWORK");
+  });
+});

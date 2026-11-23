@@ -22,10 +22,17 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # Cache trust boundary (#565): dependency caches are only enabled for
+      # trusted refs (pushes to main/develop). Pull requests — including those
+      # from forks — never read or write the shared cache, so an untrusted run
+      # cannot poison caches used by release or protected-branch builds.
+      # Keys are scoped to OS + package manager + lockfile hash.
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "20"
+          cache: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop') && 'pnpm' || '' }}
+          cache-dependency-path: app/backend/pnpm-lock.yaml
 
       - name: Install pnpm
         uses: pnpm/action-setup@v4
@@ -34,6 +41,9 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --no-frozen-lockfile
+
+      - name: Audit cache trust boundaries
+        run: pnpm run ci:cache-trust:audit
 
       - name: Lint
         run: pnpm run lint
@@ -146,6 +156,16 @@ jobs:
           SUPABASE_URL: https://spec-export.supabase.co
           SUPABASE_ANON_KEY: spec-export-key
 
+      # Credential rotation rehearsal (#567): exercises the rotation path with
+      # placeholder, non-secret values only. Output is redacted; no real
+      # deployment credentials are read or logged.
+      - name: Deployment credential rotation dry-run
+        run: pnpm run ci:rotate-credentials:dry-run
+        env:
+          NODE_ENV: test
+          ROTATION_DRY_RUN: "true"
+          DEPLOY_CREDENTIAL_PLACEHOLDER: "dry-run-placeholder"
+
   blue-green-fault-injection:
     name: Blue-Green Traffic Switching Fault Injection
     runs-on: ubuntu-latest
@@ -201,6 +221,9 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # Cache trust boundary (#565): this job runs on pull_request only, so
+      # dependency caching is deliberately disabled to keep untrusted runs
+      # out of the shared cache.
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:

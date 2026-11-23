@@ -1,6 +1,7 @@
 import { Module, forwardRef } from "@nestjs/common";
 import { LinksController } from "./links.controller";
 import { LinksService } from "./links.service";
+import { LinkMetadataIdempotencyService } from "./link-metadata-idempotency.service";
 import { BulkPaymentLinksController } from "./bulk-payment-links.controller";
 import { BulkPaymentLinksService } from "./bulk-payment-links.service";
 import { RecurringPaymentsController } from "./recurring-payments.controller";
@@ -37,6 +38,7 @@ import { MerchantPaymentPreferencesService } from "./merchant-payment-preference
   ],
   providers: [
     LinksService,
+    LinkMetadataIdempotencyService,
     PaymentLinkExpiryService,
     BulkPaymentLinksService,
     RecurringPaymentsService,

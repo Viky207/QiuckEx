@@ -22,6 +22,8 @@ export const PATHS = {
   controllers: "app/backend/src",
   mobileReadme: "app/mobile/README.md",
   mobileConfig: "app/mobile/app.config.ts",
+  accessibilityGuide: "docs/ACCESSIBILITY-TESTING-GUIDE.md",
+  glossary: "docs/GLOSSARY.md",
 };
 
 export function fromRoot(root, relative) {
@@ -90,4 +92,55 @@ export function missingSections(markdown, required) {
         heading.replace(/^[0-9]+\.\s*/, "") === needed.replace(/^[0-9]+\.\s*/, ""),
     );
   });
+}
+
+/**
+ * Parse glossary entries from a markdown document.
+ *
+ * Each entry is a `###` heading (the preferred term) followed by a body that
+ * must contain a "Preferred definition:" line and a canonical link, either as
+ * a markdown link (`[label](target)`) or a bare URL. Entries are returned in
+ * document order; malformed entries are reported via `problems` rather than
+ * thrown so the gate can list every issue at once.
+ *
+ * @returns {{ entries: Array<{term: string, definition: string, link: string}>, problems: string[] }}
+ */
+export function parseGlossary(markdown) {
+  const entries = [];
+  const problems = [];
+  const lines = markdown.split("\n");
+
+  let current = null;
+  const flush = () => {
+    if (!current) return;
+    const { term, body } = current;
+    const definitionLine = body.find((line) => /^\s*Preferred definition:/i.test(line));
+    const definition = definitionLine
+      ? definitionLine.replace(/^\s*Preferred definition:\s*/i, "").trim()
+      : "";
+    const linkLine = body.find((line) => /\[[^\]]+\]\([^)]+\)/.test(line) || /https?:\/\/\S+/.test(line));
+    let link = "";
+    if (linkLine) {
+      const markdownLink = linkLine.match(/\[[^\]]+\]\(([^)]+)\)/);
+      const bareUrl = linkLine.match(/https?:\/\/\S+/);
+      link = (markdownLink ? markdownLink[1] : bareUrl ? bareUrl[0] : "").trim();
+    }
+    if (!definition) problems.push(`Glossary term "${term}" is missing a preferred definition.`);
+    if (!link) problems.push(`Glossary term "${term}" is missing a canonical link.`);
+    entries.push({ term, definition, link });
+    current = null;
+  };
+
+  for (const line of lines) {
+    const heading = line.match(/^###\s+(.*?)\s*$/);
+    if (heading) {
+      flush();
+      current = { term: heading[1].trim(), body: [] };
+    } else if (current) {
+      current.body.push(line);
+    }
+  }
+  flush();
+
+  return { entries, problems };
 }

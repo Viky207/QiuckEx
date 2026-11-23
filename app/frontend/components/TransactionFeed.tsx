@@ -1,4 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
+import {
+  PAYMENT_STATUS_LABELS,
+  PAYMENT_STATUS_DESCRIPTIONS,
+  normalizePaymentStatus,
+  type PaymentStatus,
+} from '../lib/transactions';
 
 export interface Transaction {
   id: string;
@@ -12,6 +18,7 @@ export interface Transaction {
   timestamp: string;
   fee: string;
   shielded?: boolean;
+  status?: PaymentStatus | string;
 }
 
 interface TransactionFeedProps {
@@ -33,6 +40,29 @@ function relativeTime(iso: string): string {
 function truncate(value: string, head = 6, tail = 6): string {
   if (value.length <= head + tail + 3) return value;
   return `${value.slice(0, head)}…${value.slice(-tail)}`;
+}
+
+const STATUS_STYLES: Record<PaymentStatus, { icon: string; className: string }> = {
+  pending: { icon: '◷', className: 'border-amber-300 bg-amber-50 text-amber-800' },
+  confirmed: { icon: '✓', className: 'border-green-300 bg-green-50 text-green-800' },
+  expired: { icon: '⌛', className: 'border-gray-300 bg-gray-50 text-gray-700' },
+  failed: { icon: '✕', className: 'border-red-300 bg-red-50 text-red-800' },
+};
+
+function PaymentStatusBadge({ status }: { status?: PaymentStatus | string }) {
+  const normalized = normalizePaymentStatus(status);
+  const style = STATUS_STYLES[normalized];
+  return (
+    <span
+      role="status"
+      aria-live="polite"
+      aria-label={`Payment status: ${PAYMENT_STATUS_LABELS[normalized]}. ${PAYMENT_STATUS_DESCRIPTIONS[normalized]}`}
+      className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium ${style.className}`}
+    >
+      <span aria-hidden="true">{style.icon}</span>
+      <span>{PAYMENT_STATUS_LABELS[normalized]}</span>
+    </span>
+  );
 }
 
 function CopyButton({ value }: { value: string }) {
@@ -156,6 +186,9 @@ function TransactionDrawer({
             <span className="ml-2 text-xs text-gray-500">({relativeTime(transaction.timestamp)})</span>
           </DetailRow>
           <DetailRow label="Fee paid">{transaction.fee}</DetailRow>
+          <DetailRow label="Status">
+            <PaymentStatusBadge status={transaction.status} />
+          </DetailRow>
         </div>
 
         <div className="flex flex-col gap-2 border-t border-gray-200 px-4 py-3">
@@ -193,8 +226,9 @@ export default function TransactionFeed({ transactions, network = 'testnet' }: T
           onClick={() => setSelected(tx)}
           className="flex w-full items-center justify-between px-4 py-3 text-left hover:bg-gray-50"
         >
-          <span className="text-sm text-gray-900">
-            {tx.shielded ? 'Shielded' : `${tx.amount} ${tx.asset}`}
+          <span className="flex flex-col gap-1 text-sm text-gray-900">
+            <span>{tx.shielded ? 'Shielded' : `${tx.amount} ${tx.asset}`}</span>
+            <PaymentStatusBadge status={tx.status} />
           </span>
           <span className="text-xs text-gray-500">{relativeTime(tx.timestamp)}</span>
         </button>

@@ -15,16 +15,27 @@ import {
 } from './api-keys.types';
 import { decodeCursor, clampLimit } from '../common/pagination/cursor.util';
 import { PaginationMetaDto } from '../dto/pagination/pagination.dto';
+import { AuditService } from '../audit/audit.service';
 
 const BCRYPT_ROUNDS = 10;
 const DEFAULT_QUOTA = 10_000;
 const KEY_PREFIX_LENGTH = 8; // chars used for prefix display / lookup
 
+const AUDIT_ACTION_SCOPE_UPDATE = 'api_key.scopes.update';
+
+export interface UpdateScopesContext {
+  /** Identifier of the authenticated actor performing the change. */
+  actor_id?: string | null;
+}
+
 @Injectable()
 export class ApiKeysService {
   private readonly logger = new Logger(ApiKeysService.name);
 
-  constructor(private readonly repo: ApiKeysRepository) {}
+  constructor(
+    private readonly repo: ApiKeysRepository,
+    private readonly audit: AuditService,
+  ) {}
 
   // ---------------------------------------------------------------------------
   // Public API
@@ -125,6 +136,92 @@ export class ApiKeysService {
 
   async getUsage(owner_id?: string, organization_id?: string) {
     return this.repo.getUsageSummary(owner_id, organization_id);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Scope mutation (audited)
+  // ---------------------------------------------------------------------------
+
+  async updateScopes(
+    id: string,
+    scopes: ApiKeyScope[],
+    context: UpdateScopesContext = {},
+  ): Promise<ApiKeyPublic> {
+    const actorId = context.actor_id ?? null;
+    const record = await this.repo.findById(id);
+
+    if (!record) {
+      await this.recordScopeAudit({
+        actorId,
+        keyId: id,
+        before: null,
+        after: scopes,
+        outcome: 'failure',
+        reason: 'not_found',
+      });
+      throw new NotFoundException('API key not found');
+    }
+
+    const before = [...record.scopes];
+
+    if (!record.is_active) {
+      await this.recordScopeAudit({
+        actorId,
+        keyId: id,
+        before,
+        after: scopes,
+        outcome: 'failure',
+        reason: 'key_inactive',
+      });
+      throw new ForbiddenScopeMutationException('API key is not active');
+    }
+
+    const updated = await this.repo.updateScopes(id, scopes);
+
+    await this.recordScopeAudit({
+      actorId,
+      keyId: id,
+      before,
+      after: [...updated.scopes],
+      outcome: 'success',
+    });
+
+    this.logger.log(
+      `API key scopes updated: id=${id} actor=${actorId ?? 'unknown'} ` +
+        `before=[${before.join(',')}] after=[${updated.scopes.join(',')}]`,
+    );
+
+    return this.toPublic(updated);
+  }
+
+  private async recordScopeAudit(entry: {
+    actorId: string | null;
+    keyId: string;
+    before: ApiKeyScope[] | null;
+    after: ApiKeyScope[];
+    outcome: 'success' | 'failure';
+    reason?: string;
+  }): Promise<void> {
+    try {
+      await this.audit.record({
+        action: AUDIT_ACTION_SCOPE_UPDATE,
+        actor_id: entry.actorId,
+        target_type: 'api_key',
+        target_id: entry.keyId,
+        outcome: entry.outcome,
+        metadata: {
+          // Never include key_hash, key_prefix-derived secrets, or raw keys.
+          before_scopes: entry.before,
+          after_scopes: entry.after,
+          ...(entry.reason ? { reason: entry.reason } : {}),
+        },
+      });
+    } catch (err) {
+      // Audit failures must not mask the primary operation result.
+      this.logger.warn(
+        `Failed to record scope audit for key ${entry.keyId}: ${err}`,
+      );
+    }
   }
 
   // ---------------------------------------------------------------------------

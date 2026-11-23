@@ -10,6 +10,115 @@
  */
 import { PATHS, fileExists, listControllerFiles, readText, unique } from "./shared.mjs";
 
+/**
+ * Glossary drift - issue #588.
+ *
+ * The glossary is the single source of truth for product and protocol terms.
+ * A term with two preferred meanings, a canonical link that points at a file
+ * that no longer exists, or a missing requested/settlement/conversion
+ * distinction all make the glossary worse than none at all, so they fail CI.
+ */
+export const GLOSSARY_PATH = "docs/glossary.md";
+
+/** Terms whose distinction the glossary must state explicitly. */
+export const REQUIRED_DISTINCTIONS = ["requested asset", "settlement asset", "conversion"];
+
+/**
+ * Parse the glossary into entries. Each entry is a level-3 heading
+ * (`### Term`) followed by a body; the body must contain exactly one
+ * `**Preferred:**` line and at least one `**Canonical:**` link.
+ */
+export function parseGlossary(text) {
+  const entries = [];
+  const lines = text.split(/\r?\n/);
+  let current = null;
+  for (const line of lines) {
+    const heading = line.match(/^###\s+(.+?)\s*$/);
+    if (heading) {
+      if (current) entries.push(current);
+      current = { term: heading[1], body: [] };
+      continue;
+    }
+    if (current) current.body.push(line);
+  }
+  if (current) entries.push(current);
+  return entries.map((entry) => {
+    const body = entry.body.join("\n");
+    const preferred = [...body.matchAll(/^\s*\*\*Preferred:\*\*\s*(.+?)\s*$/gm)].map((m) => m[1]);
+    const canonical = [...body.matchAll(/^\s*\*\*Canonical:\*\*\s*\[[^\]]*\]\(([^)]+)\)/gm)].map(
+      (m) => m[1],
+    );
+    return { term: entry.term, preferred, canonical };
+  });
+}
+
+/** A canonical link resolves when it points at a file that exists in the repo. */
+export function canonicalLinkResolves(root, link) {
+  const target = link.split("#")[0].trim();
+  if (!target || /^[a-z]+:\/\//i.test(target)) return false;
+  return fileExists(root, target.replace(/^\.?\//, ""));
+}
+
+export function checkGlossary(root) {
+  const errors = [];
+  const warnings = [];
+  const summary = { terms: 0, preferred: 0, canonical: 0 };
+
+  if (!fileExists(root, GLOSSARY_PATH)) {
+    return { errors: [`${GLOSSARY_PATH} is missing`], warnings, summary };
+  }
+
+  const text = readText(root, GLOSSARY_PATH);
+  const entries = parseGlossary(text);
+  summary.terms = entries.length;
+
+  if (entries.length === 0) {
+    errors.push(`${GLOSSARY_PATH} defines no terms - add at least one "### Term" entry.`);
+  }
+
+  const seen = new Set();
+  for (const entry of entries) {
+    if (seen.has(entry.term.toLowerCase())) {
+      errors.push(`${GLOSSARY_PATH}: term "${entry.term}" is defined more than once.`);
+    }
+    seen.add(entry.term.toLowerCase());
+
+    if (entry.preferred.length === 0) {
+      errors.push(`${GLOSSARY_PATH}: term "${entry.term}" has no **Preferred:** definition.`);
+    } else if (entry.preferred.length > 1) {
+      errors.push(
+        `${GLOSSARY_PATH}: term "${entry.term}" has ${entry.preferred.length} **Preferred:** definitions - a term must have exactly one preferred meaning.`,
+      );
+    } else {
+      summary.preferred += 1;
+    }
+
+    if (entry.canonical.length === 0) {
+      errors.push(`${GLOSSARY_PATH}: term "${entry.term}" has no **Canonical:** link.`);
+    } else {
+      const broken = entry.canonical.filter((link) => !canonicalLinkResolves(root, link));
+      if (broken.length > 0) {
+        errors.push(
+          `${GLOSSARY_PATH}: term "${entry.term}" has a canonical link that does not resolve: ${broken.join(", ")}.`,
+        );
+      } else {
+        summary.canonical += 1;
+      }
+    }
+  }
+
+  const lower = text.toLowerCase();
+  for (const term of REQUIRED_DISTINCTIONS) {
+    if (!lower.includes(term)) {
+      errors.push(
+        `${GLOSSARY_PATH}: the distinction between requested asset, settlement asset, and conversion is incomplete - "${term}" is not defined.`,
+      );
+    }
+  }
+
+  return { errors, warnings, summary };
+}
+
 /** Controller prefixes, as declared in @Controller('...'). */
 export function extractControllerPrefixes(sources) {
   const prefixes = [];
@@ -137,3 +246,10 @@ export function checkGlobalPrefixInvariant(root) {
   }
   return { errors, warnings: [], summary: { globalPrefix: usesGlobalPrefix } };
 }
+
+/** Every contract check, in the order runCheck reports them. */
+export const CONTRACT_CHECKS = [
+  ["contract drift", checkContractDrift],
+  ["global prefix invariant", checkGlobalPrefixInvariant],
+  ["glossary", checkGlossary],
+];

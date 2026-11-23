@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import PaymentPageClient from "./PaymentPageClient";
+import { getPaymentStatusPresentation } from "@/lib/payment-status";
 import {
   fetchPaymentMeta,
   buildPaymentTitle,
@@ -52,6 +53,7 @@ export async function generateMetadata({
 
   const title = buildPaymentTitle(meta);
   const description = buildPaymentDescription(meta);
+  const statusPresentation = getPaymentStatusPresentation(meta.state);
 
   // Build dynamic OG image URL with safe params only
   const ogImageParams = new URLSearchParams({ type: "payment" });
@@ -62,8 +64,8 @@ export async function generateMetadata({
   const dynamicOgImage = `${siteUrl}/api/og?${ogImageParams.toString()}`;
 
   return {
-    title: `${title} — ${SITE_NAME}`,
-    description,
+    title: `${title} — ${statusPresentation.label} — ${SITE_NAME}`,
+    description: `${description} (${statusPresentation.label})`,
     alternates: {
       canonical: canonicalUrl,
     },
@@ -119,5 +121,9 @@ function buildFallbackMetadata(siteUrl: string, canonicalUrl: string): Metadata 
 }
 
 export default function PayPage() {
-  return <PaymentPageClient />;
+  return (
+    <div aria-live="polite" aria-atomic="true">
+      <PaymentPageClient />
+    </div>
+  );
 }

@@ -643,6 +643,35 @@ export class HealthService {
   }
 
   /**
+   * Readiness verdict for the deployment rollback path.
+   *
+   * Returns a boolean `ready` flag plus the names of any dependencies that are
+   * not healthy, so deploy scripts can decide whether to roll back and log a
+   * clear, secret-free reason. Only dependency names and their composite
+   * statuses are exposed — never error details, credentials or signing
+   * material.
+   */
+  async getReadinessVerdict(): Promise<{
+    ready: boolean;
+    status: DependencyStatus;
+    failingDependencies: string[];
+    timestamp: string;
+  }> {
+    const health = await this.getHealthStatus();
+
+    const failingDependencies = Object.entries(health.checks)
+      .filter(([, check]) => check.status !== "healthy")
+      .map(([name]) => name);
+
+    return {
+      ready: failingDependencies.length === 0,
+      status: health.status,
+      failingDependencies,
+      timestamp: health.timestamp,
+    };
+  }
+
+  /**
    * Returns public-safe status for the status page.
    * No sensitive operational details are exposed.
    * Suitable for caching and public consumption.

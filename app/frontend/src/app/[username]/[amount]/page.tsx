@@ -3,6 +3,10 @@
 import { useEffect, useState } from 'react';
 import { useParams } from 'next/navigation';
 import QRCode from 'react-qr-code';
+import {
+  PaymentStatusBadge,
+  type PaymentStatus,
+} from '@/components/PaymentStatusBadge';
 
 type ScamAlert = ScamSignal;
 
@@ -28,6 +32,7 @@ export default function PaymentPage({ scamAlert }: PaymentPageProps) {
   const [alert, setAlert] = useState<ScamAlert | null>(scamAlert ?? null);
   const [riskAccepted, setRiskAccepted] = useState(false);
   const [bannerDismissed, setBannerDismissed] = useState(false);
+  const [paymentStatus, setPaymentStatus] = useState<PaymentStatus>('pending');
   // Treat alerts without an explicit confidence as high: fail safe.
   const isHighConfidence = alert?.isScam === true && alert.confidence !== 'low';
   const blocked = isHighConfidence && !riskAccepted;
@@ -61,6 +66,33 @@ export default function PaymentPage({ scamAlert }: PaymentPageProps) {
       cancelled = true;
     };
   }, [username, scamAlert]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function fetchPaymentStatus() {
+      try {
+        const res = await fetch(
+          `/api/payments/status?username=${encodeURIComponent(
+            username
+          )}&amount=${encodeURIComponent(amount)}`
+        );
+        if (!res.ok) return;
+        const data = (await res.json()) as { status?: PaymentStatus };
+        if (!cancelled && data.status) setPaymentStatus(data.status);
+      } catch {
+        // Keep the safe default ('pending') if the status cannot be resolved.
+      }
+    }
+
+    if (username && amount) {
+      fetchPaymentStatus();
+    }
+
+    return () => {
+      cancelled = true;
+    };
+  }, [username, amount]);
 
   const handleFreighter = () => {
     if (isMobile()) {
@@ -111,9 +143,12 @@ export default function PaymentPage({ scamAlert }: PaymentPageProps) {
             </div>
           )}
 
-          <p className="text-center text-sm font-medium uppercase tracking-wide text-gray-500 md:text-left">
-            Payment request
-          </p>
+          <div className="flex flex-col items-center gap-2 md:flex-row md:items-center md:justify-between">
+            <p className="text-center text-sm font-medium uppercase tracking-wide text-gray-500 md:text-left">
+              Payment request
+            </p>
+            <PaymentStatusBadge status={paymentStatus} />
+          </div>
           <h1 className="mt-2 text-center md:text-left">
             <span className="block break-words text-5xl font-extrabold leading-tight text-gray-900 sm:text-6xl">
               {amount}

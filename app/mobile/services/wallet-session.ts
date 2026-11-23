@@ -265,3 +265,154 @@ export async function getLastWalletType(): Promise<WalletType | null> {
     return null;
   }
 }
+
+// ── Wallet Capability Matrix ─────────────────────────────────────────────────
+
+/**
+ * A single wallet operation that a connection path may or may not support.
+ * Classic payment signing and Soroban auth-entry signing are tracked as
+ * distinct capabilities so consumers never conflate the two.
+ */
+export type WalletCapability =
+  | "classic_payment_signing"
+  | "soroban_auth_entry_signing"
+  | "message_signing"
+  | "network_switching";
+
+/**
+ * How a capability behaves when it is not fully supported.
+ * - `supported`: fully available
+ * - `degraded`: available with reduced guarantees (e.g. requires manual step)
+ * - `unsupported`: not available on this connection path
+ */
+export type CapabilitySupport = "supported" | "degraded" | "unsupported";
+
+export interface CapabilityProbeResult {
+  capability: WalletCapability;
+  support: CapabilitySupport;
+  /** Human-readable note explaining any degradation or requirement */
+  note?: string;
+}
+
+export interface WalletCapabilityMatrixEntry {
+  walletType: WalletType;
+  /** Networks on which this wallet can be used */
+  networks: WalletNetwork[];
+  capabilities: Record<WalletCapability, CapabilitySupport>;
+  /** Notes keyed by capability for degraded/unsupported behaviors */
+  notes: Partial<Record<WalletCapability, string>>;
+}
+
+const ALL_CAPABILITIES: WalletCapability[] = [
+  "classic_payment_signing",
+  "soroban_auth_entry_signing",
+  "message_signing",
+  "network_switching",
+];
+
+/**
+ * Static capability probes per wallet type. These are derived from the
+ * runtime discovery of each connection path and are the single source of
+ * truth for the published compatibility matrix.
+ */
+const CAPABILITY_PROBES: Record<WalletType, CapabilityProbeResult[]> = {
+  freighter: [
+    { capability: "classic_payment_signing", support: "supported" },
+    { capability: "soroban_auth_entry_signing", support: "supported" },
+    { capability: "message_signing", support: "supported" },
+    { capability: "network_switching", support: "supported" },
+  ],
+  lobstr: [
+    { capability: "classic_payment_signing", support: "supported" },
+    {
+      capability: "soroban_auth_entry_signing",
+      support: "unsupported",
+      note: "Lobstr does not expose Soroban auth-entry signing; Soroban flows must use another wallet.",
+    },
+    { capability: "message_signing", support: "supported" },
+    {
+      capability: "network_switching",
+      support: "degraded",
+      note: "Network is fixed by the Lobstr app setting; switching requires the user to change it manually.",
+    },
+  ],
+  xbull: [
+    { capability: "classic_payment_signing", support: "supported" },
+    { capability: "soroban_auth_entry_signing", support: "supported" },
+    { capability: "message_signing", support: "supported" },
+    { capability: "network_switching", support: "supported" },
+  ],
+  albedo: [
+    { capability: "classic_payment_signing", support: "supported" },
+    {
+      capability: "soroban_auth_entry_signing",
+      support: "degraded",
+      note: "Albedo signs Soroban auth entries but requires an explicit user confirmation per entry.",
+    },
+    { capability: "message_signing", support: "supported" },
+    { capability: "network_switching", support: "supported" },
+  ],
+  demo: [
+    { capability: "classic_payment_signing", support: "supported" },
+    { capability: "soroban_auth_entry_signing", support: "supported" },
+    { capability: "message_signing", support: "supported" },
+    { capability: "network_switching", support: "supported" },
+  ],
+};
+
+const NETWORKS_BY_WALLET: Record<WalletType, WalletNetwork[]> = {
+  freighter: ["testnet", "mainnet"],
+  lobstr: ["testnet", "mainnet"],
+  xbull: ["testnet", "mainnet"],
+  albedo: ["testnet", "mainnet"],
+  demo: ["testnet"],
+};
+
+/**
+ * Builds the capability matrix entry for a wallet type from its probes.
+ * Unknown wallet types yield an empty capability set (all `unsupported`)
+ * rather than throwing, so callers can degrade gracefully.
+ */
+export function getWalletCapabilityMatrix(
+  walletType: WalletType | string,
+): WalletCapabilityMatrixEntry {
+  const probes = isValidWalletType(walletType)
+    ? CAPABILITY_PROBES[walletType]
+    : undefined;
+
+  const capabilities = {} as Record<WalletCapability, CapabilitySupport>;
+  const notes: Partial<Record<WalletCapability, string>> = {};
+
+  for (const capability of ALL_CAPABILITIES) {
+    const probe = probes?.find((p) => p.capability === capability);
+    capabilities[capability] = probe?.support ?? "unsupported";
+    if (probe?.note) notes[capability] = probe.note;
+  }
+
+  return {
+    walletType: isValidWalletType(walletType) ? walletType : ("demo" as WalletType),
+    networks: isValidWalletType(walletType) ? NETWORKS_BY_WALLET[walletType] : [],
+    capabilities,
+    notes,
+  };
+}
+
+/**
+ * Returns whether a specific capability is available (fully or degraded)
+ * for a wallet type. Unknown wallets always report `unsupported`.
+ */
+export function supportsCapability(
+  walletType: WalletType | string,
+  capability: WalletCapability,
+): boolean {
+  return getWalletCapabilityMatrix(walletType).capabilities[capability] !== "unsupported";
+}
+
+/**
+ * Builds the full published compatibility matrix across all known wallets.
+ */
+export function buildCapabilityMatrix(): WalletCapabilityMatrixEntry[] {
+  return (Object.keys(CAPABILITY_PROBES) as WalletType[]).map((walletType) =>
+    getWalletCapabilityMatrix(walletType),
+  );
+}

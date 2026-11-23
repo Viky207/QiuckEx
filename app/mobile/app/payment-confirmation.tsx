@@ -3,6 +3,7 @@ import { useLocalSearchParams, useRouter } from "expo-router";
 import React from "react";
 import { Alert, Pressable, StyleSheet, Text, View, ScrollView } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import * as Clipboard from "expo-clipboard";
 
 import { useSecurity } from "@/hooks/use-security";
 import { useSwapOptions } from "@/hooks/use-swap-options";
@@ -20,6 +21,22 @@ import { ErrorState } from "@/components/resilience/error-state";
 
 // List of assets to attempt swaps from (hardcoded whitelist matching backend)
 const SWAPPABLE_ASSETS = ["XLM", "USDC", "AQUA", "yXLM"];
+
+// High-value threshold (in destination asset units) above which the confirmation
+// hierarchy is emphasized and the explicit confirmation step is mandatory.
+export const HIGH_VALUE_THRESHOLD = 1000;
+
+// Default Stellar network for payments initiated from this screen.
+const DEFAULT_NETWORK = "Stellar Public Network";
+
+// Issuer registry for known assets. Unknown assets fall back to a placeholder so
+// the issuer is never silently omitted from the confirmation hierarchy.
+const ASSET_ISSUERS: Record<string, string> = {
+  XLM: "native",
+  USDC: "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+  AQUA: "GBNZILSTVQZ4R7IKQDGHYGY2QXL5QOFJYQMXPKWRRM5PAV7Y4M67AQUA",
+  yXLM: "GARDNV3Q7YGT4AKSDF25LT32YSCCW4EV22Y2TV3I2PU2MMXJTEDL5T55",
+};
 
 export default function PaymentConfirmationScreen() {
   const router = useRouter();
@@ -52,6 +69,22 @@ export default function PaymentConfirmationScreen() {
   // Parse amount as a number for API
   const numAmount = parseFloat(amount || "0");
 
+  // Network is passed via the link when available; default to public network.
+  const network =
+    (params as { network?: string }).network || DEFAULT_NETWORK;
+
+  // Resolve asset identity (code + issuer) for the confirmation hierarchy.
+  const assetCode = asset || "";
+  const assetIssuer = ASSET_ISSUERS[assetCode] ?? "Unknown issuer";
+
+  // High-value detection drives the emphasized confirmation hierarchy.
+  const isHighValue = Number.isFinite(numAmount) && numAmount >= HIGH_VALUE_THRESHOLD;
+
+  // Explicit confirmation state: signing is disabled until the user confirms.
+  const [detailsConfirmed, setDetailsConfirmed] = React.useState(false);
+  const [issuerExpanded, setIssuerExpanded] = React.useState(false);
+  const [networkExpanded, setNetworkExpanded] = React.useState(false);
+
   // State for multi-asset swap
   const [selectedSourceAsset, setSelectedSourceAsset] = React.useState<string | null>(null);
   const [selectedSwapPath, setSelectedSwapPath] = React.useState<PathPreviewRow | null>(null);
@@ -77,6 +110,14 @@ export default function PaymentConfirmationScreen() {
       Alert.alert(
         "Offline Mode",
         "You cannot send payments while offline. Please connect to the internet and try again."
+      );
+      return;
+    }
+
+    if (!detailsConfirmed) {
+      Alert.alert(
+        "Confirmation Required",
+        "Please review and confirm the payment details before signing.",
       );
       return;
     }
@@ -130,7 +171,16 @@ export default function PaymentConfirmationScreen() {
   };
 
   const [savingContact, setSavingContact] = React.useState(false);
-  
+
+  const handleCopy = async (value: string, label: string) => {
+    try {
+      await Clipboard.setStringAsync(value);
+      Alert.alert(`${label} copied`, value);
+    } catch {
+      Alert.alert("Copy failed", `Unable to copy ${label.toLowerCase()}.`);
+    }
+  };
+
   if (registryStatus === "incompatible" || registryStatus === "unavailable") {
     const isMissingDefinition = missingContracts.length > 0;
 
@@ -259,10 +309,106 @@ export default function PaymentConfirmationScreen() {
             </Pressable>
           </View>
 
-          <View style={[styles.card, { backgroundColor: theme.surface }]}>
+          <View
+            style={[
+              styles.card,
+              { backgroundColor: theme.surface },
+              isHighValue && {
+                borderColor: theme.status.warning,
+                borderWidth: 2,
+              },
+            ]}
+            testID="confirmation-hierarchy"
+          >
+            {isHighValue ? (
+              <Text
+                style={[styles.highValueBadge, { color: theme.status.warning }]}
+                testID="high-value-badge"
+              >
+                High-value payment — review carefully
+              </Text>
+            ) : null}
             <Row label="Recipient" value={`@${username}`} />
             <View style={[styles.divider, { backgroundColor: theme.divider }]} />
-            <Row label="Amount" value={`${amount} ${asset}`} highlight />
+            <Row label="Amount" value={`${amount} ${assetCode}`} highlight />
+            <View style={[styles.divider, { backgroundColor: theme.divider }]} />
+            <View style={styles.row}>
+              <Text style={[styles.rowLabel, { color: theme.textSecondary }]}>Asset</Text>
+              <Text
+                style={[styles.rowValue, { color: theme.textPrimary }]}
+                numberOfLines={1}
+                ellipsizeMode="middle"
+                testID="asset-identity"
+              >
+                {assetCode} · {assetIssuer}
+              </Text>
+            </View>
+            <Pressable
+              style={styles.revealButton}
+              onPress={() => setIssuerExpanded((prev) => !prev)}
+              accessibilityRole="button"
+              accessibilityLabel={issuerExpanded ? "Hide full issuer" : "Reveal full issuer"}
+              testID="reveal-issuer-button"
+            >
+              <Text style={[styles.revealText, { color: theme.buttonPrimaryBg }]}>
+                {issuerExpanded ? "Hide issuer" : "Reveal issuer"}
+              </Text>
+            </Pressable>
+            {issuerExpanded ? (
+              <View style={styles.expandedBlock} testID="issuer-expanded">
+                <Text style={[styles.expandedValue, { color: theme.textPrimary }]} selectable>
+                  {assetIssuer}
+                </Text>
+                <Pressable
+                  style={styles.revealButton}
+                  onPress={() => void handleCopy(assetIssuer, "Issuer")}
+                  accessibilityRole="button"
+                  accessibilityLabel="Copy issuer"
+                  testID="copy-issuer-button"
+                >
+                  <Text style={[styles.revealText, { color: theme.buttonPrimaryBg }]}>Copy issuer</Text>
+                </Pressable>
+              </View>
+            ) : null}
+            <View style={[styles.divider, { backgroundColor: theme.divider }]} />
+            <View style={styles.row}>
+              <Text style={[styles.rowLabel, { color: theme.textSecondary }]}>Network</Text>
+              <Text
+                style={[styles.rowValue, { color: theme.textPrimary }]}
+                numberOfLines={1}
+                ellipsizeMode="middle"
+                testID="network-identity"
+              >
+                {network}
+              </Text>
+            </View>
+            <Pressable
+              style={styles.revealButton}
+              onPress={() => setNetworkExpanded((prev) => !prev)}
+              accessibilityRole="button"
+              accessibilityLabel={networkExpanded ? "Hide full network" : "Reveal full network"}
+              testID="reveal-network-button"
+            >
+              <Text style={[styles.revealText, { color: theme.buttonPrimaryBg }]}>
+                {networkExpanded ? "Hide network" : "Reveal network"}
+              </Text>
+            </Pressable>
+            {networkExpanded ? (
+              <View style={styles.expandedBlock} testID="network-expanded">
+                <Text style={[styles.expandedValue, { color: theme.textPrimary }]} selectable>
+                  {network}
+                </Text>
+                <Pressable
+                  style={styles.revealButton}
+                  onPress={() => void handleCopy(network, "Network")}
+                  accessibilityRole="button"
+                  accessibilityLabel="Copy network"
+                  testID="copy-network-button"
+                >
+                  <Text style={[styles.revealText, { color: theme.buttonPrimaryBg }]}>Copy network</Text>
+                </Pressable>
+              </View>
+            ) : null}
             {memo ? (
               <>
                 <View style={[styles.divider, { backgroundColor: theme.divider }]} />
@@ -353,22 +499,59 @@ export default function PaymentConfirmationScreen() {
       </ScrollView>
 
       <View style={styles.actions}>
+        <Pressable
+          style={styles.confirmRow}
+          onPress={() => setDetailsConfirmed((prev) => !prev)}
+          accessibilityRole="checkbox"
+          accessibilityState={{ checked: detailsConfirmed }}
+          accessibilityLabel="Confirm payment details"
+          accessibilityHint="You must confirm the amount, asset, recipient and network before signing"
+          testID="confirm-details-checkbox"
+        >
+          <View
+            style={[
+              styles.checkbox,
+              { borderColor: theme.divider },
+              detailsConfirmed && {
+                backgroundColor: theme.buttonPrimaryBg,
+                borderColor: theme.buttonPrimaryBg,
+              },
+            ]}
+          >
+            {detailsConfirmed ? (
+              <Text style={[styles.checkboxMark, { color: theme.buttonPrimaryText }]}>✓</Text>
+            ) : null}
+          </View>
+          <Text style={[styles.confirmLabel, { color: theme.textSecondary }]}>
+            I confirm the amount, asset, recipient and network above are correct.
+          </Text>
+        </Pressable>
         <Pressable 
           style={[
             styles.primaryBtn, 
             { backgroundColor: theme.buttonPrimaryBg },
-            isConnected === false && { opacity: 0.5 }
+            (isConnected === false || !detailsConfirmed) && { opacity: 0.5 }
           ]} 
           onPress={handlePayWithWallet}
-          disabled={isConnected === false}
+          disabled={isConnected === false || !detailsConfirmed}
           accessibilityRole="button"
-          accessibilityLabel={isConnected === false ? "Offline: Payment Disabled" : "Pay with Wallet"}
+          accessibilityLabel={
+            isConnected === false
+              ? "Offline: Payment Disabled"
+              : !detailsConfirmed
+                ? "Confirm details to enable signing"
+                : "Pay with Wallet"
+          }
           accessibilityHint="Submits payment using your connected Stellar wallet"
-          accessibilityState={{ disabled: isConnected === false }}
+          accessibilityState={{ disabled: isConnected === false || !detailsConfirmed }}
           testID="pay-with-wallet-button"
         >
           <Text style={[styles.primaryBtnText, { color: theme.buttonPrimaryText }]}>
-            {isConnected === false ? "Offline: Payment Disabled" : "Pay with Wallet"}
+            {isConnected === false
+              ? "Offline: Payment Disabled"
+              : !detailsConfirmed
+                ? "Confirm details to sign"
+                : "Pay with Wallet"}
           </Text>
         </Pressable>
         <Pressable
@@ -492,6 +675,51 @@ const styles = StyleSheet.create({
   },
   rowValueHighlight: { fontSize: 20, fontWeight: "700" },
   divider: { height: 1 },
+  highValueBadge: {
+    fontSize: 13,
+    fontWeight: "700",
+    marginBottom: 8,
+  },
+  revealButton: {
+    alignSelf: "flex-start",
+    paddingVertical: 6,
+  },
+  revealText: {
+    fontSize: 13,
+    fontWeight: "700",
+  },
+  expandedBlock: {
+    paddingVertical: 6,
+  },
+  expandedValue: {
+    fontSize: 13,
+    fontFamily: "monospace",
+    flexWrap: "wrap",
+  },
+  confirmRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingVertical: 8,
+  },
+  checkbox: {
+    width: 24,
+    height: 24,
+    borderRadius: 6,
+    borderWidth: 2,
+    alignItems: "center",
+    justifyContent: "center",
+    marginRight: 12,
+  },
+  checkboxMark: {
+    fontSize: 16,
+    fontWeight: "700",
+    lineHeight: 18,
+  },
+  confirmLabel: {
+    flex: 1,
+    fontSize: 14,
+    lineHeight: 20,
+  },
   swapSection: {
     marginBottom: 20,
   },

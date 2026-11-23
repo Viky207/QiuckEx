@@ -10,7 +10,7 @@ and this project adheres to the versioning policy described in
 
 ### Added
 
-- Nothing yet.
+- Optional `Idempotency-Key` header for `POST /links/metadata`: concurrent requests with the same key and payload share one generation, and repeated requests replay the original response for five minutes; a conflicting payload returns `409 IDEMPOTENCY_CONFLICT` (`400 INVALID_IDEMPOTENCY_KEY` for a malformed key). Existing callers that omit the header are unaffected.
 
 ### Changed
 
@@ -26,7 +26,7 @@ and this project adheres to the versioning policy described in
 
 ### Fixed
 
-- Nothing yet.
+- Web and mobile link generators now ignore duplicate clicks/taps while a metadata request is in flight, and keep form values when a request fails.
 
 ### Security
 

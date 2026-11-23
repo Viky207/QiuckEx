@@ -16,6 +16,12 @@ When someone pays, the funds go **directly to your own Stellar wallet**. QuickEx
 
 ---
 
+## Why does Generate briefly stop responding, and is it safe to click again?
+
+The Generate button is disabled while QuickEx is preparing your link. Extra clicks or taps during that moment are ignored, so you will not create several confusing requests. If the request fails or times out, your amount, asset, destination, and memo stay in the form — just press Generate again. QuickEx remembers the result of a successful request for a few minutes, so retrying after a slow response shows the same link rather than creating a duplicate.
+
+---
+
 ## How do I claim a username? Can I change it?
 
 1. Open QuickEx and connect your Stellar wallet.

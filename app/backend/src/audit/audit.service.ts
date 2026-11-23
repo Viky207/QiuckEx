@@ -141,6 +141,29 @@ export class AuditService {
     }
   }
 
+  async logScopeChange(params: {
+    actor: string;
+    keyId: string;
+    before: string[];
+    after: string[];
+    success: boolean;
+    requestId?: string;
+    reason?: string;
+  }): Promise<void> {
+    const { actor, keyId, before, after, success, requestId, reason } = params;
+    const metadata: Record<string, unknown> = {
+      keyId,
+      beforeScopes: [...before],
+      afterScopes: [...after],
+      outcome: success ? 'success' : 'failure',
+    };
+    if (reason) {
+      metadata.reason = reason;
+    }
+
+    await this.log(actor, 'api_key.scopes.update', keyId, metadata, requestId);
+  }
+
   async query(dto: QueryAuditLogsDto) {
     let result = await this.readLogs();
 

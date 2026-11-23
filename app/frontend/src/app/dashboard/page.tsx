@@ -16,7 +16,6 @@ import {
 import {
   appendUniqueActivityItems,
   fetchActivityFeed,
-  type ActivityFeedItem,
   type ActivityFeedResponse,
 } from "@/hooks/activityFeedApi";
 import {
@@ -28,20 +27,13 @@ import { PaymentHistoryFilters } from "@/components/PaymentHistoryFilters";
 import { cacheInvalidator } from "@/lib/cacheInvalidation";
 import { PaymentWizard } from "@/components/PaymentWizard/PaymentWizard";
 import { DashboardSkeleton } from "@/components/skeletons/Skeletons";
+import {
+  PaymentStatusBadge,
+  toPaymentStatus,
+} from "@/components/PaymentStatusBadge";
 
 function toAnchorId(prefix: string, value: string) {
   return `${prefix}-${value.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
-}
-
-function getStatusClasses(status: ActivityFeedItem["status"]) {
-  switch (status) {
-    case "Pending":
-      return "border-amber-300/40 bg-amber-400/10 text-warning";
-    case "Settled":
-      return "border-emerald-300/40 bg-emerald-400/10 text-success";
-    default:
-      return "border-slate-300/40 bg-slate-400/10 text-muted";
-  }
 }
 
 function shortAddress(key: string): string {
@@ -394,6 +386,19 @@ function DashboardContent() {
             {statusMessage ??
               "Notifications can jump you directly into payments, active bids, and listing updates."}
           </p>
+          <p aria-live="polite" className="sr-only" data-testid="payment-status-announcer">
+            {filteredActivityItems.length > 0
+              ? `Showing ${filteredActivityItems.length} payment${
+                  filteredActivityItems.length === 1 ? "" : "s"
+                }. Statuses: ${Array.from(
+                  new Set(
+                    filteredActivityItems.map((item) =>
+                      toPaymentStatus(item.status),
+                    ),
+                  ),
+                ).join(", ")}.`
+              : ""}
+          </p>
           {wizardOpen ? (
             <PaymentWizard onClose={() => setWizardOpen(false)} />
           ) : null}
@@ -685,13 +690,9 @@ function DashboardContent() {
                                       No memo
                                     </span>
                                   )}
-                                  <span
-                                    className={`inline-flex w-fit items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.24em] ${getStatusClasses(
-                                      item.status,
-                                    )}`}
-                                  >
-                                    {item.status}
-                                  </span>
+                                  <PaymentStatusBadge
+                                    status={toPaymentStatus(item.status)}
+                                  />
                                 </div>
                               </td>
                               <td className="px-6 py-6 sm:px-10">

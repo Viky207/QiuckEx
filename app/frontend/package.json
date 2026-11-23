@@ -8,6 +8,7 @@
     "start": "next start",
     "lint": "eslint",
     "test": "echo 'Skipping frontend checks in backend release pipeline' || exit 0",
+    "test:payment-review": "vitest run __tests__/simulationDisclosure.test.ts __tests__/SimulationCostDisclosure.test.tsx",
     "test:telemetry": "vitest run __tests__/errorReporter.smoke.test.ts",
     "test:visual": "playwright test --config=playwright.config.ts",
     "test:visual:update": "playwright test --config=playwright.config.ts --update-snapshots",

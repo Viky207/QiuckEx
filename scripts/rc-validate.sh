@@ -39,6 +39,12 @@
 #                    the freeze was cleared and re-armed after the run began,
 #                    the generation no longer matches and the run is refused:
 #                    clearing a freeze resumes only new eligible runs.
+#   RC_IMAGE_DIGESTS comma-separated `repo@sha256:...` release image digests
+#   RC_IMAGE_REPO    expected source repository for provenance verification
+#   COSIGN_PRIVATE_KEY / COSIGN_KEY  signing key for the sign-images stage
+#                    (never logged)
+#   COSIGN_PUBLIC_KEY_FILE  public key used by verify-images (default cosign.pub)
+#   RC_PROVENANCE_POLICY    cosign attestation policy file
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
 
@@ -54,7 +60,6 @@ RC_BASE_REF="${RC_BASE_REF:-origin/main}"
 RC_FREEZE_FILE="${RC_FREEZE_FILE:-.deploy-freeze.json}"
 RC_FREEZE_OVERRIDE="${RC_FREEZE_OVERRIDE:-0}"
 RC_FREEZE_GENERATION="${RC_FREEZE_GENERATION:-}"
-=======
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -64,7 +69,7 @@ while [ $# -gt 0 ]; do
     --allow-skip) ALLOW_SKIP=1 ;;
     --stage)      shift; STAGE_FILTER="${1:-}" ;;
     --stage=*)    STAGE_FILTER="${1#*=}" ;;
-    -h|--help)    sed -n '2,36p' "$0"; exit 0 ;;
+    -h|--help)    sed -n '2,44p' "$0"; exit 0 ;;
     *)            echo "Unknown option: $1" >&2; exit 2 ;;
   esac
   shift
@@ -88,6 +93,8 @@ FULL_STAGES=(
   "fuzz|pnpm|1|Property-based suites (fast-check)"
   "contract|cargo|1|cargo fmt + clippy + test in app/contract"
   "openapi|pnpm|0|Committed openapi.json matches the code"
+  "sign-images|cosign|1|Release image digests signed with cosign"
+  "verify-images|cosign|0|Image signatures and provenance verified before deploy"
   "capability-map|git|1|Capability-map rows changed alongside behavior"
   "deploy-freeze|-|0|No active deploy freeze blocks promotion"
 )
@@ -382,6 +389,77 @@ for stage in "${STAGES[@]}"; do
         ok=1; detail="openapi.json matches the code"
       else
         detail="FAILED: openapi.json diverged (see /tmp/rc-openapi.log)"
+      fi
+      ;;
+
+    sign-images)
+      # Signs the release image digest(s) with cosign. The signing key is read
+      # from COSIGN_PRIVATE_KEY (or COSIGN_KEY) and is never echoed: cosign
+      # itself writes to /tmp/rc-sign.log, and only a redacted summary is
+      # surfaced. RC_IMAGE_DIGESTS is a comma-separated list of
+      # `repo@sha256:...` references; RC_IMAGE_REPO names the source repo.
+      if [ -z "${RC_IMAGE_DIGESTS:-}" ]; then
+        detail="FAILED: RC_IMAGE_DIGESTS is unset (nothing to sign)"
+      elif [ -z "${COSIGN_PRIVATE_KEY:-}${COSIGN_KEY:-}" ]; then
+        detail="FAILED: no signing key in COSIGN_PRIVATE_KEY/COSIGN_KEY"
+      else
+        sign_ok=1
+        IFS=',' read -ra DIGESTS <<< "$RC_IMAGE_DIGESTS"
+        for digest in "${DIGESTS[@]}"; do
+          digest="$(echo "$digest" | tr -d '[:space:]')"
+          [ -z "$digest" ] && continue
+          if ! cosign sign --yes --key env://COSIGN_PRIVATE_KEY \
+               "$digest" >/tmp/rc-sign.log 2>&1; then
+            sign_ok=0
+            break
+          fi
+        done
+        if [ "$sign_ok" -eq 1 ]; then
+          ok=1; detail="${#DIGESTS[@]} digest(s) signed"
+        else
+          detail="FAILED: cosign sign (see /tmp/rc-sign.log)"
+        fi
+      fi
+      ;;
+
+    verify-images)
+      # Deployment gate: every expected digest must carry a valid signature and
+      # a provenance attestation from the expected source repo. An unsigned or
+      # mismatched digest blocks the candidate. Verification output is written
+      # to /tmp/rc-verify.log; failures are surfaced in the stage detail and the
+      # workflow summary via record().
+      if [ -z "${RC_IMAGE_DIGESTS:-}" ]; then
+        detail="FAILED: RC_IMAGE_DIGESTS is unset (nothing to verify)"
+      elif [ -z "${RC_IMAGE_REPO:-}" ]; then
+        detail="FAILED: RC_IMAGE_REPO is unset (provenance source unknown)"
+      else
+        verify_ok=1
+        verify_reason=""
+        IFS=',' read -ra DIGESTS <<< "$RC_IMAGE_DIGESTS"
+        for digest in "${DIGESTS[@]}"; do
+          digest="$(echo "$digest" | tr -d '[:space:]')"
+          [ -z "$digest" ] && continue
+          if ! cosign verify --key "${COSIGN_PUBLIC_KEY_FILE:-cosign.pub}" \
+               "$digest" >/tmp/rc-verify.log 2>&1; then
+            verify_ok=0
+            verify_reason="signature missing or invalid for $digest"
+            break
+          fi
+          if ! cosign verify-attestation \
+               --key "${COSIGN_PUBLIC_KEY_FILE:-cosign.pub}" \
+               --type slsaprovenance \
+               --policy "${RC_PROVENANCE_POLICY:-scripts/cosign-provenance.policy}" \
+               "$digest" >/tmp/rc-verify-attestation.log 2>&1; then
+            verify_ok=0
+            verify_reason="provenance mismatch for $digest (expected source $RC_IMAGE_REPO)"
+            break
+          fi
+        done
+        if [ "$verify_ok" -eq 1 ]; then
+          ok=1; detail="${#DIGESTS[@]} digest(s) verified (signature + provenance)"
+        else
+          detail="FAILED: $verify_reason (see /tmp/rc-verify.log)"
+        fi
       fi
       ;;
 
