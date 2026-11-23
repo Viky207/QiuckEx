@@ -22,10 +22,17 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
+      # Cache trust boundary (#565): dependency caches are only enabled for
+      # trusted refs (pushes to main/develop). Pull requests — including those
+      # from forks — never read or write the shared cache, so an untrusted run
+      # cannot poison caches used by release or protected-branch builds.
+      # Keys are scoped to OS + package manager + lockfile hash.
       - name: Setup Node.js
         uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
         with:
           node-version: "20"
+          cache: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop') && 'pnpm' || '' }}
+          cache-dependency-path: app/backend/pnpm-lock.yaml
 
       - name: Install pnpm
         uses: pnpm/action-setup@fe02b34f77f8bc703788d5817da081398fad5dd2 # v4.0.0
@@ -34,6 +41,9 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --no-frozen-lockfile
+
+      - name: Audit cache trust boundaries
+        run: pnpm run ci:cache-trust:audit
 
       - name: Lint
         run: pnpm run lint
@@ -122,6 +132,16 @@ jobs:
       - name: Horizon-Backed Endpoints Performance Regression Tests
         run: pnpm run test:perf:horizon
 
+      # Credential rotation rehearsal (#567): exercises the rotation path with
+      # placeholder, non-secret values only. Output is redacted; no real
+      # deployment credentials are read or logged.
+      - name: Deployment credential rotation dry-run
+        run: pnpm run ci:rotate-credentials:dry-run
+        env:
+          NODE_ENV: test
+          ROTATION_DRY_RUN: "true"
+          DEPLOY_CREDENTIAL_PLACEHOLDER: "dry-run-placeholder"
+
   payment-lifecycle-integration:
     name: Payment Lifecycle Integration Tests
     runs-on: ubuntu-latest
@@ -137,6 +157,9 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
+      # Cache trust boundary (#565): this job runs on pull_request only, so
+      # dependency caching is deliberately disabled to keep untrusted runs
+      # out of the shared cache.
       - name: Setup Node.js
         uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
         with:

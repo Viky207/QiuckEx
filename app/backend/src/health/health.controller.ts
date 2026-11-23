@@ -59,6 +59,28 @@ export class HealthController {
     return res.status(200).json(result);
   }
 
+  @Get("health/post-deploy")
+  @ApiOperation({
+    summary: "Post-deploy verification check",
+    description:
+      "Lightweight endpoint polled by the deployment script after a rollout. Returns 200 only when all dependencies are healthy; otherwise 503 with the names of failing dependencies. Used to trigger automated rollback.",
+  })
+  @ApiResponse({ status: 200, type: ReadyResponseDto })
+  @ApiResponse({
+    status: 503,
+    type: ReadyResponseDto,
+    description: "One or more dependencies unhealthy; rollback should be triggered",
+  })
+  async getPostDeployVerification(@Res() res: Response) {
+    const result = await this.healthService.getReadinessStatus();
+
+    if (!result.ready) {
+      return res.status(503).json(result);
+    }
+
+    return res.status(200).json(result);
+  }
+
   @Get("status")
   @Throttle({ default: { limit: 5, ttl: 60000 } }) // 5 requests per minute for public status
   @ApiOperation({

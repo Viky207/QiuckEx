@@ -9,7 +9,9 @@
  */
 
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { SchedulerRegistry } from '@nestjs/schedule';
 import { JobRegistry } from './job-registry.service';
+import { JobRetentionService } from './job-retention.service';
 import { JobType } from './types';
 import { 
   WebhookDeliveryHandler, 
@@ -32,6 +34,9 @@ import {
 export class JobQueueInitializer implements OnModuleInit {
   private readonly logger = new Logger(JobQueueInitializer.name);
 
+  /** Name of the periodic retention cleanup interval registered with SchedulerRegistry. */
+  static readonly RETENTION_CLEANUP_INTERVAL_NAME = 'job-retention-cleanup';
+
   constructor(
     private readonly registry: JobRegistry,
     private readonly webhookDeliveryHandler: WebhookDeliveryHandler,
@@ -41,6 +46,8 @@ export class JobQueueInitializer implements OnModuleInit {
     private readonly stellarReconnectHandler: StellarReconnectHandler,
     private readonly templateExecutionHandler: TemplateExecutionHandler,
     private readonly derivedRecordRepairHandler: DerivedRecordRepairHandler,
+    private readonly jobRetentionService: JobRetentionService,
+    private readonly schedulerRegistry: SchedulerRegistry,
   ) {}
 
   /**
@@ -151,5 +158,77 @@ export class JobQueueInitializer implements OnModuleInit {
     );
 
     this.logger.log('Job handler registration complete');
+
+    this.scheduleRetentionCleanup();
+  }
+
+  /**
+   * Schedule the periodic retention cleanup for terminal jobs.
+   *
+   * The cleanup runs on a fixed interval derived from the configured retention
+   * policy. Each run is idempotent and paginated, and only deletes terminal
+   * (completed/failed/cancelled) jobs that are older than the retention window
+   * and not flagged as audit-required. Active jobs are never touched.
+   */
+  private scheduleRetentionCleanup(): void {
+    const config = this.jobRetentionService.getConfig();
+
+    if (!config.enabled) {
+      this.logger.log('Job retention cleanup is disabled; skipping scheduling');
+      return;
+    }
+
+    const intervalMs = config.cleanupIntervalMs;
+
+    const interval = setInterval(() => {
+      void this.runRetentionCleanup();
+    }, intervalMs);
+
+    // Do not keep the Node.js event loop alive solely for cleanup.
+    if (typeof interval.unref === 'function') {
+      interval.unref();
+    }
+
+    try {
+      this.schedulerRegistry.addInterval(
+        JobQueueInitializer.RETENTION_CLEANUP_INTERVAL_NAME,
+        interval,
+      );
+    } catch (error) {
+      // A duplicate registration should not prevent startup.
+      this.logger.warn(
+        `Failed to register retention cleanup interval: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+
+    this.logger.log(
+      `Scheduled job retention cleanup every ${intervalMs}ms ` +
+        `(retention window ${config.retentionMs}ms, batch size ${config.batchSize})`,
+    );
+  }
+
+  /**
+   * Execute a single retention cleanup pass.
+   *
+   * Exposed for tests and manual invocation. Failures are logged and swallowed
+   * so a transient error cannot crash the scheduler.
+   */
+  async runRetentionCleanup(): Promise<void> {
+    try {
+      const result = await this.jobRetentionService.cleanupExpiredJobs();
+      if (result.deletedCount > 0) {
+        this.logger.log(
+          `Job retention cleanup removed ${result.deletedCount} terminal job(s)`,
+        );
+      }
+    } catch (error) {
+      this.logger.error(
+        `Job retention cleanup failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
   }
 }

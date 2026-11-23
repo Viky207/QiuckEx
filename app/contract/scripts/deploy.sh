@@ -43,6 +43,13 @@ REQUIRE_ATTESTATION="${REQUIRE_ATTESTATION:-0}"
 ATTESTATION_REPO="${ATTESTATION_REPO:-}"
 ATTESTATION_SIGNER_WORKFLOW="${ATTESTATION_SIGNER_WORKFLOW:-}"
 GH_BIN="${GH_BIN:-gh}"
+# Post-deploy readiness polling and automated rollback controls.
+HEALTH_CHECK_ATTEMPTS="${HEALTH_CHECK_ATTEMPTS:-5}"
+HEALTH_CHECK_INTERVAL="${HEALTH_CHECK_INTERVAL:-3}"
+ROLLBACK_ENABLED="${ROLLBACK_ENABLED:-1}"
+# Optional pre-deploy state file capturing the current deployment slot and
+# image digest. When present, it is used to restore the prior healthy revision.
+PRIOR_STATE_FILE="${PRIOR_STATE_FILE:-}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -61,6 +68,10 @@ while [[ $# -gt 0 ]]; do
     --require-attestation) REQUIRE_ATTESTATION=1; shift ;;
     --attestation-repo) ATTESTATION_REPO="$2"; shift 2 ;;
     --attestation-signer-workflow) ATTESTATION_SIGNER_WORKFLOW="$2"; shift 2 ;;
+    --prior-state) PRIOR_STATE_FILE="$2"; shift 2 ;;
+    --health-attempts) HEALTH_CHECK_ATTEMPTS="$2"; shift 2 ;;
+    --health-interval) HEALTH_CHECK_INTERVAL="$2"; shift 2 ;;
+    --no-rollback) ROLLBACK_ENABLED=0; shift ;;
     *) echo "unknown argument: $1" >&2; exit 1 ;;
   esac
 done
@@ -232,14 +243,111 @@ METADATA=$($STELLAR_BIN contract invoke \
   get_deployment_metadata 2>&1)
 echo "$METADATA"
 
-echo "==> Health check"
-HEALTH=$($STELLAR_BIN contract invoke \
-  --id "$CONTRACT_ID" \
-  --source "$SOURCE" \
-  --network "$NETWORK" \
-  -- \
-  health_check 2>&1)
-echo "Health: $HEALTH"
+# ── Capture prior deployment slot / image digest ────────────────────────────
+# The prior state file records the deployment slot and image digest of the
+# last known-healthy revision. It is required to perform an automated
+# rollback; without it we can still deploy but cannot restore a prior revision.
+PRIOR_SLOT=""
+PRIOR_DIGEST=""
+if [[ -n "$PRIOR_STATE_FILE" ]]; then
+  if [[ ! -f "$PRIOR_STATE_FILE" ]]; then
+    echo "error: prior state file not found: $PRIOR_STATE_FILE" >&2
+    exit 1
+  fi
+  PRIOR_SLOT=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("slot",""))' "$PRIOR_STATE_FILE")
+  PRIOR_DIGEST=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("image_digest",""))' "$PRIOR_STATE_FILE")
+  echo "Prior slot:    ${PRIOR_SLOT:-<none>}"
+  echo "Prior digest:  ${PRIOR_DIGEST:-<none>}"
+fi
+
+# ── Post-deploy readiness check with automated rollback ─────────────────────
+# Polls the readiness endpoint (health_check) up to HEALTH_CHECK_ATTEMPTS times.
+# On failure, restores the prior revision captured above (scoped to this
+# deployment), records old/new digests, and exits non-zero if rollback
+# verification also fails.
+readiness_ok=0
+HEALTH=""
+attempt=1
+while [[ "$attempt" -le "$HEALTH_CHECK_ATTEMPTS" ]]; do
+  echo "==> Health check (attempt ${attempt}/${HEALTH_CHECK_ATTEMPTS})"
+  if HEALTH=$($STELLAR_BIN contract invoke \
+      --id "$CONTRACT_ID" \
+      --source "$SOURCE" \
+      --network "$NETWORK" \
+      -- \
+      health_check 2>&1); then
+    echo "Health: $HEALTH"
+    readiness_ok=1
+    break
+  fi
+  echo "Health check failed: $HEALTH" >&2
+  if [[ "$attempt" -lt "$HEALTH_CHECK_ATTEMPTS" ]]; then
+    sleep "$HEALTH_CHECK_INTERVAL"
+  fi
+  attempt=$((attempt + 1))
+done
+
+if [[ "$readiness_ok" != "1" ]]; then
+  echo "error: post-deploy health check failed after ${HEALTH_CHECK_ATTEMPTS} attempts" >&2
+  if [[ "$ROLLBACK_ENABLED" != "1" ]]; then
+    echo "error: rollback disabled (--no-rollback); leaving failed deployment $CONTRACT_ID in place" >&2
+    exit 1
+  fi
+  if [[ -z "$PRIOR_SLOT" || -z "$PRIOR_DIGEST" ]]; then
+    echo "error: cannot roll back: no prior deployment slot/digest captured (pass --prior-state)" >&2
+    exit 1
+  fi
+
+  echo "==> Rolling back failed deployment $CONTRACT_ID to prior revision"
+  echo "    old digest (failed):  $WASM_SHA"
+  echo "    new digest (restore): $PRIOR_DIGEST"
+  echo "    target slot:          $PRIOR_SLOT"
+
+  # Restore the prior revision, scoped to the failed deployment's contract ID.
+  if ! ROLLBACK_OUTPUT=$($STELLAR_BIN contract deploy \
+      --wasm-hash "$PRIOR_DIGEST" \
+      --source "$SOURCE" \
+      --network "$NETWORK" 2>&1); then
+    echo "ROLLBACK FAILED: could not restore prior revision $PRIOR_DIGEST" >&2
+    echo "$ROLLBACK_OUTPUT" >&2
+    exit 1
+  fi
+  echo "$ROLLBACK_OUTPUT"
+
+  # Verify the rollback by re-running the readiness check against the restored
+  # revision. If verification fails, fail loudly.
+  echo "==> Verifying rollback"
+  rollback_ok=0
+  attempt=1
+  while [[ "$attempt" -le "$HEALTH_CHECK_ATTEMPTS" ]]; do
+    if ROLLBACK_HEALTH=$($STELLAR_BIN contract invoke \
+        --id "$CONTRACT_ID" \
+        --source "$SOURCE" \
+        --network "$NETWORK" \
+        -- \
+        health_check 2>&1); then
+      echo "Rollback health: $ROLLBACK_HEALTH"
+      rollback_ok=1
+      break
+    fi
+    echo "Rollback health check failed: $ROLLBACK_HEALTH" >&2
+    if [[ "$attempt" -lt "$HEALTH_CHECK_ATTEMPTS" ]]; then
+      sleep "$HEALTH_CHECK_INTERVAL"
+    fi
+    attempt=$((attempt + 1))
+  done
+
+  if [[ "$rollback_ok" != "1" ]]; then
+    echo "ROLLBACK VERIFICATION FAILED: prior revision $PRIOR_DIGEST is not healthy" >&2
+    echo "  failed deployment: $CONTRACT_ID" >&2
+    echo "  old digest:        $WASM_SHA" >&2
+    echo "  new digest:        $PRIOR_DIGEST" >&2
+    exit 1
+  fi
+
+  echo "Rollback complete: restored $PRIOR_DIGEST (was $WASM_SHA)"
+  exit 1
+fi
 
 echo "==> Fetching current ledger sequence"
 LEDGER_OUTPUT=$($STELLAR_BIN ledger current --network "$NETWORK" 2>&1)
@@ -320,3 +428,7 @@ echo "WASM Hash:     0x${WASM_SHA}"
 echo "Admin:         $ADMIN"
 echo "Operator:      $SOURCE"
 echo "Manifest:      $DEPLOY_DIR/deployment-manifest.json"
+if [[ -n "$PRIOR_DIGEST" ]]; then
+  echo "Prior digest:  $PRIOR_DIGEST"
+fi
+echo "New digest:    $WASM_SHA"

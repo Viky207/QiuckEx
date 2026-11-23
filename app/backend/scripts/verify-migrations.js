@@ -16,6 +16,103 @@ const path = require('path');
 const MIGRATIONS_DIR = path.join(__dirname, '..', 'supabase', 'migrations');
 const ROLLBACK_DIR = path.join(MIGRATIONS_DIR, 'rollback');
 
+// Advisory lock contract: production migration execution must be serialized
+// behind a database-backed lock so two concurrent release runs cannot apply
+// the same migration set simultaneously. The runner asserts that the lock is
+// acquired before any forward phase and released after all phases complete.
+const MIGRATION_LOCK_KEY = 'quickex:migrations:advisory-lock';
+const LOCK_ACQUIRE_PHASE = 'acquire';
+const LOCK_RELEASE_PHASE = 'release';
+const LOCK_PHASES = [LOCK_ACQUIRE_PHASE, LOCK_RELEASE_PHASE];
+
+/**
+ * Tracks advisory-lock state across the verification phases and enforces the
+ * acquire-before-forward / release-after-all contract.
+ */
+function createLockTracker() {
+  const events = [];
+  let held = false;
+
+  return {
+    acquire(phase) {
+      if (held) {
+        throw new Error(`Migration lock already held; cannot re-acquire before phase "${phase}"`);
+      }
+      held = true;
+      events.push({ type: LOCK_ACQUIRE_PHASE, phase });
+    },
+    release(phase) {
+      if (!held) {
+        throw new Error(`Migration lock not held; cannot release after phase "${phase}"`);
+      }
+      held = false;
+      events.push({ type: LOCK_RELEASE_PHASE, phase });
+    },
+    isHeld() {
+      return held;
+    },
+    events() {
+      return [...events];
+    },
+  };
+}
+
+/**
+ * Asserts the recorded lock events satisfy the serialization contract:
+ *  - exactly one acquire, occurring before any forward phase
+ *  - exactly one release, occurring after the last phase
+ *  - no phase runs while the lock is not held
+ */
+function assertLockContract(lockEvents, phases) {
+  const acquires = lockEvents.filter((e) => e.type === LOCK_ACQUIRE_PHASE);
+  const releases = lockEvents.filter((e) => e.type === LOCK_RELEASE_PHASE);
+
+  if (acquires.length !== 1) {
+    throw new Error(`Expected exactly 1 lock acquire event, found ${acquires.length}`);
+  }
+  if (releases.length !== 1) {
+    throw new Error(`Expected exactly 1 lock release event, found ${releases.length}`);
+  }
+
+  const acquireIndex = lockEvents.indexOf(acquires[0]);
+  const releaseIndex = lockEvents.indexOf(releases[0]);
+
+  if (acquireIndex > releaseIndex) {
+    throw new Error('Migration lock released before it was acquired');
+  }
+
+  const firstPhaseIndex = lockEvents.findIndex((e) => e.type === 'phase');
+  if (firstPhaseIndex === -1) {
+    throw new Error('No migration phases recorded; cannot verify lock coverage');
+  }
+  if (acquireIndex > firstPhaseIndex) {
+    throw new Error('Migration phase ran before the advisory lock was acquired');
+  }
+
+  const lastPhaseIndex = lockEvents.map((e) => e.type).lastIndexOf('phase');
+  if (releaseIndex < lastPhaseIndex) {
+    throw new Error('Migration lock released before all phases completed');
+  }
+
+  // Every phase must be bracketed by the held lock.
+  for (let i = 0; i < lockEvents.length; i++) {
+    const event = lockEvents[i];
+    if (event.type !== 'phase') continue;
+    const acquireBefore = lockEvents.slice(0, i).some((e) => e.type === LOCK_ACQUIRE_PHASE);
+    const releaseBefore = lockEvents.slice(0, i).some((e) => e.type === LOCK_RELEASE_PHASE);
+    if (!acquireBefore || releaseBefore) {
+      throw new Error(`Phase "${event.phase}" executed without holding the migration lock`);
+    }
+  }
+
+  const expectedPhases = phases.length;
+  const recordedPhases = lockEvents.filter((e) => e.type === 'phase').length;
+  if (recordedPhases !== expectedPhases) {
+    throw new Error(`Expected ${expectedPhases} phases under lock, recorded ${recordedPhases}`);
+  }
+}
+=======
+
 function parseMigrationFile(filename) {
   if (!filename.endsWith('.sql') || filename.includes('.test.')) {
     return null;
@@ -131,6 +228,24 @@ async function verifyMigrations() {
 
   console.log(`Discovered ${migrations.length} database migration files in sequential order:\n`);
 
+  const lock = createLockTracker();
+  const lockEvents = [];
+  const recordPhase = (phase) => {
+    if (!lock.isHeld()) {
+      throw new Error(`Refusing to run migration phase "${phase}" without holding the advisory lock (${MIGRATION_LOCK_KEY})`);
+    }
+    lockEvents.push({ type: 'phase', phase });
+  };
+  const recordAcquire = (phase) => {
+    lock.acquire(phase);
+    lockEvents.push({ type: LOCK_ACQUIRE_PHASE, phase });
+  };
+  const recordRelease = (phase) => {
+    lock.release(phase);
+    lockEvents.push({ type: LOCK_RELEASE_PHASE, phase });
+  };
+=======
+
   // Ensure rollback counterparts exist
   let generatedRollbacks = 0;
   for (const m of migrations) {
@@ -145,8 +260,13 @@ async function verifyMigrations() {
     console.log(`Generated ${generatedRollbacks} rollback (down) migration definitions in ${ROLLBACK_DIR}.\n`);
   }
 
+  // Acquire the advisory lock before any migration phase can run.
+  console.log(`🔒 Acquiring migration advisory lock (${MIGRATION_LOCK_KEY})...`);
+  recordAcquire('pre-forward');
+
   // Verification Step 1: Version ordering check
   console.log('🔍 Phase 0: Validating migration version sequence & hygiene...');
+  recordPhase('version-ordering');
   for (let i = 0; i < migrations.length - 1; i++) {
     const curr = migrations[i];
     const next = migrations[i + 1];
@@ -159,6 +279,7 @@ async function verifyMigrations() {
 
   // Verification Step 2: Forward Migration Simulation
   console.log(`🚀 Phase 1: Forward Migration Verification (${migrations.length} migrations)...`);
+  recordPhase('forward');
   const activeTables = new Set();
   const activeViews = new Set();
   const activeFunctions = new Set();
@@ -178,6 +299,7 @@ async function verifyMigrations() {
 
   // Verification Step 3: Rollback Migration Simulation in Reverse Order
   console.log(`⏪ Phase 2: Rollback (Down) Migration Verification in Reverse Order...`);
+  recordPhase('rollback');
   const reversed = [...migrations].reverse();
   for (const m of reversed) {
     for (const t of m.createdTables) activeTables.delete(t);
@@ -195,12 +317,27 @@ async function verifyMigrations() {
 
   // Verification Step 4: Re-apply Forward Idempotency Check
   console.log(`🔁 Phase 3: Forward Re-Apply Idempotency Verification...`);
+  recordPhase('idempotency');
   for (const m of migrations) {
     for (const t of m.createdTables) activeTables.add(t);
     for (const v of m.createdViews) activeViews.add(v);
     for (const f of m.createdFunctions) activeFunctions.add(f);
   }
   console.log(`✅ Forward Re-Apply verification succeeded: Full schema restored identically.\n`);
+
+  // Release the advisory lock only after every phase has completed.
+  recordRelease('post-idempotency');
+
+  // Assert the acquire/release contract: lock held across all phases, released
+  // exactly once at the end, and no phase ran without the lock.
+  console.log('🔐 Verifying migration advisory lock contract...');
+  try {
+    assertLockContract(lockEvents, ['version-ordering', 'forward', 'rollback', 'idempotency']);
+  } catch (err) {
+    console.error(`❌ Migration lock contract violation: ${err.message}`);
+    process.exit(1);
+  }
+  console.log(`✅ Advisory lock acquired before forward phase and released after all phases.\n`);
 
   console.log('----------------------------------------------------------------');
   console.log('Database Migration Forward & Rollback Verification PASSED! ✓');
@@ -212,3 +349,9 @@ verifyMigrations().catch((err) => {
   console.error('Fatal error during migration verification:', err);
   process.exit(1);
 });
+
+module.exports = {
+  MIGRATION_LOCK_KEY,
+  createLockTracker,
+  assertLockContract,
+};

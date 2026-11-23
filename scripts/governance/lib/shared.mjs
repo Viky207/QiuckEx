@@ -24,6 +24,7 @@ export const PATHS = {
   retentionMirror: "app/backend/src/privacy/retention/retention-schedule.ts",
   a11yDoc: "docs/policies/ACCESSIBILITY-LOCALIZATION-STANDARD.md",
   a11yBaseline: "docs/policies/data/a11y-i18n-baseline.json",
+  branchProtectionPolicy: "docs/policies/data/branch-protection-policy.json",
   verifiedAssetsMigration:
     "app/backend/supabase/migrations/20260526000000_create_verified_assets.sql",
   frontendI18n: "app/frontend/src/lib/i18n.ts",
@@ -87,6 +88,92 @@ export function missingMentions(markdown, tokens) {
 
 export function unique(values) {
   return [...new Set(values)];
+}
+
+/** Load the checked-in branch-protection policy (read-only). */
+export function loadBranchProtectionPolicy(root) {
+  return readJson(root, PATHS.branchProtectionPolicy);
+}
+
+/**
+ * Compare the checked-in branch-protection policy against a GitHub branch
+ * protection payload (as returned by the REST API for the protected branch).
+ *
+ * Pure and read-only: it never mutates the payload or the policy and never
+ * touches repository settings. Returns an array of actionable rule names for
+ * every missing or incorrect protection; an empty array means compliant.
+ *
+ * Policy shape:
+ *   {
+ *     "branch": "main",
+ *     "requiredStatusChecks": ["ci", "governance"],
+ *     "requiredApprovingReviewCount": 1,
+ *     "dismissStaleReviews": true,
+ *     "requireCodeOwnerReviews": true,
+ *     "enforceAdmins": true,
+ *     "requireLinearHistory": true,
+ *     "allowForcePushes": false,
+ *     "allowDeletions": false
+ *   }
+ */
+export function diffBranchProtection(policy, protection) {
+  const issues = [];
+  const p = policy ?? {};
+  const actual = protection ?? {};
+
+  const statusChecks = actual.required_status_checks ?? null;
+  const actualContexts = Array.isArray(statusChecks?.contexts)
+    ? statusChecks.contexts
+    : [];
+  const requiredChecks = Array.isArray(p.requiredStatusChecks)
+    ? p.requiredStatusChecks
+    : [];
+  for (const check of requiredChecks) {
+    if (!actualContexts.includes(check)) {
+      issues.push(`required status check "${check}" is not enforced`);
+    }
+  }
+
+  const reviews = actual.required_pull_request_reviews ?? null;
+  const requiredCount = p.requiredApprovingReviewCount ?? 0;
+  const actualCount = reviews?.required_approving_review_count ?? 0;
+  if (actualCount < requiredCount) {
+    issues.push(
+      `required approving review count is ${actualCount}, expected at least ${requiredCount}`,
+    );
+  }
+
+  if (p.dismissStaleReviews === true && reviews?.dismiss_stale_reviews !== true) {
+    issues.push("dismiss stale reviews on new commits is not enforced");
+  }
+
+  if (
+    p.requireCodeOwnerReviews === true &&
+    reviews?.require_code_owner_reviews !== true
+  ) {
+    issues.push("code owner review requirement is not enforced");
+  }
+
+  if (p.enforceAdmins === true && actual.enforce_admins?.enabled !== true) {
+    issues.push("branch protection is not enforced for administrators");
+  }
+
+  if (
+    p.requireLinearHistory === true &&
+    actual.required_linear_history?.enabled !== true
+  ) {
+    issues.push("linear history requirement is not enforced");
+  }
+
+  if (p.allowForcePushes === false && actual.allow_force_pushes?.enabled === true) {
+    issues.push("force pushes are allowed but must be blocked");
+  }
+
+  if (p.allowDeletions === false && actual.allow_deletions?.enabled === true) {
+    issues.push("branch deletions are allowed but must be blocked");
+  }
+
+  return issues;
 }
 
 /** Duplicate values in an array, order-preserving. */

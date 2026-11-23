@@ -272,11 +272,180 @@ function checkReleaseReadiness() {
   };
 }
 
+// Category E: Container Signature & Provenance Verification
+function checkImageSigning() {
+  let score = 100;
+  const details = [];
+
+  const verificationPath = path.join(REPO_ROOT, "deploy/image-verification.json");
+  if (fs.existsSync(verificationPath)) {
+    try {
+      const verification = JSON.parse(fs.readFileSync(verificationPath, "utf-8"));
+      const digest = verification.digest || "unknown";
+      const signatureValid = verification.signatureValid === true;
+      const provenanceValid = verification.provenanceValid === true;
+      const sourceMatch = verification.sourceMatch !== false;
+
+      details.push(`Verified image digest: ${String(digest).substring(0, 19)}`);
+      if (!signatureValid) {
+        score -= 40;
+        details.push("Signature verification FAILED");
+      }
+      if (!provenanceValid) {
+        score -= 30;
+        details.push("Provenance verification FAILED");
+      }
+      if (!sourceMatch) {
+        score -= 30;
+        details.push("Digest does not match approved source artifact");
+      }
+      if (signatureValid && provenanceValid && sourceMatch) {
+        details.push("Signature and source provenance verified ✓");
+      }
+    } catch {
+      score -= 50;
+      details.push("Image verification report unreadable");
+    }
+  } else {
+    score -= 50;
+    details.push("Image signature verification report missing (deployment gate not run)");
+  }
+
+  score = Math.min(100, Math.max(0, score));
+  return {
+    name: "Container Signature & Provenance",
+    score,
+    status: score >= 90 ? "PASS" : "FAIL",
+    weight: 0.10,
+    details,
+  };
+}
+
+// Category F: Automated Rollback Readiness
+function checkRollbackReadiness() {
+  let score = 100;
+  const details = [];
+
+  const rollbackPath = path.join(REPO_ROOT, "deploy/rollback-report.json");
+  if (fs.existsSync(rollbackPath)) {
+    try {
+      const report = JSON.parse(fs.readFileSync(rollbackPath, "utf-8"));
+      const triggered = report.rollbackTriggered === true;
+      const verified = report.rollbackVerified === true;
+      const oldDigest = report.previousDigest || "unknown";
+      const newDigest = report.failedDigest || "unknown";
+
+      if (triggered) {
+        details.push(`Rollback executed: ${String(oldDigest).substring(0, 19)} ← ${String(newDigest).substring(0, 19)}`);
+        if (!verified) {
+          score -= 60;
+          details.push("Rollback verification FAILED");
+        } else {
+          details.push("Rollback restored prior healthy revision ✓");
+        }
+      } else {
+        details.push("No rollback required (post-deploy health checks passed) ✓");
+      }
+    } catch {
+      score -= 40;
+      details.push("Rollback report unreadable");
+    }
+  } else {
+    details.push("No rollback report present (no failed deployment recorded)");
+  }
+
+  score = Math.min(100, Math.max(0, score));
+  return {
+    name: "Automated Rollback Readiness",
+    score,
+    status: score >= 90 ? "PASS" : "FAIL",
+    weight: 0.05,
+    details,
+  };
+}
+
+// Category G: Preview Environment Hygiene
+function checkPreviewCleanup() {
+  let score = 100;
+  const details = [];
+
+  const cleanupPath = path.join(REPO_ROOT, "deploy/preview-cleanup-report.json");
+  if (fs.existsSync(cleanupPath)) {
+    try {
+      const report = JSON.parse(fs.readFileSync(cleanupPath, "utf-8"));
+      const deleted = Array.isArray(report.deleted) ? report.deleted : [];
+      const preserved = Array.isArray(report.preserved) ? report.preserved : [];
+      const errors = Array.isArray(report.errors) ? report.errors : [];
+
+      details.push(`Stale previews deleted: ${deleted.length}; active preserved: ${preserved.length}`);
+      if (errors.length > 0) {
+        score -= 30;
+        details.push(`Cleanup errors: ${errors.length}`);
+      } else {
+        details.push("Scheduled preview cleanup completed without errors ✓");
+      }
+    } catch {
+      score -= 30;
+      details.push("Preview cleanup report unreadable");
+    }
+  } else {
+    details.push("No preview cleanup report present (scheduled job not yet run)");
+  }
+
+  score = Math.min(100, Math.max(0, score));
+  return {
+    name: "Preview Environment Hygiene",
+    score,
+    status: score >= 90 ? "PASS" : "WARN",
+    weight: 0.05,
+    details,
+  };
+}
+
+// Category H: Branch Protection Audit
+function checkBranchProtection() {
+  let score = 100;
+  const details = [];
+
+  const auditPath = path.join(REPO_ROOT, "deploy/branch-protection-audit.json");
+  if (fs.existsSync(auditPath)) {
+    try {
+      const audit = JSON.parse(fs.readFileSync(auditPath, "utf-8"));
+      const missing = Array.isArray(audit.missing) ? audit.missing : [];
+      if (missing.length === 0) {
+        details.push("Main-branch protection matches checked-in policy ✓");
+      } else {
+        score -= Math.min(60, missing.length * 20);
+        details.push(`Missing protection rules: ${missing.join(", ")}`);
+      }
+    } catch {
+      score -= 40;
+      details.push("Branch protection audit report unreadable");
+    }
+  } else {
+    score -= 20;
+    details.push("Branch protection audit report missing");
+  }
+
+  score = Math.min(100, Math.max(0, score));
+  return {
+    name: "Branch Protection Audit",
+    score,
+    status: score >= 90 ? "PASS" : "FAIL",
+    weight: 0.05,
+    details,
+  };
+}
+
 categories.push(checkTests());
 categories.push(checkSecurity());
 categories.push(checkBuildAndCaching());
 categories.push(checkReleaseReadiness());
 categories.push(checkSupplyChainArtifacts());
+categories.push(checkImageSigning());
+categories.push(checkRollbackReadiness());
+categories.push(checkPreviewCleanup());
+categories.push(checkBranchProtection());
 
 // Compute weighted total
 const totalScore = Math.round(
@@ -355,6 +524,14 @@ if (blockers.length > 0) {
   }
 }
 
+const failedCategories = categories.filter((cat) => cat.status === "FAIL");
+if (failedCategories.length > 0) {
+  md += `\n### ⚠️ Verification Failures\n\n`;
+  for (const cat of failedCategories) {
+    md += `- **${cat.name}**: ${cat.details.join("; ")}\n`;
+  }
+}
+
 fs.writeFileSync(outputFile, md, "utf-8");
 console.log(`Generated scorecard Markdown: ${outputFile}`);
 
@@ -370,6 +547,13 @@ if (process.env.GITHUB_STEP_SUMMARY) {
 
 if (failUnder > 0 && totalScore < failUnder) {
   console.error(`\n❌ Scorecard score (${totalScore}) is below failure threshold (${failUnder}).`);
+  process.exit(1);
+}
+
+if (failedCategories.length > 0) {
+  console.error(
+    `\n❌ Release verification failed for: ${failedCategories.map((c) => c.name).join(", ")}.`
+  );
   process.exit(1);
 }
 

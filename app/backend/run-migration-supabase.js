@@ -23,7 +23,31 @@
  *   --target <ver_or_file>   Specific migration version or filename to revert
  *   --dry-run                Validate and preview migrations without writing state
  *   --json                   Output machine-readable JSON report
+ *   --lock-timeout <secs>    Seconds to wait for the migration advisory lock
+ *                            (default: 0 = fail fast if another run holds it)
  *   --help, -h               Show usage information
+ *
+ * Concurrency / advisory lock:
+ *   Production migration execution (live PostgreSQL, non-dry-run) is serialized
+ *   with a session-level PostgreSQL advisory lock (pg_try_advisory_lock) keyed on
+ *   a stable constant. A second concurrent run fails fast with a clear error
+ *   instead of applying migrations in parallel. The lock is always released in a
+ *   `finally` block, so a failed migration does not strand it.
+ *
+ *   Operator recovery for a stale lock:
+ *     - Session-level advisory locks are released automatically when the owning
+ *       connection ends. If a runner crashed and its backend is still alive, the
+ *       lock may linger until that backend exits.
+ *     - Inspect holders:
+ *         SELECT pid, state, query
+ *         FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid
+ *         WHERE l.locktype = 'advisory' AND l.objid = <LOCK_KEY>;
+ *     - If the holder is a dead/idle runner, terminate it:
+ *         SELECT pg_terminate_backend(<pid>);
+ *       The lock is then released automatically.
+ *     - As a last resort (only when no migration is running):
+ *         SELECT pg_advisory_unlock_all();  -- on the owning session
+ *       or restart the connection pool.
  */
 
 const fs = require('fs');
@@ -39,6 +63,78 @@ try {
 }
 
 const DEFAULT_MIGRATIONS_DIR = path.join(__dirname, 'supabase', 'migrations');
+
+/**
+ * Stable key for the session-level PostgreSQL advisory lock that serializes
+ * production migration runs. Must stay constant across releases so concurrent
+ * runners contend on the same lock.
+ */
+const MIGRATION_ADVISORY_LOCK_KEY = 0x51c4e11;
+
+/**
+ * Acquire the migration advisory lock on a dedicated psql session.
+ *
+ * Returns a handle with `release()` that always attempts to unlock. The lock is
+ * session-level, so it is held by the psql process backing this handle; when the
+ * process exits (including on crash) PostgreSQL releases it automatically.
+ *
+ * @param {string} dbUrl
+ * @param {{ timeoutSeconds?: number }} [opts]
+ */
+function acquireMigrationLock(dbUrl, { timeoutSeconds = 0 } = {}) {
+  const key = MIGRATION_ADVISORY_LOCK_KEY;
+  const waitSeconds = Math.max(0, Number(timeoutSeconds) || 0);
+
+  // Use a long-lived psql session that holds the lock while we run migrations.
+  // We acquire with pg_try_advisory_lock and poll until the timeout elapses.
+  const acquireSql = `
+DO $$
+DECLARE
+  deadline TIMESTAMPTZ := now() + make_interval(secs => ${waitSeconds});
+  got BOOLEAN := false;
+BEGIN
+  LOOP
+    SELECT pg_try_advisory_lock(${key}) INTO got;
+    EXIT WHEN got;
+    IF now() >= deadline THEN
+      RAISE EXCEPTION 'migration advisory lock ${key} is held by another run';
+    END IF;
+    PERFORM pg_sleep(0.5);
+  END LOOP;
+END $$;
+SELECT 'LOCK_ACQUIRED';
+`;
+
+  const res = spawnSync(
+    'psql',
+    [dbUrl, '-X', '-q', '-v', 'ON_ERROR_STOP=1', '-t', '-A'],
+    { input: acquireSql, encoding: 'utf8' }
+  );
+
+  if (res.status !== 0 || !(res.stdout || '').includes('LOCK_ACQUIRED')) {
+    const detail = (res.stderr || res.stdout || '').trim();
+    const err = new Error(
+      `Could not acquire migration advisory lock (key=${key}): ${detail || 'unknown error'}. ` +
+        'Another migration run may be in progress; see the script header for operator recovery.'
+    );
+    err.code = 'MIGRATION_LOCK_UNAVAILABLE';
+    throw err;
+  }
+
+  let released = false;
+  return {
+    key,
+    release() {
+      if (released) return;
+      released = true;
+      try {
+        runPsql(dbUrl, `SELECT pg_advisory_unlock(${key});`, ['-t', '-A']);
+      } catch {
+        // Session-level locks are released when the backend ends; ignore.
+      }
+    },
+  };
+}
 const CRASH_REPORTING_MIGRATION = path.join(
   __dirname,
   'src',
@@ -553,6 +649,7 @@ function runAgainstPostgres({
   freshSchema = false,
   dryRun = false,
   includeLegacyModules = true,
+  lockTimeoutSeconds = 0,
 }) {
   if (dryRun) {
     for (const m of migrations) {
@@ -576,32 +673,35 @@ function runAgainstPostgres({
     };
   }
 
-  if (freshSchema) {
-    runPsql(dbUrl, `DROP SCHEMA IF EXISTS ${schema} CASCADE; CREATE SCHEMA ${schema};`);
-  }
-
-  runPsql(dbUrl, buildBaselineBootstrapSql(schema));
-
-  const appliedRaw = runPsql(
-    dbUrl,
-    `SET search_path TO ${schema}, public; SELECT filename FROM schema_migrations ORDER BY version, filename;`,
-    ['-t', '-A']
-  );
-  const alreadyApplied = new Set(
-    appliedRaw
-      .split('\n')
-      .map((s) => s.trim())
-      .filter(Boolean)
-  );
-
+  // Serialize production migration execution across concurrent release runs.
+  const lock = acquireMigrationLock(dbUrl, { timeoutSeconds: lockTimeoutSeconds });
   let newlyApplied = 0;
-  for (const m of migrations) {
-    validateSqlSyntax(m.sql, m.filename);
-    if (alreadyApplied.has(m.filename)) {
-      continue;
+  try {
+    if (freshSchema) {
+      runPsql(dbUrl, `DROP SCHEMA IF EXISTS ${schema} CASCADE; CREATE SCHEMA ${schema};`);
     }
 
-    const wrappedSql = `
+    runPsql(dbUrl, buildBaselineBootstrapSql(schema));
+
+    const appliedRaw = runPsql(
+      dbUrl,
+      `SET search_path TO ${schema}, public; SELECT filename FROM schema_migrations ORDER BY version, filename;`,
+      ['-t', '-A']
+    );
+    const alreadyApplied = new Set(
+      appliedRaw
+        .split('\n')
+        .map((s) => s.trim())
+        .filter(Boolean)
+    );
+
+    for (const m of migrations) {
+      validateSqlSyntax(m.sql, m.filename);
+      if (alreadyApplied.has(m.filename)) {
+        continue;
+      }
+
+      const wrappedSql = `
 BEGIN;
 SET LOCAL search_path TO ${schema}, public;
 ${m.sql}
@@ -610,21 +710,26 @@ VALUES ('${m.version}', '${m.name.replace(/'/g, "''")}', '${m.filename.replace(/
 ON CONFLICT (filename) DO UPDATE SET checksum = EXCLUDED.checksum, applied_at = now();
 COMMIT;
 `;
-    runPsql(dbUrl, wrappedSql);
-    newlyApplied += 1;
-  }
+      runPsql(dbUrl, wrappedSql);
+      newlyApplied += 1;
+    }
 
-  if (includeLegacyModules) {
-    for (const modPath of [CRASH_REPORTING_MIGRATION, BRANCH_PREVIEW_MIGRATION]) {
-      if (fs.existsSync(modPath)) {
-        const modSql = fs.readFileSync(modPath, 'utf8');
-        validateSqlSyntax(modSql, path.basename(modPath));
-        runPsql(
-          dbUrl,
-          `BEGIN; SET LOCAL search_path TO ${schema}, public;\n${modSql}\nCOMMIT;`
-        );
+    if (includeLegacyModules) {
+      for (const modPath of [CRASH_REPORTING_MIGRATION, BRANCH_PREVIEW_MIGRATION]) {
+        if (fs.existsSync(modPath)) {
+          const modSql = fs.readFileSync(modPath, 'utf8');
+          validateSqlSyntax(modSql, path.basename(modPath));
+          runPsql(
+            dbUrl,
+            `BEGIN; SET LOCAL search_path TO ${schema}, public;\n${modSql}\nCOMMIT;`
+          );
+        }
       }
     }
+  } finally {
+    // Always release, even when a migration throws, so failures do not strand
+    // the lock and block subsequent release runs.
+    lock.release();
   }
 
   // Query live catalog to assert final schema state
@@ -1050,6 +1155,7 @@ function parseCliArgs(argv) {
     target: null,
     dryRun: false,
     json: false,
+    lockTimeoutSeconds: Number(process.env.MIGRATION_LOCK_TIMEOUT_SECONDS || 0) || 0,
     help: false,
   };
 
@@ -1086,6 +1192,10 @@ function parseCliArgs(argv) {
       options.dryRun = true;
     } else if (arg === '--json') {
       options.json = true;
+    } else if (arg === '--lock-timeout' && argv[i + 1]) {
+      options.lockTimeoutSeconds = Math.max(0, parseInt(argv[++i], 10) || 0);
+    } else if (arg.startsWith('--lock-timeout=')) {
+      options.lockTimeoutSeconds = Math.max(0, parseInt(arg.split('=')[1], 10) || 0);
     } else if (arg === '--help' || arg === '-h') {
       options.help = true;
     } else {
@@ -1101,7 +1211,7 @@ async function runMigration(cliOptions = null) {
 
   if (options.help) {
     console.log(
-      'Usage: node app/backend/run-migration-supabase.js [--smoke-test] [--fresh-schema] [--schema <name>] [--migrations-dir <dir>] [--state-file <path>] [--rollback] [--steps <n>] [--target <version>] [--dry-run] [--json]'
+      'Usage: node app/backend/run-migration-supabase.js [--smoke-test] [--fresh-schema] [--schema <name>] [--migrations-dir <dir>] [--state-file <path>] [--rollback] [--steps <n>] [--target <version>] [--dry-run] [--json] [--lock-timeout <secs>]'
     );
     return { ok: true };
   }
@@ -1144,6 +1254,7 @@ async function runMigration(cliOptions = null) {
       freshSchema: options.freshSchema || options.smokeTest,
       dryRun: options.dryRun,
       includeLegacyModules: options.migrationsDir === DEFAULT_MIGRATIONS_DIR,
+      lockTimeoutSeconds: options.lockTimeoutSeconds,
     });
   } else if (
     options.smokeTest ||
@@ -1204,4 +1315,6 @@ module.exports = {
   validateSqlSyntax,
   extractOperations,
   buildBaselineBootstrapSql,
+  acquireMigrationLock,
+  MIGRATION_ADVISORY_LOCK_KEY,
 };

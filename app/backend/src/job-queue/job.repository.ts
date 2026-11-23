@@ -44,6 +44,41 @@ export interface JobFilters {
 }
 
 /**
+ * Terminal job statuses eligible for retention cleanup.
+ * Active statuses (pending, running) are never deleted.
+ */
+export const TERMINAL_JOB_STATUSES: readonly JobStatus[] = [
+  JobStatus.COMPLETED,
+  JobStatus.FAILED,
+  JobStatus.CANCELLED,
+];
+
+/**
+ * Safe, redacted projection of a job for operator triage.
+ * Deliberately excludes payload and any credential material.
+ */
+export interface JobStatusProjection {
+  id: string;
+  type: JobType;
+  status: JobStatus;
+  attempts: number;
+  maxAttempts: number;
+  createdAt: Date;
+  scheduledAt: Date;
+  completedAt: Date | null;
+  failureReason: string | null;
+  correlationId: string | null;
+}
+
+/**
+ * Result of a retention cleanup run.
+ */
+export interface RetentionCleanupResult {
+  deleted: number;
+  batches: number;
+}
+
+/**
  * Paginated job results
  */
 export interface PaginatedJobs {
@@ -52,6 +87,34 @@ export interface PaginatedJobs {
   limit: number;
   offset: number;
 }
+
+/**
+ * Options for looking up an active job by idempotency key and/or
+ * operation/resource identity.
+ *
+ * Used to deduplicate admin background-job actions so that repeated
+ * operator requests (e.g. after a timeout) return the existing run
+ * instead of starting duplicate reconciliation or cleanup work.
+ */
+export interface ActiveJobLookup {
+  /** Scoped idempotency key (preferred dedupe signal). */
+  idempotencyKey?: string;
+  /** Job type / operation to match when no idempotency key is supplied. */
+  type?: JobType;
+  /** Resource identifier (e.g. tenant, account, entity id) to match. */
+  resource?: string;
+  /**
+   * Active run window in milliseconds. Only jobs created within this
+   * window are considered active. Defaults to 24 hours.
+   */
+  activeWindowMs?: number;
+}
+
+/** Default active run window for dedupe lookups (24 hours). */
+const DEFAULT_ACTIVE_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/** Statuses considered "active" for dedupe purposes. */
+const ACTIVE_STATUSES: JobStatus[] = [JobStatus.PENDING, JobStatus.RUNNING];
 
 /**
  * Repository for job database operations
@@ -79,7 +142,9 @@ export class JobRepository {
    * @param payload - Job-specific payload data
    * @param maxAttempts - Maximum retry attempts
    * @param scheduledAt - When the job should execute (defaults to now)
-   * @returns The created job
+   * @param idempotencyKey - Optional scoped idempotency key; on unique
+   *   conflict the existing job is returned instead of throwing
+   * @returns The created job (or the existing job on idempotency conflict)
    * 
    * **Validates: Requirement 12.1** - Job persistence to database
    */
@@ -114,6 +179,10 @@ export class JobRepository {
           .eq('idempotency_key', idempotencyKey)
           .single();
         if (!existing.error && existing.data) {
+          this.logger.debug(
+            `Idempotency conflict for key ${idempotencyKey} (type: ${type}); ` +
+              `returning existing job ${(existing.data as JobRow).id}`,
+          );
           return this.mapRowToJob<TPayload>(existing.data as JobRow);
         }
       }
@@ -122,6 +191,81 @@ export class JobRepository {
     }
 
     this.logger.debug(`Job created: ${data.id} (type: ${type})`);
+    return this.mapRowToJob<TPayload>(data as JobRow);
+  }
+
+  /**
+   * Find an active job matching an idempotency key and/or operation/resource.
+   *
+   * A job is considered active when its status is `pending` or `running`
+   * and it was created within the active run window. This is used to
+   * deduplicate admin background-job actions: repeated requests return
+   * the existing run instead of starting duplicate work.
+   *
+   * When both an idempotency key and operation/resource are supplied, the
+   * idempotency key takes precedence (it is the scoped dedupe signal).
+   * When only operation/resource are supplied, the most recent active job
+   * matching those parameters is returned.
+   *
+   * @param lookup - Lookup criteria
+   * @returns The active job, or null if none found
+   */
+  async findActiveJob<TPayload = unknown>(
+    lookup: ActiveJobLookup,
+  ): Promise<Job<TPayload> | null> {
+    const { idempotencyKey, type, resource } = lookup;
+    const activeWindowMs = lookup.activeWindowMs ?? DEFAULT_ACTIVE_WINDOW_MS;
+
+    if (!idempotencyKey && !type) {
+      // Without an idempotency key or operation type there is nothing
+      // safe to deduplicate on.
+      return null;
+    }
+
+    const windowStart = new Date(Date.now() - activeWindowMs).toISOString();
+
+    let query = this.client
+      .from('jobs')
+      .select('*')
+      .in('status', ACTIVE_STATUSES)
+      .gte('created_at', windowStart);
+
+    if (idempotencyKey) {
+      query = query.eq('idempotency_key', idempotencyKey);
+      if (type) {
+        query = query.eq('type', type);
+      }
+    } else {
+      // Operation/resource dedupe path
+      query = query.eq('type', type as JobType);
+      if (resource !== undefined) {
+        query = query.eq('payload->>resource', resource);
+      }
+    }
+
+    const { data, error } = await query
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    // PGRST116 = "no rows returned" — treat as not found, not an error
+    if (error?.code === 'PGRST116') {
+      return null;
+    }
+
+    if (error) {
+      this.logger.error(
+        `Failed to find active job (key: ${idempotencyKey ?? 'n/a'}, ` +
+          `type: ${type ?? 'n/a'}, resource: ${resource ?? 'n/a'}): ${error.message}`,
+        error,
+      );
+      throw error;
+    }
+
+    if (!data) {
+      return null;
+    }
+
     return this.mapRowToJob<TPayload>(data as JobRow);
   }
 
@@ -329,6 +473,154 @@ export class JobRepository {
     }
 
     return count;
+  }
+
+  /**
+   * Delete terminal jobs older than the given cutoff, in bounded batches.
+   *
+   * Only terminal statuses (completed, failed, cancelled) whose `completed_at`
+   * is strictly older than `cutoff` are eligible. Active jobs (pending,
+   * running) and audit-required records (`audit_required = true`) are always
+   * preserved. The operation is idempotent: re-running after a successful pass
+   * deletes nothing further.
+   *
+   * @param cutoff - Jobs completed before this instant are eligible
+   * @param batchSize - Maximum rows deleted per batch (bounded)
+   * @returns Count of deleted rows and number of batches executed
+   */
+  async deleteTerminalJobsOlderThan(
+    cutoff: Date,
+    batchSize: number = 500,
+  ): Promise<RetentionCleanupResult> {
+    if (!(cutoff instanceof Date) || Number.isNaN(cutoff.getTime())) {
+      throw new Error('deleteTerminalJobsOlderThan requires a valid cutoff Date');
+    }
+    if (!Number.isInteger(batchSize) || batchSize <= 0) {
+      throw new Error('batchSize must be a positive integer');
+    }
+
+    const cutoffIso = cutoff.toISOString();
+    let deleted = 0;
+    let batches = 0;
+
+    // Loop until a batch returns fewer rows than requested (no more eligible).
+    // Each iteration is bounded by batchSize, keeping memory and lock time low.
+    for (;;) {
+      const { data, error } = await this.client
+        .from('jobs')
+        .select('id')
+        .in('status', TERMINAL_JOB_STATUSES as string[])
+        .lt('completed_at', cutoffIso)
+        .or('audit_required.is.null,audit_required.eq.false')
+        .order('completed_at', { ascending: true })
+        .limit(batchSize);
+
+      if (error) {
+        this.logger.error(
+          `Failed to select terminal jobs for retention: ${error.message}`,
+          error,
+        );
+        throw error;
+      }
+
+      const ids = (data as Array<{ id: string }> | null)?.map(r => r.id) ?? [];
+      if (ids.length === 0) {
+        break;
+      }
+
+      const { error: deleteError } = await this.client
+        .from('jobs')
+        .delete()
+        .in('id', ids)
+        .in('status', TERMINAL_JOB_STATUSES as string[])
+        .lt('completed_at', cutoffIso)
+        .or('audit_required.is.null,audit_required.eq.false');
+
+      if (deleteError) {
+        this.logger.error(
+          `Failed to delete terminal jobs for retention: ${deleteError.message}`,
+          deleteError,
+        );
+        throw deleteError;
+      }
+
+      deleted += ids.length;
+      batches += 1;
+
+      if (ids.length < batchSize) {
+        break;
+      }
+    }
+
+    if (deleted > 0) {
+      this.logger.log(
+        `Retention cleanup removed ${deleted} terminal jobs in ${batches} batch(es) (cutoff: ${cutoffIso})`,
+      );
+    }
+
+    return { deleted, batches };
+  }
+
+  /**
+   * Fetch a safe, redacted status projection for operator triage.
+   *
+   * Returns attempts, next retry (scheduled_at), stable failure reason,
+   * status, type, timestamps and correlation id. Payload and credentials are
+   * never selected.
+   *
+   * @param jobId - Job ID
+   * @returns Projection, or null if not found
+   */
+  async findJobStatusProjection(jobId: string): Promise<JobStatusProjection | null> {
+    const { data, error } = await this.client
+      .from('jobs')
+      .select(
+        'id, type, status, attempts, max_attempts, created_at, scheduled_at, completed_at, failure_reason, correlation_id',
+      )
+      .eq('id', jobId)
+      .maybeSingle();
+
+    if (error?.code === 'PGRST116') {
+      return null;
+    }
+
+    if (error) {
+      this.logger.error(
+        `Failed to load job status projection ${jobId}: ${error.message}`,
+        error,
+      );
+      throw error;
+    }
+
+    if (!data) {
+      return null;
+    }
+
+    const row = data as {
+      id: string;
+      type: string;
+      status: string;
+      attempts: number;
+      max_attempts: number;
+      created_at: string;
+      scheduled_at: string;
+      completed_at: string | null;
+      failure_reason: string | null;
+      correlation_id: string | null;
+    };
+
+    return {
+      id: row.id,
+      type: row.type as JobType,
+      status: row.status as JobStatus,
+      attempts: row.attempts,
+      maxAttempts: row.max_attempts,
+      createdAt: new Date(row.created_at),
+      scheduledAt: new Date(row.scheduled_at),
+      completedAt: row.completed_at ? new Date(row.completed_at) : null,
+      failureReason: row.failure_reason,
+      correlationId: row.correlation_id ?? null,
+    };
   }
 
   /**

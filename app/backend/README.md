@@ -107,9 +107,54 @@ Example issued asset:
 }
 ```
 
+## Database Migrations
+
+Production migrations are serialized with a database-backed lock so two concurrent release runs cannot apply the same migration set at the same time.
+
+### How the lock works
+
+- Before applying migrations, the migration runner acquires a PostgreSQL advisory lock (`pg_try_advisory_lock`) on a fixed key derived from the migration namespace.
+- If the lock is already held by another session, the runner exits with a non-zero status and a clear message instead of applying migrations. Re-run the release after the in-flight migration finishes.
+- The lock is released in a `finally` block (`pg_advisory_unlock`) so a failed migration does not leave the lock held by the runner's own session.
+- Session-level advisory locks are automatically released when the holding connection closes, so a crashed runner does not permanently block future releases.
+
+### Detecting a stale lock
+
+If a release reports that the migration lock is held but no migration appears to be running, inspect the lock holders:
+
+```sql
+SELECT l.pid, a.usename, a.application_name, a.client_addr, a.state, a.query_start
+FROM pg_locks l
+JOIN pg_stat_activity a ON a.pid = l.pid
+WHERE l.locktype = 'advisory'
+  AND l.objid = :migration_lock_key;
+```
+
+A holder is stale when its `state` is `idle`/`idle in transaction` with no active migration, or when the backend PID no longer corresponds to a running release job.
+
+### Safe recovery procedure
+
+1. Confirm no migration is actually in progress (check `pg_stat_activity` for the holder PID and the release pipeline status).
+2. Terminate the stale backend session, which releases its advisory locks:
+
+   ```sql
+   SELECT pg_terminate_backend(:stale_pid);
+   ```
+
+3. If the lock is held by a session you control and you want to release it without terminating the connection, run the matching unlock on that same session:
+
+   ```sql
+   SELECT pg_advisory_unlock(:migration_lock_key);
+   ```
+
+4. Re-run the release. The runner will acquire the lock and apply any pending migrations.
+
+**Never** drop or truncate migration tracking tables to clear a lock; the lock is advisory and is not stored in application tables.
+
 ## Scripts
 
 Run from repo root using TurboRepo filters:
+=======
 
 ```bash
 pnpm turbo run dev --filter=@quickex/backend      # Start development server

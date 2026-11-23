@@ -12,6 +12,10 @@ import {
 import { getSessionExpiryExplanation } from "@/services/security";
 import { useTheme } from "../src/theme/ThemeContext";
 import { CrashReportingService } from "@/services/CrashReportingService";
+import {
+  MIN_TOUCH_TARGET,
+  TOUCH_TARGET_SPACING,
+} from "@/constants/accessibility";
 
 interface SecurityCheckItem {
   id: string;
@@ -358,6 +362,9 @@ export default function SecurityCenterScreen() {
           {item.actionText && item.actionLink && (
             <Link href={item.actionLink} asChild>
               <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={item.actionText}
+                hitSlop={TOUCH_TARGET_SPACING.hitSlop}
                 style={[
                   styles.actionButton,
                   { backgroundColor: theme.buttonPrimaryBg },
@@ -417,6 +424,9 @@ export default function SecurityCenterScreen() {
 
           {!session.isCurrent && (
             <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={`Revoke session for ${session.device}`}
+              hitSlop={TOUCH_TARGET_SPACING.hitSlop}
               style={[styles.revokeButton, { borderColor: '#EF4444' }]}
               onPress={() => handleRevokeSession(session.id)}
             >
@@ -527,6 +537,9 @@ export default function SecurityCenterScreen() {
 
         <Link href="/settings" asChild>
           <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Go to Security Settings"
+            hitSlop={TOUCH_TARGET_SPACING.hitSlop}
             style={[styles.setupButton, { backgroundColor: theme.buttonPrimaryBg }]}
           >
             <Text style={[styles.setupButtonText, { color: theme.buttonPrimaryText }]}>
@@ -595,6 +608,10 @@ export default function SecurityCenterScreen() {
             (tab) => (
               <Pressable
                 key={tab}
+                accessibilityRole="tab"
+                accessibilityState={{ selected: activeTab === tab }}
+                accessibilityLabel={tab.charAt(0).toUpperCase() + tab.slice(1)}
+                hitSlop={TOUCH_TARGET_SPACING.hitSlop}
                 style={[
                   styles.tab,
                   activeTab === tab && [
@@ -660,13 +677,17 @@ const styles = StyleSheet.create({
   },
   tabBarContent: {
     paddingHorizontal: 24,
-    gap: 8,
+    gap: TOUCH_TARGET_SPACING.gap,
   },
   tab: {
+    minHeight: MIN_TOUCH_TARGET,
+    minWidth: MIN_TOUCH_TARGET,
     paddingVertical: 12,
     paddingHorizontal: 16,
     borderBottomWidth: 2,
     borderBottomColor: "transparent",
+    alignItems: "center",
+    justifyContent: "center",
   },
   tabActive: {
     borderBottomWidth: 2,
@@ -758,9 +779,13 @@ const styles = StyleSheet.create({
   },
   actionButton: {
     borderRadius: 8,
+    minHeight: MIN_TOUCH_TARGET,
+    minWidth: MIN_TOUCH_TARGET,
     paddingVertical: 10,
     paddingHorizontal: 16,
     alignSelf: "flex-start",
+    alignItems: "center",
+    justifyContent: "center",
   },
   actionButtonText: {
     fontSize: 14,
@@ -805,6 +830,8 @@ const styles = StyleSheet.create({
   },
   revokeButton: {
     flexDirection: "row",
+    minHeight: MIN_TOUCH_TARGET,
+    minWidth: MIN_TOUCH_TARGET,
     paddingVertical: 8,
     paddingHorizontal: 12,
     borderRadius: 8,
@@ -894,10 +921,13 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   setupButton: {
+    minHeight: MIN_TOUCH_TARGET,
+    minWidth: MIN_TOUCH_TARGET,
     paddingVertical: 12,
     paddingHorizontal: 16,
     borderRadius: 8,
     alignItems: "center",
+    justifyContent: "center",
     marginTop: 8,
   },
   setupButtonText: {

@@ -16,6 +16,11 @@ import {
     useColorScheme,
 } from "react-native";
 
+// Minimum interactive target size (project accessibility standard).
+export const MIN_TOUCH_TARGET = 44;
+// Consistent spacing between interactive targets in dense settings rows.
+export const TOUCH_TARGET_GAP = 12;
+
 import { useTranslation } from "react-i18next";
 import { useTheme } from "../../src/theme/ThemeContext";
 import {
@@ -98,6 +103,8 @@ export function ThemeSelector() {
               ]}
               accessibilityLabel={`Select ${opt.label} theme`}
               accessibilityRole="button"
+              accessibilityState={{ selected: isActive }}
+              hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
             >
               <MiniSwatch colors={opt.preview.swatchPreview} />
               <Text
@@ -154,6 +161,8 @@ export function ThemeSelector() {
               ]}
               accessibilityLabel={`Select ${brandTheme.name} brand theme`}
               accessibilityRole="button"
+              accessibilityState={{ selected: isActive }}
+              hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
             >
               {/* Swatch preview */}
               <View style={styles.swatchRow}>
@@ -228,15 +237,20 @@ const styles = StyleSheet.create({
   },
   modesRow: {
     flexDirection: "row",
-    gap: 10,
+    flexWrap: "wrap",
+    gap: TOUCH_TARGET_GAP,
     marginBottom: 24,
   },
   modeCard: {
-    flex: 1,
+    flexGrow: 1,
+    flexBasis: 0,
+    minWidth: MIN_TOUCH_TARGET,
+    minHeight: MIN_TOUCH_TARGET,
     borderRadius: 14,
     padding: 14,
     borderWidth: 1,
     alignItems: "center",
+    justifyContent: "center",
     gap: 6,
     position: "relative",
     overflow: "hidden",
@@ -256,14 +270,19 @@ const styles = StyleSheet.create({
   },
   brandsRow: {
     flexDirection: "row",
-    gap: 12,
+    flexWrap: "wrap",
+    gap: TOUCH_TARGET_GAP,
   },
   brandCard: {
-    flex: 1,
+    flexGrow: 1,
+    flexBasis: 0,
+    minWidth: MIN_TOUCH_TARGET,
+    minHeight: MIN_TOUCH_TARGET,
     borderRadius: 14,
     padding: 14,
     borderWidth: 1,
     alignItems: "center",
+    justifyContent: "center",
     gap: 10,
     position: "relative",
     overflow: "hidden",

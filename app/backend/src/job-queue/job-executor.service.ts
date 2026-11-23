@@ -13,6 +13,7 @@ import { JobRepository } from './job.repository';
 import { JobRegistry } from './job-registry.service';
 import { CancellationStore } from './cancellation-token';
 import { JobQueueMetricsService } from './job-queue-metrics.service';
+import { JobIdempotencyService } from './job-idempotency.service';
 import { Job, JobStatus, RetryPolicy } from './types';
 
 /**
@@ -39,6 +40,7 @@ export class JobExecutor implements OnModuleInit {
     private readonly registry: JobRegistry,
     private readonly cancellationStore: CancellationStore,
     private readonly metrics: JobQueueMetricsService,
+    private readonly idempotency: JobIdempotencyService,
   ) {}
 
   /**
@@ -218,6 +220,10 @@ export class JobExecutor implements OnModuleInit {
         duration: durationMs,
       });
 
+      // Expire idempotency keys bound to this run so later legitimate
+      // requests can start a new run instead of reusing a terminal job.
+      await this.expireIdempotencyKeys(job);
+
       // Clean up cancellation token
       this.cancellationStore.clearCancellation(job.id);
     } catch (error) {
@@ -276,6 +282,9 @@ export class JobExecutor implements OnModuleInit {
         `Job ${job.id} moved to DLQ after ${newAttempts} attempts (type: ${job.type}, permanent: ${permanentFailure})`,
       );
 
+      // Expire idempotency keys bound to this terminal run
+      await this.expireIdempotencyKeys(job);
+
       // Call handler's onFailure hook
       try {
         const handler = this.registry.getHandler(job.type);
@@ -313,6 +322,35 @@ export class JobExecutor implements OnModuleInit {
 
       // Clean up cancellation token
       this.cancellationStore.clearCancellation(job.id);
+    }
+  }
+
+  /**
+   * Expire idempotency keys bound to a job that reached a terminal state.
+   *
+   * Failures here must not fail the job transition itself; they are logged so
+   * dedupe decisions remain auditable.
+   *
+   * @param job - The job that reached a terminal state
+   */
+  private async expireIdempotencyKeys(job: Job): Promise<void> {
+    try {
+      const expired = await this.idempotency.expireKeysForJob(job.id);
+      if (expired > 0) {
+        this.logger.log({
+          message: 'Idempotency keys expired for terminal job',
+          jobId: job.id,
+          type: job.type,
+          expiredKeys: expired,
+        });
+      }
+    } catch (error) {
+      this.logger.error({
+        message: `Failed to expire idempotency keys for job ${job.id}`,
+        jobId: job.id,
+        error: error.message,
+        stack: error.stack,
+      });
     }
   }
 

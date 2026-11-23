@@ -15,6 +15,14 @@ pub enum QuickexError {
     InvalidAmount = 100,
     InvalidSalt = 101,
     InvalidPrivacyLevel = 102,
+    /// An intermediate or final arithmetic result overflowed the supported range.
+    /// No wrapped value is stored or emitted; the operation is rejected.
+    Overflow = 103,
+    /// A contract address is malformed (wrong length, wrong network, or wrong
+    /// account type) and failed validation before any storage write.
+    InvalidContractAddress = 104,
+    /// An asset identifier is malformed or its metadata is unsupported.
+    InvalidAsset = 105,
     // Auth/admin failures (200-299)
     Unauthorized = 200,
     AlreadyInitialized = 201,
@@ -124,6 +132,9 @@ mod compatibility_tests {
             (QuickexError::InvalidAmount, 100),
             (QuickexError::InvalidSalt, 101),
             (QuickexError::InvalidPrivacyLevel, 102),
+            (QuickexError::Overflow, 103),
+            (QuickexError::InvalidContractAddress, 104),
+            (QuickexError::InvalidAsset, 105),
             (QuickexError::Unauthorized, 200),
             (QuickexError::AlreadyInitialized, 201),
             (QuickexError::InsufficientRole, 202),
@@ -196,6 +207,93 @@ mod compatibility_tests {
             assert_eq!(*error as u32, *expected_code);
             for (other, _) in new_codes.iter().skip(index + 1) {
                 assert_ne!(error, other);
+            }
+        }
+    }
+
+    #[test]
+    fn validation_errors_use_additive_codes() {
+        let new_codes = [
+            (QuickexError::Overflow, 103),
+            (QuickexError::InvalidContractAddress, 104),
+            (QuickexError::InvalidAsset, 105),
+        ];
+
+        for (index, (error, expected_code)) in new_codes.iter().enumerate() {
+            assert_eq!(*error as u32, *expected_code);
+            for (other, _) in new_codes.iter().skip(index + 1) {
+                assert_ne!(error, other);
+            }
+        }
+    }
+
+    #[test]
+    fn all_error_codes_are_unique() {
+        let all_codes = [
+            (QuickexError::InvalidAmount, 100),
+            (QuickexError::InvalidSalt, 101),
+            (QuickexError::InvalidPrivacyLevel, 102),
+            (QuickexError::Overflow, 103),
+            (QuickexError::InvalidContractAddress, 104),
+            (QuickexError::InvalidAsset, 105),
+            (QuickexError::Unauthorized, 200),
+            (QuickexError::AlreadyInitialized, 201),
+            (QuickexError::InsufficientRole, 202),
+            (QuickexError::NotGovernanceSigner, 203),
+            (QuickexError::InvalidGovernanceConfig, 204),
+            (QuickexError::GovernanceAlreadyInitialized, 205),
+            (QuickexError::GovernanceRequired, 206),
+            (QuickexError::ContractPaused, 300),
+            (QuickexError::PrivacyAlreadySet, 301),
+            (QuickexError::CommitmentNotFound, 302),
+            (QuickexError::CommitmentAlreadyExists, 303),
+            (QuickexError::AlreadySpent, 304),
+            (QuickexError::InvalidCommitment, 305),
+            (QuickexError::CommitmentMismatch, 306),
+            (QuickexError::EscrowExpired, 307),
+            (QuickexError::EscrowNotExpired, 308),
+            (QuickexError::InvalidOwner, 309),
+            (QuickexError::NoArbiter, 310),
+            (QuickexError::InvalidDisputeState, 311),
+            (QuickexError::NotArbiter, 312),
+            (QuickexError::OperationPaused, 313),
+            (QuickexError::InvalidContractVersion, 314),
+            (QuickexError::Overpayment, 315),
+            (QuickexError::ReentrancyDetected, 316),
+            (QuickexError::HookAlreadyRegistered, 317),
+            (QuickexError::HookNotRegistered, 318),
+            (QuickexError::NotAnArbiter, 319),
+            (QuickexError::ArbiterAlreadyVoted, 320),
+            (QuickexError::InsufficientVotes, 321),
+            (QuickexError::HookNotAllowed, 322),
+            (QuickexError::MaxExtensionsReached, 323),
+            (QuickexError::ExtensionExceedsMaxLifetime, 324),
+            (QuickexError::InvalidEvidenceHash, 325),
+            (QuickexError::EvidenceSizeExceeded, 326),
+            (QuickexError::AdminActionAlreadyApproved, 327),
+            (QuickexError::StealthAddressMismatch, 400),
+            (QuickexError::StealthAddressAlreadyUsed, 401),
+            (QuickexError::StealthEscrowNotFound, 402),
+            (QuickexError::KeyRotationAnnounced, 403),
+            (QuickexError::KeyRotationGraceActive, 404),
+            (QuickexError::KeyRotationRevoked, 405),
+            (QuickexError::KeyRotationReplay, 406),
+            (QuickexError::KeyRotationNotFound, 407),
+            (QuickexError::KeyRotationExpired, 408),
+            (QuickexError::NonceAlreadyUsed, 500),
+            (QuickexError::SignatureExpired, 501),
+            (QuickexError::OracleStalePrice, 600),
+            (QuickexError::OraclePriceUnavailable, 601),
+            (QuickexError::OraclePriceInvalid, 602),
+            (QuickexError::InternalError, 900),
+            (QuickexError::InvalidTimeout, 901),
+        ];
+
+        for (index, (error, expected_code)) in all_codes.iter().enumerate() {
+            assert_eq!(*error as u32, *expected_code);
+            for (other, other_code) in all_codes.iter().skip(index + 1) {
+                assert_ne!(error, other);
+                assert_ne!(expected_code, other_code);
             }
         }
     }

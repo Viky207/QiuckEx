@@ -10,10 +10,23 @@ interface AdminWebhookSubscription {
   updatedAt: string;
 }
 
+export const CONTRACT_CHANGE_WEBHOOK_MAX_PAYLOAD_BYTES = 64 * 1024;
+
+export const CONTRACT_CHANGE_WEBHOOK_OVERSIZED_CODE =
+  'CONTRACT_CHANGE_WEBHOOK_PAYLOAD_TOO_LARGE';
+
+export interface ContractChangeWebhookEnqueueResult {
+  ok: boolean;
+  code?: typeof CONTRACT_CHANGE_WEBHOOK_OVERSIZED_CODE;
+  sizeBytes?: number;
+  maxBytes?: number;
+}
+
 @Injectable()
 export class ContractChangeWebhookService {
   private readonly logger = new Logger(ContractChangeWebhookService.name);
   private readonly fallbackStore = new Map<string, AdminWebhookSubscription[]>();
+  private readonly oversizedEventCounts = new Map<string, number>();
 
   constructor(private readonly supabaseService: SupabaseService) {}
 
@@ -99,6 +112,51 @@ export class ContractChangeWebhookService {
         (w) => w.enabled,
       );
     }
+  }
+
+  /**
+   * Validates the serialized size of a contract change event before it is
+   * enqueued for delivery. Oversized events are rejected as a whole (never
+   * partially sent) and the failure is recorded so it stays observable.
+   * Payload contents are never logged.
+   */
+  enqueueContractChangeEvent(
+    webhookId: string,
+    event: Record<string, unknown>,
+    maxBytes: number = CONTRACT_CHANGE_WEBHOOK_MAX_PAYLOAD_BYTES,
+  ): ContractChangeWebhookEnqueueResult {
+    let serialized: string;
+    try {
+      serialized = JSON.stringify(event);
+    } catch (error) {
+      this.logger.warn(
+        `Unable to serialize contract change event for webhook ${webhookId}: ${(error as Error).message}`,
+      );
+      return { ok: false };
+    }
+
+    const sizeBytes = Buffer.byteLength(serialized, 'utf8');
+    if (sizeBytes > maxBytes) {
+      const previous = this.oversizedEventCounts.get(webhookId) ?? 0;
+      this.oversizedEventCounts.set(webhookId, previous + 1);
+      this.logger.warn(
+        `Rejected oversized contract change event for webhook ${webhookId}: ` +
+          `${sizeBytes} bytes exceeds limit of ${maxBytes} bytes ` +
+          `(code=${CONTRACT_CHANGE_WEBHOOK_OVERSIZED_CODE})`,
+      );
+      return {
+        ok: false,
+        code: CONTRACT_CHANGE_WEBHOOK_OVERSIZED_CODE,
+        sizeBytes,
+        maxBytes,
+      };
+    }
+
+    return { ok: true, sizeBytes, maxBytes };
+  }
+
+  getOversizedEventCount(webhookId: string): number {
+    return this.oversizedEventCounts.get(webhookId) ?? 0;
   }
 
   private async persistSubscription(

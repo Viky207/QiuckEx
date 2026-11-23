@@ -1,7 +1,34 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { AuditLog, QueryAuditLogsDto } from './audit.model';
-import { randomUUID } from 'crypto';
+import { randomUUID, createHash } from 'crypto';
 import { SupabaseService } from '../supabase/supabase.service';
+
+/**
+ * Audit action recorded whenever an admin background-job enqueue request is
+ * evaluated for idempotency. The metadata shape is intentionally limited to
+ * non-sensitive identifiers so dedupe decisions stay auditable without
+ * leaking secrets or personal data.
+ */
+export const ADMIN_JOB_IDEMPOTENCY_AUDIT_ACTION = 'admin.job.enqueue.idempotency';
+
+export interface AdminJobIdempotencyAuditInput {
+  /** Logical operation, e.g. `reconcile` or `cleanup`. */
+  operation: string;
+  /** Resource the operation targets, e.g. `orders` or `sessions`. */
+  resource: string;
+  /** Stable hash of the request parameters (never the raw parameters). */
+  parameterHash: string;
+  /** Whether an existing run was reused instead of starting a new one. */
+  reused: boolean;
+  /** Identifier of the run that was reused, when applicable. */
+  reusedJobId?: string;
+  /** Identifier of the newly created run, when applicable. */
+  jobId?: string;
+  /** Scoped idempotency key supplied by the caller, when present. */
+  idempotencyKey?: string;
+  /** Human-readable reason for the dedupe decision. */
+  reason?: string;
+}
 
 @Injectable()
 export class AuditService {
@@ -9,6 +36,69 @@ export class AuditService {
   private logs: AuditLog[] = [];
 
   constructor(private readonly supabaseService: SupabaseService) {}
+
+  /**
+   * Builds the audit metadata for an idempotent admin job enqueue decision.
+   * Only non-sensitive identifiers are included; raw parameters and secrets
+   * are never recorded.
+   */
+  static buildJobIdempotencyMetadata(
+    input: AdminJobIdempotencyAuditInput,
+  ): Record<string, unknown> {
+    const metadata: Record<string, unknown> = {
+      operation: input.operation,
+      resource: input.resource,
+      parameterHash: input.parameterHash,
+      reused: input.reused,
+    };
+    if (input.reusedJobId) metadata.reusedJobId = input.reusedJobId;
+    if (input.jobId) metadata.jobId = input.jobId;
+    if (input.idempotencyKey) metadata.idempotencyKey = input.idempotencyKey;
+    if (input.reason) metadata.reason = input.reason;
+    return metadata;
+  }
+
+  /**
+   * Computes a stable, non-reversible hash of job request parameters so that
+   * dedupe decisions can be audited without persisting raw parameters.
+   */
+  static hashJobParameters(params: unknown): string {
+    const serialized = AuditService.stableStringify(params);
+    return createHash('sha256').update(serialized).digest('hex');
+  }
+
+  private static stableStringify(value: unknown): string {
+    if (value === null || typeof value !== 'object') {
+      return JSON.stringify(value) ?? 'null';
+    }
+    if (Array.isArray(value)) {
+      return `[${value.map((item) => AuditService.stableStringify(item)).join(',')}]`;
+    }
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, item]) => item !== undefined)
+      .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
+    return `{${entries
+      .map(([key, item]) => `${JSON.stringify(key)}:${AuditService.stableStringify(item)}`)
+      .join(',')}}`;
+  }
+
+  /**
+   * Records an auditable idempotency decision for an admin background-job
+   * enqueue request. Used by JobQueueService.
+   */
+  async logJobIdempotencyDecision(
+    actor: string,
+    input: AdminJobIdempotencyAuditInput,
+    requestId?: string,
+  ): Promise<void> {
+    await this.log(
+      actor,
+      ADMIN_JOB_IDEMPOTENCY_AUDIT_ACTION,
+      `${input.operation}:${input.resource}`,
+      AuditService.buildJobIdempotencyMetadata(input),
+      requestId,
+    );
+  }
 
   async log(
     actor: string,
@@ -49,6 +139,29 @@ export class AuditService {
         `Audit store unavailable, keeping in-memory copy only: ${(error as Error).message}`,
       );
     }
+  }
+
+  async logScopeChange(params: {
+    actor: string;
+    keyId: string;
+    before: string[];
+    after: string[];
+    success: boolean;
+    requestId?: string;
+    reason?: string;
+  }): Promise<void> {
+    const { actor, keyId, before, after, success, requestId, reason } = params;
+    const metadata: Record<string, unknown> = {
+      keyId,
+      beforeScopes: [...before],
+      afterScopes: [...after],
+      outcome: success ? 'success' : 'failure',
+    };
+    if (reason) {
+      metadata.reason = reason;
+    }
+
+    await this.log(actor, 'api_key.scopes.update', keyId, metadata, requestId);
   }
 
   async query(dto: QueryAuditLogsDto) {

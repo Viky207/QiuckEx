@@ -22,11 +22,98 @@ import type {
   EscrowEvent,
   QuickExContractEvent,
 } from "./types/contract-event.types";
+import type { ReceiptTransitionResult } from "./escrow-event.repository";
 
 /** Milliseconds between reconnect attempts (doubles each retry, capped at MAX_BACKOFF_MS). */
 const INITIAL_BACKOFF_MS = 1_000;
 const MAX_BACKOFF_MS = 60_000;
 const BACKOFF_MULTIPLIER = 2;
+
+/**
+ * Structured metadata attached to Horizon dependency failures.
+ *
+ * Only privacy-safe correlation data is captured: the upstream request id
+ * (when Horizon supplies one) and the HTTP status. Addresses, payloads and
+ * other response bodies are never included.
+ */
+export interface HorizonDependencyErrorMetadata {
+  dependency: "horizon";
+  /** Upstream request id supplied by Horizon (e.g. `X-Request-Id`), if any. */
+  requestId?: string;
+  /** HTTP status code, when the failure came from an HTTP response. */
+  status?: number;
+  /** Stable error code for downstream consumers. */
+  code: "HORIZON_STREAM_ERROR";
+}
+
+/**
+ * Extract an approved upstream request id from a Horizon error/response.
+ *
+ * Horizon exposes its correlation id via the `X-Request-Id` header (and, for
+ * some SDK error shapes, a `requestId`/`request_id` property). Returns
+ * `undefined` when no identifier was supplied — we never synthesise one.
+ */
+export function extractHorizonRequestId(err: unknown): string | undefined {
+  if (!err || typeof err !== "object") return undefined;
+  const candidate = err as {
+    requestId?: unknown;
+    request_id?: unknown;
+    response?: { headers?: unknown };
+    headers?: unknown;
+  };
+
+  const direct = candidate.requestId ?? candidate.request_id;
+  if (typeof direct === "string" && direct.trim().length > 0) {
+    return direct.trim();
+  }
+
+  const headerSource = candidate.response?.headers ?? candidate.headers;
+  const headerValue = readHeader(headerSource, "x-request-id");
+  return headerValue;
+}
+
+function readHeader(headers: unknown, name: string): string | undefined {
+  if (!headers) return undefined;
+  if (typeof (headers as { get?: unknown }).get === "function") {
+    const value = (headers as { get(n: string): unknown }).get(name);
+    return typeof value === "string" && value.trim().length > 0
+      ? value.trim()
+      : undefined;
+  }
+  if (typeof headers === "object") {
+    for (const [key, value] of Object.entries(
+      headers as Record<string, unknown>,
+    )) {
+      if (key.toLowerCase() === name && typeof value === "string") {
+        return value.trim().length > 0 ? value.trim() : undefined;
+      }
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Build structured, privacy-safe metadata for a Horizon stream failure.
+ * Logs must use this instead of stringifying the raw error, which may embed
+ * addresses or payloads.
+ */
+export function buildHorizonErrorMetadata(
+  err: unknown,
+): HorizonDependencyErrorMetadata {
+  const requestId = extractHorizonRequestId(err);
+  const status =
+    typeof (err as { response?: { status?: unknown } })?.response?.status ===
+    "number"
+      ? ((err as { response: { status: number } }).response.status)
+      : undefined;
+
+  return {
+    dependency: "horizon",
+    code: "HORIZON_STREAM_ERROR",
+    ...(requestId ? { requestId } : {}),
+    ...(status !== undefined ? { status } : {}),
+  };
+}
 
 export interface IngestionConfig {
   contractId: string;
@@ -169,7 +256,7 @@ export class StellarIngestionService implements OnModuleInit, OnModuleDestroy {
         void this.handleRecord(record as RawHorizonContractEvent, streamId);
       },
       onerror: (err: unknown) => {
-        this.logger.error(`Stream error for ${streamId}: ${String(err)}`);
+        this.logHorizonStreamError(streamId, err);
         this.stopCurrentStream();
         this.scheduleReconnect(contractId);
       },
@@ -210,7 +297,7 @@ export class StellarIngestionService implements OnModuleInit, OnModuleDestroy {
     };
 
     es.onerror = (err) => {
-      this.logger.error(`SSE error for ${streamId}: ${String(err)}`);
+      this.logHorizonStreamError(streamId, err);
       es.close();
       this.scheduleReconnect(contractId);
     };
@@ -276,7 +363,7 @@ export class StellarIngestionService implements OnModuleInit, OnModuleDestroy {
         void this.handleRecord(record as RawHorizonContractEvent, streamId);
       },
       onerror: (err: unknown) => {
-        this.logger.error(`Stream error for ${streamId}: ${String(err)}`);
+        this.logHorizonStreamError(streamId, err);
         this.stopCurrentStream();
         this.scheduleReconnect(contractId);
       },
@@ -284,6 +371,21 @@ export class StellarIngestionService implements OnModuleInit, OnModuleDestroy {
 
     this.currentBackoffMs = INITIAL_BACKOFF_MS;
     return stop;
+  }
+
+  /**
+   * Log a Horizon stream failure using structured, privacy-safe metadata.
+   *
+   * The raw error is never stringified into the log line: it may contain
+   * account addresses or event payloads. Only the upstream request id (when
+   * supplied by Horizon) and HTTP status are surfaced for correlation.
+   */
+  private logHorizonStreamError(streamId: string, err: unknown): void {
+    const metadata = buildHorizonErrorMetadata(err);
+    this.logger.error(
+      `Horizon stream error for ${streamId}`,
+      metadata as unknown as Record<string, unknown>,
+    );
   }
 
   private async scheduleReconnect(contractId: string): Promise<void> {
@@ -381,25 +483,48 @@ export class StellarIngestionService implements OnModuleInit, OnModuleDestroy {
       `Processing ${event.eventType} paging_token=${event.pagingToken}`,
     );
 
-    await this.persistEvent(event);
+    const transition = await this.persistEvent(event);
+
+    // A rejected regression must not advance the cursor past the conflicting
+    // observation: the event is retained as conflict evidence and the cursor
+    // stays put so the evidence can be re-examined on the next pass.
+    if (transition?.outcome === "rejected_regression") {
+      this.logger.warn(
+        `Receipt status conflict: ${event.eventType} paging_token=${event.pagingToken} ` +
+          `receipt=${transition.receiptId ?? "unknown"} ` +
+          `observed=${transition.observedStatus ?? "unknown"} ` +
+          `canonical=${transition.canonicalStatus ?? "unknown"}`,
+      );
+      this.eventEmitter.emit("stellar.receipt_status_conflict", {
+        eventType: event.eventType,
+        pagingToken: event.pagingToken,
+        receiptId: transition.receiptId,
+        observedStatus: transition.observedStatus,
+        canonicalStatus: transition.canonicalStatus,
+      });
+      return;
+    }
+
     await this.safeUpdateCursor(streamId, raw.paging_token, raw.ledger);
 
     // Emit for other services / notification layer
     this.eventEmitter.emit(`stellar.${event.eventType}`, event);
   }
 
-  private async persistEvent(event: QuickExContractEvent): Promise<void> {
+  private async persistEvent(
+    event: QuickExContractEvent,
+  ): Promise<ReceiptTransitionResult | null> {
     switch (event.eventType) {
       case "EscrowDeposited":
       case "EscrowWithdrawn":
       case "EscrowRefunded":
-        await this.escrowRepo.upsertEvent(event as EscrowEvent);
-        break;
+        return this.escrowRepo.upsertEvent(event as EscrowEvent);
       default:
         // Other events are emitted but not stored in the DB yet.
         this.logger.debug(
           `Event ${event.eventType} emitted but not persisted.`,
         );
+        return null;
     }
   }
 

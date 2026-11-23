@@ -53,7 +53,10 @@ export class ContractChangeWebhooksController {
   @ApiOperation({
     summary: 'Register a contract change webhook (admin only)',
     description:
-      'Subscribe to contract registry change events. The webhook will receive POST requests with a JSON payload describing publish and rollback events.',
+      'Subscribe to contract registry change events. The webhook will receive POST requests with a JSON payload describing publish and rollback events. ' +
+      'Serialized event payloads are bounded by a maximum size limit; events whose serialized payload exceeds the limit are never partially sent. ' +
+      'Instead, delivery fails with a stable oversized-payload error that is observable to operators, and the event is not enqueued. ' +
+      'Normal event schemas are unchanged by this limit.',
   })
   @ApiResponse({ status: 201, type: ContractChangeWebhookResponseDto })
   @ApiResponse({ status: 400, description: 'Invalid webhook URL' })

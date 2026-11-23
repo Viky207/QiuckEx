@@ -11,6 +11,14 @@ import { useEnvironment } from '../contexts/EnvironmentContext';
 import { useSession } from '../contexts/SessionContext';
 import { useTheme } from '../src/theme/ThemeContext';
 
+/**
+ * Shared accessibility standard: every interactive target must be at least
+ * 44x44 logical pixels, with at least 8px of spacing between adjacent targets
+ * so that zoomed layouts do not produce overlapping actions.
+ */
+export const MIN_TOUCH_TARGET_SIZE = 44;
+export const MIN_TOUCH_TARGET_SPACING = 8;
+
 export function EnvironmentSwitcher() {
   const { theme } = useTheme();
   const {
@@ -51,6 +59,9 @@ export function EnvironmentSwitcher() {
             <Pressable
               key={env.id}
               testID={`switch-${env.id}`}
+              accessibilityRole="button"
+              accessibilityState={{ selected: isActive }}
+              hitSlop={MIN_TOUCH_TARGET_SPACING}
               style={[
                 styles.environmentItem,
                 {
@@ -177,6 +188,9 @@ export function EnvironmentSwitcher() {
           ) : null}
 
           <Pressable
+            testID="check-compatibility"
+            accessibilityRole="button"
+            hitSlop={MIN_TOUCH_TARGET_SPACING}
             style={[
               styles.fetchButton,
               { borderColor: theme.buttonSecondaryBorder },
@@ -197,6 +211,8 @@ export function EnvironmentSwitcher() {
 
       <Pressable
         testID="reset-environment"
+        accessibilityRole="button"
+        hitSlop={MIN_TOUCH_TARGET_SPACING}
         style={[
           styles.resetButton,
           { borderColor: theme.status.error },
@@ -236,7 +252,7 @@ const styles = StyleSheet.create({
     lineHeight: 18,
   },
   environmentList: {
-    gap: 8,
+    gap: MIN_TOUCH_TARGET_SPACING,
   },
   environmentItem: {
     flexDirection: 'row',
@@ -245,6 +261,8 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderRadius: 14,
     padding: 14,
+    minHeight: MIN_TOUCH_TARGET_SIZE,
+    minWidth: MIN_TOUCH_TARGET_SIZE,
   },
   environmentInfo: {
     flex: 1,
@@ -313,6 +331,9 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     paddingHorizontal: 14,
     alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: MIN_TOUCH_TARGET_SIZE,
+    minWidth: MIN_TOUCH_TARGET_SIZE,
   },
   fetchButtonText: {
     fontSize: 13,
@@ -324,6 +345,9 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
     paddingHorizontal: 16,
     alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: MIN_TOUCH_TARGET_SIZE,
+    minWidth: MIN_TOUCH_TARGET_SIZE,
   },
   resetButtonText: {
     fontSize: 14,

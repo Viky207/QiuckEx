@@ -109,6 +109,16 @@ nodejs_eventloop_lag_seconds > 0.5
 sum(http_requests_in_flight) > 100
 ```
 
+## Link metadata replay cache
+
+`POST /links/metadata` accepts an optional `Idempotency-Key`. Concurrent requests with the same key and payload are coalesced onto one in-flight generation, and a small process-local replay cache (five-minute TTL, maximum 500 entries) returns the original response to a retry after a client timeout.
+
+- The cache is in memory only. Restarting a backend instance clears it; this is safe because metadata generation is stateless and persists no link or ledger state.
+- Instances do not share replay state. A retry routed to a different instance may regenerate the same metadata; the response remains identical for the same payload.
+- A malformed key returns `400 INVALID_IDEMPOTENCY_KEY`; a key reused with a different payload returns `409 IDEMPOTENCY_CONFLICT`. Neither case mutates cache state.
+- Cached entries hold only public link parameters and generated metadata. No secret keys, signatures, or unnecessary personal data are stored or logged.
+- No extra metric is required: observe `http_requests_total{route="/links/metadata"}` and `http_request_duration_seconds` for traffic and latency changes.
+
 ## Grafana Dashboard
 
 The exported Grafana dashboard JSON is committed at `docs/grafana-dashboard.json` and can be imported directly into Grafana.

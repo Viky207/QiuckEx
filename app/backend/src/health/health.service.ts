@@ -9,6 +9,10 @@ import { CursorRepository } from "../ingestion/cursor.repository";
 import { SorobanRpcService } from "../transactions/soroban-rpc.service";
 import { RedisService } from "../redis/redis.service";
 import { SentryService } from "../sentry";
+import {
+  DependencyTimeoutError,
+  withTimeout,
+} from "../common/utils/timeout.util";
 
 export type DependencyStatus = "healthy" | "degraded" | "unhealthy";
 
@@ -28,6 +32,18 @@ export type CompositeHealth = {
 };
 
 const HEALTH_CACHE_TTL_MS = 5_000;
+
+/**
+ * Per-dependency timeout budgets (ms) for health checks. These are kept
+ * well below the endpoint response budget so a stalled dependency fails
+ * fast and the composite report still returns within the API window.
+ */
+export const HEALTH_CHECK_TIMEOUTS_MS = {
+  supabase: 3_000,
+  horizon: 5_000,
+  sorobanRpc: 5_000,
+  redis: 3_000,
+} as const;
 
 @Injectable()
 export class HealthService {
@@ -61,15 +77,11 @@ export class HealthService {
   }> {
     const start = Date.now();
     try {
-      // We wrap it in a Promise.race to handle timeouts.
-      const timeout = new Promise<boolean>((_, reject) =>
-        setTimeout(() => reject(new Error("Timeout")), 3000),
+      const isHealthy = await withTimeout(
+        (signal) => this.supabase.checkHealth(signal),
+        HEALTH_CHECK_TIMEOUTS_MS.supabase,
+        "supabase",
       );
-
-      const isHealthy = await Promise.race([
-        this.supabase.checkHealth(),
-        timeout,
-      ]);
       const latency = Date.now() - start;
 
       if (!isHealthy) {
@@ -85,12 +97,24 @@ export class HealthService {
         lastSuccess: new Date().toISOString(),
       };
     } catch (err) {
-      const safeMessage = sanitizeErrorMessage((err as Error).message);
+      const safeMessage = this.toDependencyError(err);
       this.logger.warn(
         `Supabase health check failed or timed out: ${safeMessage}`,
       );
       return { status: "down", details: safeMessage };
     }
+  }
+
+  /**
+   * Normalizes a dependency failure into a stable, redacted message.
+   * Timeouts map to a stable `dependency_timeout` error so callers and
+   * dashboards can distinguish stalls from other failures.
+   */
+  private toDependencyError(err: unknown): string {
+    if (err instanceof DependencyTimeoutError) {
+      return err.toStableMessage();
+    }
+    return sanitizeErrorMessage((err as Error).message);
   }
 
   /**
@@ -155,17 +179,12 @@ export class HealthService {
   }> {
     const start = Date.now();
     try {
-      const timeout = new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("Timeout")), 5000),
-      );
-
       // Check if we can query the jobs table
-      const check = Promise.race([
-        this.jobRepository.listJobs({ limit: 1 }),
-        timeout,
-      ]);
-
-      await check;
+      await withTimeout(
+        (signal) => this.jobRepository.listJobs({ limit: 1 }, signal),
+        HEALTH_CHECK_TIMEOUTS_MS.supabase,
+        "job_queue",
+      );
       const latency = Date.now() - start;
 
       return {
@@ -174,7 +193,7 @@ export class HealthService {
         lastSuccess: new Date().toISOString(),
       };
     } catch (err) {
-      const safeMessage = sanitizeErrorMessage((err as Error).message);
+      const safeMessage = this.toDependencyError(err);
       this.logger.warn(`Queue health check failed: ${safeMessage}`);
       return {
         status: "down",
@@ -194,18 +213,13 @@ export class HealthService {
   }> {
     const start = Date.now();
     try {
-      const timeout = new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("Timeout")), 5000),
-      );
-
       // Try to fetch a known account or root endpoint
       const horizonUrl = this.horizon.getBaseUrl();
-      const check = Promise.race([
-        fetch(`${horizonUrl}/`, { method: "HEAD" }),
-        timeout,
-      ]);
-
-      const response = await check;
+      const response = await withTimeout(
+        (signal) => fetch(`${horizonUrl}/`, { method: "HEAD", signal }),
+        HEALTH_CHECK_TIMEOUTS_MS.horizon,
+        "horizon",
+      );
       const latency = Date.now() - start;
 
       if (!response.ok) {
@@ -218,7 +232,7 @@ export class HealthService {
         lastSuccess: new Date().toISOString(),
       };
     } catch (err) {
-      const safeMessage = sanitizeErrorMessage((err as Error).message);
+      const safeMessage = this.toDependencyError(err);
       this.logger.warn(`Horizon health check failed: ${safeMessage}`);
       return {
         status: "down",
@@ -238,16 +252,11 @@ export class HealthService {
   }> {
     const start = Date.now();
     try {
-      const timeout = new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("Timeout")), 5000),
+      await withTimeout(
+        (signal) => this.sorobanRpcService.getNetworkPassphrase(signal),
+        HEALTH_CHECK_TIMEOUTS_MS.sorobanRpc,
+        "soroban_rpc",
       );
-
-      const check = Promise.race([
-        this.sorobanRpcService.getNetworkPassphrase(),
-        timeout,
-      ]);
-
-      await check;
       const latency = Date.now() - start;
 
       return {
@@ -256,7 +265,7 @@ export class HealthService {
         lastSuccess: new Date().toISOString(),
       };
     } catch (err) {
-      const safeMessage = sanitizeErrorMessage((err as Error).message);
+      const safeMessage = this.toDependencyError(err);
       this.logger.warn(`Soroban RPC health check failed: ${safeMessage}`);
       return {
         status: "down",
@@ -379,10 +388,11 @@ export class HealthService {
 
     const start = Date.now();
     try {
-      const timeout = new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("Timeout")), 3000),
+      const healthy = await withTimeout(
+        (signal) => this.redis.ping(signal),
+        HEALTH_CHECK_TIMEOUTS_MS.redis,
+        "redis",
       );
-      const healthy = await Promise.race([this.redis.ping(), timeout]);
       const latency = Date.now() - start;
 
       if (!healthy) {
@@ -395,7 +405,7 @@ export class HealthService {
         lastSuccess: new Date().toISOString(),
       };
     } catch (err) {
-      const safeMessage = sanitizeErrorMessage((err as Error).message);
+      const safeMessage = this.toDependencyError(err);
       this.logger.warn(`Redis health check failed: ${safeMessage}`);
       return { status: "down", details: safeMessage };
     }
@@ -508,6 +518,35 @@ export class HealthService {
       status: ready ? "healthy" : health.status,
       timestamp: health.timestamp,
       checks: health.checks,
+    };
+  }
+
+  /**
+   * Readiness verdict for the deployment rollback path.
+   *
+   * Returns a boolean `ready` flag plus the names of any dependencies that are
+   * not healthy, so deploy scripts can decide whether to roll back and log a
+   * clear, secret-free reason. Only dependency names and their composite
+   * statuses are exposed — never error details, credentials or signing
+   * material.
+   */
+  async getReadinessVerdict(): Promise<{
+    ready: boolean;
+    status: DependencyStatus;
+    failingDependencies: string[];
+    timestamp: string;
+  }> {
+    const health = await this.getHealthStatus();
+
+    const failingDependencies = Object.entries(health.checks)
+      .filter(([, check]) => check.status !== "healthy")
+      .map(([name]) => name);
+
+    return {
+      ready: failingDependencies.length === 0,
+      status: health.status,
+      failingDependencies,
+      timestamp: health.timestamp,
     };
   }
 
