@@ -10,6 +10,9 @@ on:
     paths:
       - 'app/contract/**'
 
+# No workflow-wide token scopes: every job declares its exact needs below.
+permissions: {}
+
 jobs:
   test:
     name: Test Suite
@@ -92,6 +95,8 @@ jobs:
   upgrade-regression:
     name: Upgrade Regression (Soroban sandbox)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     timeout-minutes: 10
     defaults:
       run:

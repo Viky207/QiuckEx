@@ -6,7 +6,31 @@ on:
   pull_request:
     branches: [main]
 
+# No workflow-wide token scopes: every job declares its exact needs below.
+permissions: {}
+
 jobs:
+  # ── Least-privilege workflow token gate (issue #548) ──────────────────────
+  workflow-permissions:
+    name: Workflow Token Permissions
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Check effective workflow permissions
+        run: node scripts/check-workflow-permissions.js
+
+      - name: Test the permission checker
+        run: node --test scripts/check-workflow-permissions.test.js
+
   backend:
     name: Backend
     runs-on: ubuntu-latest

@@ -10,6 +10,9 @@ on:
     paths:
       - "app/backend/**"
 
+# No workflow-wide token scopes: every job declares its exact needs below.
+permissions: {}
+
 jobs:
   build-and-test:
     name: Build and Test

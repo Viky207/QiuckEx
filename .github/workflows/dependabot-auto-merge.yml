@@ -8,9 +8,9 @@ on:
   pull_request_target:
     types: [opened, synchronize, reopened]
 
-permissions:
-  contents: write
-  pull-requests: write
+# pull_request_target grants a read/write token by default, so deny everything
+# at workflow level and restore only the auto-merge job's required scopes.
+permissions: {}
 
 jobs:
   auto-merge:

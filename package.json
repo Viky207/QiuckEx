@@ -18,6 +18,7 @@
     "check:docs": "node scripts/docs-check/check.mjs",
     "check:cache-trust": "node scripts/ci/check-cache-trust.mjs",
     "test:docs": "node --test scripts/docs-check/__tests__/docs.test.mjs",
+    "test:workflow-permissions": "node --test scripts/check-workflow-permissions.test.js",
     "secret-scan": "bash scripts/secret-scan.sh",
     "secret-scan:verify": "bash scripts/secret-scan.sh --verify",
     "secret-scan:full": "bash scripts/secret-scan.sh --full"

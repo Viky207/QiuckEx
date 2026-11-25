@@ -35,8 +35,8 @@ on:
     # 04:23 UTC daily.
     - cron: "23 4 * * *"
 
-permissions:
-  contents: read
+# No workflow-wide token scopes: both jobs only read the repository.
+permissions: {}
 
 concurrency:
   # Shared with the CD pipeline's `rc-validate` job so the two entry points
@@ -48,6 +48,8 @@ jobs:
   validate:
     name: Validate release candidate
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     timeout-minutes: 45
 
     steps:
@@ -220,6 +222,8 @@ jobs:
   load-test:
     name: Payment-link load test (k6)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     timeout-minutes: 15
     # RC validation only — never on pull requests. Fails the RC when the k6
     # thresholds (p95 < 500 ms, error rate < 1%) are breached.

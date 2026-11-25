@@ -16,6 +16,7 @@ Companion docs:
 - [MVP-CONTRACT-SCOPE.md](./MVP-CONTRACT-SCOPE.md) — what is deliberately on-chain vs deferred.
 - [RUNTIME-CONFIG-MATRIX.md](./RUNTIME-CONFIG-MATRIX.md) — environment/config drift that affects whether "Live" flows actually work in your environment.
 - [adr/README.md](./adr/README.md) — architecture decision records: the non-obvious decisions behind this map (self-custody, testnet-first, Supabase as system of record, this status vocabulary) and when a new one is required.
+- [CI-TOKEN-PERMISSIONS.md](./CI-TOKEN-PERMISSIONS.md) — least-privilege `GITHUB_TOKEN` policy for workflow and job permissions.
 - [../CONTRIBUTING.md](../CONTRIBUTING.md) — issue templates, the label vocabulary, and the ADR workflow.
 
 ## Status legend

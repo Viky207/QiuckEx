@@ -13,10 +13,8 @@ on:
       - "packages/design-tokens/**"
   workflow_dispatch:
 
-permissions:
-  contents: read
-  pages: write
-  id-token: write
+# No workflow-wide token scopes: only the Pages deploy job needs write access.
+permissions: {}
 
 concurrency:
   group: storybook-pages

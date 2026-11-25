@@ -11,6 +11,9 @@ on:
         required: false
         default: 'true'
 
+# No workflow-wide token scopes: every job declares its exact needs below.
+permissions: {}
+
 jobs:
   production-release:
     if: github.event_name == 'push'
@@ -122,6 +125,8 @@ jobs:
   maestro-android:
     name: Maestro UI Tests (Android emulator)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     timeout-minutes: 45
     defaults:
       run:

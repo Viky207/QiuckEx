@@ -15,6 +15,9 @@ on:
           - staging
           - development
 
+# No workflow-wide token scopes: the smoke test job only reads the repository.
+permissions: {}
+
 jobs:
   smoke-tests:
     name: Run Smoke Tests

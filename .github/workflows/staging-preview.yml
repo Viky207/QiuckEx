@@ -8,9 +8,8 @@ concurrency:
   group: staging-preview-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
-permissions:
-  contents: read
-  pull-requests: write
+# No workflow-wide token scopes: only the preview/comment job needs PR write.
+permissions: {}
 
 env:
   STELLAR_NETWORK: testnet
