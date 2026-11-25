@@ -1,14 +1,38 @@
 import { describe, expect, it } from 'vitest';
 import {
+  FORM_DRAFT_STORAGE_KEY,
+  FORM_DRAFT_VERSION,
   MAX_MEMO_LENGTH,
+  clearFormDraft,
+  formatIssuerPreview,
   getVerifiedAssetOptions,
+  isCustomAssetUnverified,
+  isFormDraftWorthSaving,
   readDraftLinks,
+  readFormDraft,
   saveDraftLink,
+  saveFormDraft,
+  toAssetIdentityRef,
   validateAmountInput,
   validateAssetCode,
   validateMemoInput,
   validatePaymentLinkPreview,
 } from './linkGenerator';
+
+function makeMemoryStorage(): Storage {
+  const data = new Map<string, string>();
+  return {
+    getItem(key: string) {
+      return data.get(key) ?? null;
+    },
+    setItem(key: string, value: string) {
+      data.set(key, value);
+    },
+    removeItem(key: string) {
+      data.delete(key);
+    },
+  } as unknown as Storage;
+}
 
 describe('validateAmountInput', () => {
   it('accepts positive numbers', () => {
@@ -159,18 +183,7 @@ describe('getVerifiedAssetOptions', () => {
 
 describe('draft storage', () => {
   it('saves and reads draft links in order', () => {
-    const data = new Map<string, string>();
-    const storage = {
-      getItem(key: string) {
-        return data.get(key) ?? null;
-      },
-      setItem(key: string, value: string) {
-        data.set(key, value);
-      },
-      removeItem(key: string) {
-        data.delete(key);
-      },
-    } as unknown as Storage;
+    const storage = makeMemoryStorage();
 
     const draft = {
       id: 'draft-1',
@@ -185,5 +198,101 @@ describe('draft storage', () => {
     expect(saved[0]).toMatchObject(draft);
     expect(readDraftLinks(storage)).toHaveLength(1);
     expect(MAX_MEMO_LENGTH).toBeGreaterThan(0);
+  });
+});
+
+describe('form draft storage', () => {
+  const draftInput = {
+    amount: '42.5',
+    asset: 'USDC',
+    memo: 'invoice-77',
+    displayOptions: { advancedOpen: true, slippagePct: '0.75' },
+  };
+
+  it('saves and restores a valid draft', () => {
+    const storage = makeMemoryStorage();
+    saveFormDraft(draftInput, storage);
+
+    const restored = readFormDraft(storage);
+    expect(restored).toMatchObject(draftInput);
+    expect(restored?.version).toBe(FORM_DRAFT_VERSION);
+    expect(typeof restored?.savedAt).toBe('string');
+  });
+
+  it('never persists a secret key or signed XDR field', () => {
+    const storage = makeMemoryStorage();
+    saveFormDraft(draftInput, storage);
+
+    const raw = storage.getItem(FORM_DRAFT_STORAGE_KEY);
+    expect(raw).not.toBeNull();
+    expect(raw).not.toMatch(/secret|xdr/i);
+  });
+
+  it('discards a malformed JSON draft instead of throwing', () => {
+    const storage = makeMemoryStorage();
+    storage.setItem(FORM_DRAFT_STORAGE_KEY, '{not valid json');
+
+    expect(() => readFormDraft(storage)).not.toThrow();
+    expect(readFormDraft(storage)).toBeNull();
+  });
+
+  it('discards a draft saved under an older/newer version', () => {
+    const storage = makeMemoryStorage();
+    storage.setItem(
+      FORM_DRAFT_STORAGE_KEY,
+      JSON.stringify({ ...draftInput, version: FORM_DRAFT_VERSION + 1, savedAt: new Date().toISOString() }),
+    );
+
+    expect(readFormDraft(storage)).toBeNull();
+  });
+
+  it('removes a saved draft on clear', () => {
+    const storage = makeMemoryStorage();
+    saveFormDraft(draftInput, storage);
+    expect(readFormDraft(storage)).not.toBeNull();
+
+    clearFormDraft(storage);
+    expect(readFormDraft(storage)).toBeNull();
+  });
+
+  it('only considers a draft worth saving when amount or memo has content', () => {
+    expect(isFormDraftWorthSaving({ amount: '', memo: '' })).toBe(false);
+    expect(isFormDraftWorthSaving({ amount: '10', memo: '' })).toBe(true);
+    expect(isFormDraftWorthSaving({ amount: '', memo: 'note' })).toBe(true);
+  });
+});
+
+describe('asset issuer identity', () => {
+  const issuer = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN';
+
+  it('treats native XLM as verified regardless of the verified flag', () => {
+    expect(isCustomAssetUnverified({ code: 'XLM', type: 'native', verified: false })).toBe(false);
+  });
+
+  it('flags a custom asset as unverified only when verified is explicitly false', () => {
+    expect(
+      isCustomAssetUnverified({ code: 'USDC', type: 'credit_alphanum4', issuer, verified: false }),
+    ).toBe(true);
+    expect(
+      isCustomAssetUnverified({ code: 'USDC', type: 'credit_alphanum4', issuer, verified: true }),
+    ).toBe(false);
+  });
+
+  it('resolves the full code+issuer identity for a custom asset selection', () => {
+    expect(toAssetIdentityRef({ code: 'USDC', issuer })).toEqual({ code: 'USDC', issuer });
+    expect(toAssetIdentityRef({ code: 'XLM' })).toEqual({ code: 'XLM' });
+  });
+
+  it('never conflates two distinct issuers sharing the same asset code', () => {
+    const otherIssuer = 'GB6LBXYGVNTCBD4LYQMGZ3WR3CFX2X3WS5PK2XJEHW6R6FMHEB4XJFEX';
+    const refA = toAssetIdentityRef({ code: 'USDC', issuer });
+    const refB = toAssetIdentityRef({ code: 'USDC', issuer: otherIssuer });
+    expect(refA).not.toEqual(refB);
+  });
+
+  it('shortens a long issuer address for display without losing the ends', () => {
+    expect(formatIssuerPreview(issuer)).toBe(`${issuer.slice(0, 6)}…${issuer.slice(-4)}`);
+    expect(formatIssuerPreview(issuer)).not.toBe(issuer);
+    expect(formatIssuerPreview('GSHORT')).toBe('GSHORT');
   });
 });

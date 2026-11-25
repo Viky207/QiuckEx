@@ -41,6 +41,8 @@ export type InvoicePreviewRow = {
 
 export type BulkCsvDraftRow = {
   id: string;
+  /** 1-indexed row number as it appears in the uploaded file (header = row 1). */
+  sourceRow: number;
   customerName: string;
   email: string;
   amount: string;
@@ -211,6 +213,7 @@ export function parseCsvLine(line: string): string[] {
 function toBulkCsvDraftRow(columns: BulkCsvColumns, index: number): BulkCsvDraftRow {
   const row: BulkCsvDraftRow = {
     id: `csv-row-${index}-${Math.random().toString(36).slice(2, 8)}`,
+    sourceRow: index + 2, // data rows start after the header (row 1)
     customerName: columns.customerName ?? '',
     email: columns.email ?? '',
     amount: columns.amount ?? '',

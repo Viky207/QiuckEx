@@ -1,15 +1,26 @@
 import {
   Body,
   Controller,
+  Delete,
   ForbiddenException,
   Get,
   Headers,
   Param,
   Patch,
+  Post,
   Query,
   Req,
+  UseGuards,
 } from '@nestjs/common';
-import { ApiHeader, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
+import {
+  ApiHeader,
+  ApiOperation,
+  ApiProperty,
+  ApiPropertyOptional,
+  ApiResponse,
+  ApiTags,
+} from '@nestjs/swagger';
+import { IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
 import { Request } from 'express';
 
 import {
@@ -21,6 +32,40 @@ import {
 import { FeatureFlagsService } from './feature-flags.service';
 import { FlagAuditEntry } from '../audit/audit.model';
 import { AuditService } from '../audit/audit.service';
+import { NetworkSafetyGuard } from '../common/guards/network-safety.guard';
+
+/** DTO for setting a deploy freeze (hold) on an environment. */
+class SetDeployFreezeDto {
+  @ApiProperty({
+    description: 'Human-readable reason for placing the environment on hold.',
+    example: 'Incident INC-1234: pausing production promotion',
+  })
+  @IsString()
+  @MinLength(1)
+  @MaxLength(500)
+  reason!: string;
+}
+
+/** DTO for an authorized override of an active deploy freeze. */
+class DeployFreezeOverrideDto {
+  @ApiProperty({
+    description: 'Reason for overriding the deploy freeze. Recorded in the audit log.',
+    example: 'Hotfix for SEV-1 outage approved by on-call lead',
+  })
+  @IsString()
+  @MinLength(1)
+  @MaxLength(500)
+  reason!: string;
+
+  @ApiPropertyOptional({
+    description: 'Optional ticket/incident reference for the override.',
+    example: 'INC-1234',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  ticket?: string;
+}
 
 /**
  * Resolve the actor identity for an admin write operation (issue #26).
@@ -191,6 +236,83 @@ export class FeatureFlagsController {
     );
 
     return updated;
+  }
+
+  @Get('feature-flags/deploy-freeze/:env')
+  @ApiOperation({
+    summary: 'Get deploy freeze (hold) status for an environment',
+    description:
+      'Returns the current deployment hold state for the environment, including ' +
+      'who set it, why, and any recorded overrides. A hold blocks production ' +
+      'traffic changes (promotion) but does not disable validation workflows.',
+  })
+  @ApiResponse({ status: 200, description: 'Deploy freeze status' })
+  async getDeployFreeze(@Param('env') env: string) {
+    return this.featureFlagsService.getDeployFreeze(env);
+  }
+
+  @Post('feature-flags/deploy-freeze/:env')
+  @ApiOperation({
+    summary: 'Place an environment on deploy freeze (hold)',
+    description:
+      'Blocks automatic production promotion for the environment. Validation ' +
+      'workflows continue to run. The actor is resolved from the authenticated ' +
+      'API key ID first, then the `X-Admin-Actor` header; anonymous requests are rejected.',
+  })
+  @ApiResponse({ status: 201, description: 'Deploy freeze set' })
+  @ApiResponse({ status: 403, description: 'Anonymous changes are blocked' })
+  async setDeployFreeze(
+    @Param('env') env: string,
+    @Body() body: SetDeployFreezeDto,
+    @Req() req: Request,
+    @Headers('x-admin-actor') actorHeader?: string,
+  ) {
+    const actor = resolveActor(req, actorHeader);
+    return this.featureFlagsService.setDeployFreeze(env, body.reason, actor);
+  }
+
+  @Delete('feature-flags/deploy-freeze/:env')
+  @ApiOperation({
+    summary: 'Clear a deploy freeze (hold) for an environment',
+    description:
+      'Clears the deployment hold. Only new eligible runs resume promotion; ' +
+      'runs that were blocked while the hold was active are not retroactively promoted.',
+  })
+  @ApiResponse({ status: 200, description: 'Deploy freeze cleared' })
+  @ApiResponse({ status: 403, description: 'Anonymous changes are blocked' })
+  async clearDeployFreeze(
+    @Param('env') env: string,
+    @Req() req: Request,
+    @Headers('x-admin-actor') actorHeader?: string,
+  ) {
+    const actor = resolveActor(req, actorHeader);
+    return this.featureFlagsService.clearDeployFreeze(env, actor);
+  }
+
+  @Post('feature-flags/deploy-freeze/:env/override')
+  @UseGuards(NetworkSafetyGuard)
+  @ApiOperation({
+    summary: 'Authorized override of an active deploy freeze',
+    description:
+      'Allows a single promotion to proceed despite an active deploy freeze. ' +
+      'The override is recorded in the audit log with the actor and reason. ' +
+      'Requires the network-safety/admin guard.',
+  })
+  @ApiResponse({ status: 201, description: 'Override recorded' })
+  @ApiResponse({ status: 403, description: 'Override not authorized' })
+  async overrideDeployFreeze(
+    @Param('env') env: string,
+    @Body() body: DeployFreezeOverrideDto,
+    @Req() req: Request,
+    @Headers('x-admin-actor') actorHeader?: string,
+  ) {
+    const actor = resolveActor(req, actorHeader);
+    return this.featureFlagsService.overrideDeployFreeze(
+      env,
+      body.reason,
+      actor,
+      body.ticket,
+    );
   }
 
   @Get('feature-flags/:key/evaluate')

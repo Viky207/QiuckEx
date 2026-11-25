@@ -5,9 +5,19 @@ import {
   BulkPaymentLinkItemDto,
   BulkPaymentLinkResponseItemDto,
   BulkPaymentLinkResponseDto,
+  BulkPaymentLinkRowErrorDto,
 } from './dto/bulk-payment-link.dto';
 import { LinkMetadataRequestDto } from '../dto';
+import { LinkValidationError } from './errors';
 import { v4 as uuidv4 } from 'uuid';
+
+interface ParsedCsvResult {
+  items: BulkPaymentLinkItemDto[];
+  /** Original 1-indexed file row (header = row 1) for each entry in `items`, same order. */
+  rowNumbers: number[];
+  /** Rows that failed structural/format checks before they ever became an item. */
+  rowErrors: BulkPaymentLinkRowErrorDto[];
+}
 
 @Injectable()
 export class BulkPaymentLinksService {
@@ -26,12 +36,19 @@ export class BulkPaymentLinksService {
    */
   async generateBulkLinks(
     items: BulkPaymentLinkItemDto[],
+    options?: {
+      /** Original 1-indexed source row per item (e.g. CSV file line). Defaults to the item's 1-indexed array position. */
+      rowNumbers?: number[];
+      /** Row-level errors already known before generation (e.g. CSV structural issues), merged into the response. */
+      precedingRowErrors?: BulkPaymentLinkRowErrorDto[];
+    },
   ): Promise<BulkPaymentLinkResponseDto> {
     await this.featureFlagsService.assertActionEnabled('bulk_link_generation');
     const startTime = Date.now();
+    const precedingRowErrors = options?.precedingRowErrors ?? [];
 
     // Validate batch size
-    if (items.length === 0) {
+    if (items.length === 0 && precedingRowErrors.length === 0) {
       throw new BadRequestException('At least one payment link item is required');
     }
 
@@ -43,9 +60,11 @@ export class BulkPaymentLinksService {
 
     this.logger.log(`Generating ${items.length} payment links in bulk`);
 
+    const rowNumbers = options?.rowNumbers ?? items.map((_, idx) => idx + 1);
+
     // Process all links in parallel with concurrency control
     const results: BulkPaymentLinkResponseItemDto[] = [];
-    const errors: { index: number; error: string }[] = [];
+    const rejected: BulkPaymentLinkRowErrorDto[] = [...precedingRowErrors];
 
     // Process in batches of 50 to avoid overwhelming the system
     const batchSize = 50;
@@ -53,48 +72,63 @@ export class BulkPaymentLinksService {
       const batch = items.slice(i, i + batchSize);
       const batchPromises = batch.map(async (item, batchIndex) => {
         const index = i + batchIndex;
+        const row = rowNumbers[index] ?? index + 1;
         try {
           const link = await this.generateSingleLink(item, index);
-          return { success: true, link, index };
+          return { success: true as const, link };
         } catch (error) {
-          const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-          return { success: false, error: errorMessage, index };
+          return { success: false as const, rowError: this.toRowError(row, error) };
         }
       });
 
       const batchResults = await Promise.all(batchPromises);
 
       for (const result of batchResults) {
-        if (result.success && result.link) {
+        if (result.success) {
           results.push(result.link);
-        } else if (!result.success) {
-          errors.push({ index: result.index, error: result.error });
+        } else {
+          rejected.push(result.rowError);
         }
       }
     }
 
-    // If any errors occurred, throw with details
-    if (errors.length > 0) {
-      const errorDetails = errors
-        .slice(0, 5)
-        .map((e) => `Item ${e.index}: ${e.error}`)
-        .join('; ');
-      throw new BadRequestException(
-        `Failed to generate ${errors.length} link(s). ${errorDetails}${errors.length > 5 ? '...' : ''}`,
-      );
-    }
+    rejected.sort((a, b) => a.row - b.row);
 
     const processingTime = Date.now() - startTime;
 
     this.logger.log(
-      `Successfully generated ${results.length} payment links in ${processingTime}ms`,
+      `Generated ${results.length} payment links, rejected ${rejected.length} row(s) in ${processingTime}ms`,
     );
 
     return {
-      success: true,
+      success: rejected.length === 0,
       total: results.length,
       links: results,
+      rejected,
       processingTimeMs: processingTime,
+    };
+  }
+
+  /**
+   * Map a thrown error to a stable per-row error code and field. Falls back
+   * to a generic code when the failure didn't come from link validation
+   * (e.g. an unexpected downstream error).
+   */
+  private toRowError(row: number, error: unknown): BulkPaymentLinkRowErrorDto {
+    if (error instanceof LinkValidationError) {
+      return {
+        row,
+        field: error.field ?? 'unknown',
+        code: error.code,
+        message: error.message,
+      };
+    }
+
+    return {
+      row,
+      field: 'unknown',
+      code: 'LINK_GENERATION_FAILED',
+      message: error instanceof Error ? error.message : 'Unknown error',
     };
   }
 
@@ -107,16 +141,15 @@ export class BulkPaymentLinksService {
     this.logger.log('Parsing CSV for bulk payment link generation');
 
     // Parse CSV
-    const items = this.parseCSV(csvContent);
+    const { items, rowNumbers, rowErrors } = this.parseCSV(csvContent);
 
-    if (items.length === 0) {
-      throw new BadRequestException('No valid payment link items found in CSV');
-    }
+    this.logger.log(
+      `Parsed ${items.length} valid item(s) and ${rowErrors.length} rejected row(s) from CSV`,
+    );
 
-    this.logger.log(`Parsed ${items.length} items from CSV`);
-
-    // Generate links
-    return this.generateBulkLinks(items);
+    // Generate links for the valid rows, carrying the CSV-level rejections through
+    // so a single bad row never discards the rows that parsed and generated fine.
+    return this.generateBulkLinks(items, { rowNumbers, precedingRowErrors: rowErrors });
   }
 
   /**
@@ -171,14 +204,16 @@ export class BulkPaymentLinksService {
    * @param csvContent - CSV string
    * @returns Array of payment link items
    */
-  private parseCSV(csvContent: string): BulkPaymentLinkItemDto[] {
+  private parseCSV(csvContent: string): ParsedCsvResult {
     const lines = csvContent
       .split('\n')
       .map((line) => line.trim())
       .filter((line) => line.length > 0);
 
     if (lines.length < 2) {
-      return [];
+      throw new BadRequestException(
+        'Upload a CSV file with a header row and at least one invoice row.',
+      );
     }
 
     // Parse headers
@@ -192,13 +227,22 @@ export class BulkPaymentLinksService {
     }
 
     const items: BulkPaymentLinkItemDto[] = [];
+    const rowNumbers: number[] = [];
+    const rowErrors: BulkPaymentLinkRowErrorDto[] = [];
 
-    // Parse data rows
+    // Parse data rows. Row numbers are 1-indexed as in the uploaded file,
+    // so the header is row 1 and the first data row is row 2.
     for (let i = 1; i < lines.length; i++) {
+      const fileRow = i + 1;
       const values = this.parseCSVLine(lines[i]);
 
       if (values.length !== headers.length) {
-        this.logger.warn(`Skipping line ${i + 1}: column count mismatch`);
+        rowErrors.push({
+          row: fileRow,
+          field: 'unknown',
+          code: 'COLUMN_COUNT_MISMATCH',
+          message: `Expected ${headers.length} column(s) but found ${values.length}.`,
+        });
         continue;
       }
 
@@ -233,14 +277,20 @@ export class BulkPaymentLinksService {
 
       // Validate amount
       if (isNaN(item.amount) || item.amount <= 0) {
-        this.logger.warn(`Skipping line ${i + 1}: invalid amount`);
+        rowErrors.push({
+          row: fileRow,
+          field: 'amount',
+          code: 'INVALID_AMOUNT',
+          message: `"${row.amount}" is not a valid positive amount.`,
+        });
         continue;
       }
 
       items.push(item);
+      rowNumbers.push(fileRow);
     }
 
-    return items;
+    return { items, rowNumbers, rowErrors };
   }
 
   /**

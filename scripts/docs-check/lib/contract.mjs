@@ -8,20 +8,14 @@
  *
  * It never imports or runs the backend, so it works on a fresh clone.
  */
-import { PATHS, fileExists, listControllerFiles, listFiles, readText, unique } from "./shared.mjs";
-
-/** Directory holding the backend's SQL migrations. */
-export const MIGRATIONS_DIR = "app/backend/supabase/migrations";
-
-/** The guide that must document migration authoring, rollback and verification. */
-export const MIGRATION_GUIDE = "docs/DATABASE-MIGRATION-GUIDE.md";
-
-/** Commands the migration guide must document so contributors can verify work. */
-export const MIGRATION_VERIFICATION_COMMANDS = [
-  "npm run docs:check",
-  "supabase db reset",
-  "supabase migration list",
-];
+import {
+  PATHS,
+  fileExists,
+  listControllerFiles,
+  missingSections,
+  readText,
+  unique,
+} from "./shared.mjs";
 
 /**
  * Glossary drift - issue #588.
@@ -336,9 +330,173 @@ export function checkGlobalPrefixInvariant(root) {
   return { errors, warnings: [], summary: { globalPrefix: usesGlobalPrefix } };
 }
 
+/**
+ * Soroban error-code documentation - issue #573.
+ *
+ * Clients must be able to tell a retryable network failure from a stable
+ * contract rejection. The error mapping table is the contract for that, so it
+ * must cover every code the client mapper knows about, classify each one
+ * explicitly, and give a safe user-facing interpretation.
+ */
+export const SOROBAN_DOCS_PATH = "app/contract/documentation/soroban.md";
+export const ERROR_MAPPER_PATH = "app/mobile/utils/contract-error-mapper.ts";
+
+/** The QuickexErrorCode members declared in the client error mapper. */
+export function extractQuickexErrorCodes(source) {
+  const codes = [];
+  const enumMatch = source.match(/enum\s+QuickexErrorCode\s*\{([\s\S]*?)\}/);
+  if (enumMatch) {
+    for (const match of enumMatch[1].matchAll(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=/gm)) {
+      codes.push(match[1]);
+    }
+  }
+  // A union type (`type QuickexErrorCode = "A" | "B"`) is equally valid.
+  const unionMatch = source.match(/type\s+QuickexErrorCode\s*=\s*([\s\S]*?);/);
+  if (unionMatch) {
+    for (const match of unionMatch[1].matchAll(/["'`]([A-Za-z_][A-Za-z0-9_]*)["'`]/g)) {
+      codes.push(match[1]);
+    }
+  }
+  return unique(codes);
+}
+
+/**
+ * Parse the error mapping table. A row is a markdown table line whose first
+ * cell is a code; the remaining cells carry the classification and the
+ * user-facing interpretation.
+ */
+export function parseSorobanErrorTable(text) {
+  const rows = [];
+  for (const line of text.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("|")) continue;
+    const cells = trimmed
+      .replace(/^\|/, "")
+      .replace(/\|$/, "")
+      .split("|")
+      .map((cell) => cell.trim());
+    if (cells.length < 3) continue;
+    const code = cells[0].replace(/[`*]/g, "").trim();
+    // Skip the header row and the separator row.
+    if (!code || /^code$/i.test(code) || /^-+$/.test(code)) continue;
+    if (/^:?-+:?$/.test(cells[0])) continue;
+    rows.push({ code, cells });
+  }
+  return rows;
+}
+
+export function checkSorobanErrorDocs(root) {
+  const errors = [];
+  const warnings = [];
+  const summary = { codes: 0, documented: 0, retryable: 0, nonRetryable: 0 };
+
+  if (!fileExists(root, SOROBAN_DOCS_PATH)) {
+    return { errors: [`${SOROBAN_DOCS_PATH} is missing`], warnings, summary };
+  }
+  if (!fileExists(root, ERROR_MAPPER_PATH)) {
+    return { errors: [`${ERROR_MAPPER_PATH} is missing`], warnings, summary };
+  }
+
+  const codes = extractQuickexErrorCodes(readText(root, ERROR_MAPPER_PATH));
+  summary.codes = codes.length;
+  if (codes.length === 0) {
+    errors.push(
+      `${ERROR_MAPPER_PATH}: no QuickexErrorCode members found - the error mapper must declare its codes.`,
+    );
+  }
+
+  const rows = parseSorobanErrorTable(readText(root, SOROBAN_DOCS_PATH));
+  const byCode = new Map();
+  for (const row of rows) {
+    if (byCode.has(row.code)) {
+      errors.push(`${SOROBAN_DOCS_PATH}: error code "${row.code}" is documented more than once.`);
+      continue;
+    }
+    byCode.set(row.code, row);
+  }
+
+  for (const code of codes) {
+    const row = byCode.get(code);
+    if (!row) {
+      errors.push(
+        `${SOROBAN_DOCS_PATH}: error code "${code}" from ${ERROR_MAPPER_PATH} is missing from the error mapping table.`,
+      );
+      continue;
+    }
+    summary.documented += 1;
+
+    const body = row.cells.slice(1).join(" ").toLowerCase();
+    const retryable = /\bretryable\b/.test(body);
+    const nonRetryable = /\bnon-retryable\b/.test(body);
+    if (!retryable && !nonRetryable) {
+      errors.push(
+        `${SOROBAN_DOCS_PATH}: error code "${code}" has no explicit retryable/non-retryable classification.`,
+      );
+    } else if (retryable && nonRetryable) {
+      errors.push(
+        `${SOROBAN_DOCS_PATH}: error code "${code}" is classified as both retryable and non-retryable.`,
+      );
+    } else if (retryable) {
+      summary.retryable += 1;
+    } else {
+      summary.nonRetryable += 1;
+    }
+
+    // The interpretation is the last cell; it must be present and non-empty.
+    const interpretation = row.cells[row.cells.length - 1].replace(/[`*]/g, "").trim();
+    if (!interpretation || interpretation === "-") {
+      errors.push(
+        `${SOROBAN_DOCS_PATH}: error code "${code}" has no user-facing interpretation.`,
+      );
+    }
+  }
+
+  return { errors, warnings, summary };
+}
+
+/**
+ * Verified-asset onboarding guide - issue #572.
+ *
+ * Asset listing decisions need a repeatable checklist. The guide must cover
+ * issuer proof, review ownership, the registry update path, and cache
+ * invalidation so an operator can onboard or delist an asset without guessing.
+ */
+export const ASSET_ONBOARDING_PATH = "docs/ASSET-ONBOARDING-GUIDE.md";
+
+export const ASSET_ONBOARDING_SECTIONS = [
+  "Issuer proof",
+  "Review ownership",
+  "Registry update",
+  "Cache invalidation",
+  "Delisting",
+];
+
+export function checkAssetOnboardingGuide(root) {
+  const errors = [];
+  const warnings = [];
+  const summary = { sections: ASSET_ONBOARDING_SECTIONS.length, present: 0 };
+
+  if (!fileExists(root, ASSET_ONBOARDING_PATH)) {
+    return { errors: [`${ASSET_ONBOARDING_PATH} is missing`], warnings, summary };
+  }
+
+  const text = readText(root, ASSET_ONBOARDING_PATH);
+  const missing = missingSections(text, ASSET_ONBOARDING_SECTIONS);
+  summary.present = ASSET_ONBOARDING_SECTIONS.length - missing.length;
+  for (const section of missing) {
+    errors.push(
+      `${ASSET_ONBOARDING_PATH}: required section "${section}" is missing - the onboarding guide must cover issuer proof, review ownership, the registry update path, cache invalidation, and delisting.`,
+    );
+  }
+
+  return { errors, warnings, summary };
+}
+
 /** Every contract check, in the order runCheck reports them. */
 export const CONTRACT_CHECKS = [
   ["contract drift", checkContractDrift],
   ["global prefix invariant", checkGlobalPrefixInvariant],
   ["glossary", checkGlossary],
+  ["soroban error docs", checkSorobanErrorDocs],
+  ["asset onboarding guide", checkAssetOnboardingGuide],
 ];

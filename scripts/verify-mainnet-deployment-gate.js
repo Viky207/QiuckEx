@@ -182,6 +182,44 @@ function validateImageProvenance(provenance, options) {
   return { digest, sourceRepo: provenance.source_repo };
 }
 
+function validateReleaseManifest(manifest, options) {
+  const { imageDigest, wasmHash, commit } = options;
+  if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) {
+    throw new Error('Release manifest is required');
+  }
+  if (manifest.version !== 1) throw new Error('Release manifest must be version 1');
+  if (!/^[a-f0-9]{40}$/i.test(manifest.commit ?? '') || manifest.commit !== commit) {
+    throw new Error('Release manifest commit does not match the checked-out commit');
+  }
+  if (!Array.isArray(manifest.artifacts) || manifest.artifacts.length === 0) {
+    throw new Error('Release manifest must list at least one artifact');
+  }
+  const digest = normalizeDigest(imageDigest);
+  const expectedWasm = String(wasmHash ?? '').toLowerCase();
+  const seen = new Set();
+  let matchedImage = false;
+  let matchedWasm = false;
+  for (const artifact of manifest.artifacts) {
+    if (!artifact || typeof artifact !== 'object') throw new Error('Release manifest artifacts must be objects');
+    const name = String(artifact.name ?? '');
+    if (!name) throw new Error('Release manifest artifacts must have a name');
+    if (seen.has(name)) throw new Error(`Duplicate release manifest artifact: ${name}`);
+    seen.add(name);
+    if (artifact.commit !== commit) {
+      throw new Error(`Release manifest artifact ${name} commit does not match the checked-out commit`);
+    }
+    const artifactDigest = normalizeDigest(artifact.digest);
+    if (!/^[a-f0-9]{64}$/.test(artifactDigest)) {
+      throw new Error(`Release manifest artifact ${name} digest must be a sha256 digest`);
+    }
+    if (artifact.type === 'container-image' && artifactDigest === digest) matchedImage = true;
+    if (artifact.type === 'wasm' && artifactDigest === expectedWasm) matchedWasm = true;
+  }
+  if (!matchedImage) throw new Error('Release manifest does not contain the deployed image digest');
+  if (!matchedWasm) throw new Error('Release manifest does not contain the deployed WASM hash');
+  return { commit, artifacts: manifest.artifacts.length };
+}
+
 function readReviewerKeys() {
   let keys;
   try {
@@ -213,7 +251,7 @@ function sha256(filePath) {
 
 function main() {
   const args = parseArgs(process.argv.slice(2));
-  for (const required of ['gate', 'testnet-manifest', 'audit-report', 'wasm', 'image-digest', 'image-signature', 'image-provenance', 'expected-source-repo']) {
+  for (const required of ['gate', 'testnet-manifest', 'audit-report', 'wasm', 'image-digest', 'image-signature', 'image-provenance', 'expected-source-repo', 'release-manifest']) {
     if (!args[required]) throw new Error(`--${required} is required`);
   }
   const gate = JSON.parse(fs.readFileSync(args.gate, 'utf8'));
@@ -241,7 +279,14 @@ function main() {
     commit,
     expectedSourceRepo: args['expected-source-repo'],
   });
+  const releaseManifest = JSON.parse(fs.readFileSync(args['release-manifest'], 'utf8'));
+  const manifestResult = validateReleaseManifest(releaseManifest, {
+    imageDigest: args['image-digest'],
+    wasmHash,
+    commit,
+  });
   console.log(`Image verification: digest=sha256:${signatureResult.digest} signer=${signatureResult.signer} source=${provenanceResult.sourceRepo} result=verified`);
+  console.log(`Release manifest verified: commit=${manifestResult.commit} artifacts=${manifestResult.artifacts}`);
   console.log(`Mainnet deployment gate approved for ${commit} (WASM SHA-256 ${wasmHash}).`);
 }
 
@@ -259,5 +304,7 @@ module.exports = {
   validateGate,
   validateImageSignature,
   validateImageProvenance,
+  validateReleaseManifest,
   normalizeDigest,
+  validateDeployFreeze,
 };

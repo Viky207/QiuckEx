@@ -11,6 +11,41 @@ import { SupabaseService } from '../supabase/supabase.service';
  */
 export const ADMIN_JOB_IDEMPOTENCY_AUDIT_ACTION = 'admin.job.enqueue.idempotency';
 
+/**
+ * Default audit-log retention window, in days. Audit rows older than this
+ * window are deleted by {@link AuditService.applyRetention}. This value is
+ * published in the field-level privacy and retention reference
+ * (`docs/privacy/field-inventory.md`); keep the two in sync.
+ */
+export const AUDIT_LOG_RETENTION_DAYS = 90;
+
+/**
+ * Metadata keys that must never be persisted in audit logs because they hold
+ * secrets, signing material, or unnecessary personal data. Any matching key is
+ * redacted before the entry is stored or exported.
+ */
+export const AUDIT_METADATA_REDACTED_KEYS: readonly string[] = [
+  'password',
+  'passwd',
+  'secret',
+  'token',
+  'accessToken',
+  'refreshToken',
+  'apiKey',
+  'authorization',
+  'cookie',
+  'signature',
+  'privateKey',
+  'cardNumber',
+  'cvv',
+  'ssn',
+  'email',
+  'phone',
+];
+
+const REDACTED_PLACEHOLDER = '[redacted]';
+=======
+
 export interface AdminJobIdempotencyAuditInput {
   /** Logical operation, e.g. `reconcile` or `cleanup`. */
   operation: string;
@@ -67,6 +102,30 @@ export class AuditService {
     return createHash('sha256').update(serialized).digest('hex');
   }
 
+  /**
+   * Recursively redacts sensitive keys from audit metadata so secrets, signing
+   * material, and unnecessary personal data are never persisted. Unknown
+   * fields are preserved as-is; only known-sensitive keys are redacted.
+   */
+  static redactMetadata(
+    metadata: Record<string, unknown> | undefined,
+  ): Record<string, unknown> | undefined {
+    if (!metadata) return metadata;
+    const redacted: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(metadata)) {
+      if (AUDIT_METADATA_REDACTED_KEYS.includes(key)) {
+        redacted[key] = REDACTED_PLACEHOLDER;
+      } else if (value && typeof value === 'object' && !Array.isArray(value)) {
+        redacted[key] = AuditService.redactMetadata(
+          value as Record<string, unknown>,
+        );
+      } else {
+        redacted[key] = value;
+      }
+    }
+    return redacted;
+  }
+
   private static stableStringify(value: unknown): string {
     if (value === null || typeof value !== 'object') {
       return JSON.stringify(value) ?? 'null';
@@ -112,7 +171,7 @@ export class AuditService {
       actor,
       action,
       target,
-      metadata,
+      metadata: AuditService.redactMetadata(metadata),
       requestId,
       createdAt: new Date(),
     };
@@ -208,17 +267,31 @@ export class AuditService {
     return header + rows;
   }
 
-  async applyRetention(days: number = 90) {
+  /**
+   * Deletes audit logs older than the retention window (default
+   * {@link AUDIT_LOG_RETENTION_DAYS}). Rows at or after the cutoff are kept.
+   * The in-memory fallback and the persistent store are both pruned; a store
+   * failure is logged but does not throw so retention sweeps stay best-effort.
+   */
+  async applyRetention(days: number = AUDIT_LOG_RETENTION_DAYS) {
     const cutoff = new Date();
     cutoff.setDate(cutoff.getDate() - days);
     
     const initialCount = this.logs.length;
-    this.logs = this.logs.filter(log => log.createdAt > cutoff);
+    this.logs = this.logs.filter(log => log.createdAt >= cutoff);
     const deletedCount = initialCount - this.logs.length;
 
     try {
       const client = this.supabaseService.getClient();
-      await client.from('admin_audit_logs').delete().lt('created_at', cutoff.toISOString());
+      const { error } = await client
+        .from('admin_audit_logs')
+        .delete()
+        .lt('created_at', cutoff.toISOString());
+      if (error) {
+        this.logger.warn(
+          `Failed to apply audit retention in store: ${error.message}`,
+        );
+      }
     } catch (error) {
       this.logger.warn(
         `Failed to apply audit retention in store: ${(error as Error).message}`,

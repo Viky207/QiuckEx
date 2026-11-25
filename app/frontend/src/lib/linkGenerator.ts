@@ -183,6 +183,36 @@ export function getVerifiedAssetOptions<T extends VerifiedAssetLike>(assets: T[]
   return assets;
 }
 
+export type AssetIdentity = {
+  code: string;
+  issuer?: string | null;
+  type?: string;
+  verified?: boolean;
+};
+
+/**
+ * Native XLM has no issuer and is never flagged unverified; a custom asset is
+ * unverified only when the backend's verified-asset registry explicitly says so.
+ */
+export function isCustomAssetUnverified(asset: AssetIdentity): boolean {
+  return asset.type !== 'native' && asset.verified === false;
+}
+
+/**
+ * The full asset identity (code + issuer) a selection should resolve to, so two
+ * issuers sharing a code are never conflated. Native assets have no issuer.
+ */
+export function toAssetIdentityRef(asset: AssetIdentity): { code: string; issuer?: string } {
+  return asset.issuer ? { code: asset.code, issuer: asset.issuer } : { code: asset.code };
+}
+
+export function formatIssuerPreview(issuer: string): string {
+  if (issuer.length <= 10) {
+    return issuer;
+  }
+  return `${issuer.slice(0, 6)}…${issuer.slice(-4)}`;
+}
+
 export function readDraftLinks(storage: Storage): LinkDraft[] {
   try {
     const raw = storage.getItem(DRAFT_LINKS_STORAGE_KEY);
@@ -203,4 +233,74 @@ export function saveDraftLink(draft: LinkDraft, storage: Storage): LinkDraft[] {
   );
   storage.setItem(DRAFT_LINKS_STORAGE_KEY, JSON.stringify(deduped.slice(0, 10)));
   return deduped.slice(0, 10);
+}
+
+/**
+ * In-progress link-generator form draft: amount/asset/memo/display options only.
+ * Never include a secret key or signed XDR here — this is persisted to localStorage.
+ */
+export type GeneratorFormDraft = {
+  version: number;
+  amount: string;
+  asset: string;
+  memo: string;
+  displayOptions: {
+    advancedOpen: boolean;
+    slippagePct: string;
+  };
+  savedAt: string;
+};
+
+export const FORM_DRAFT_STORAGE_KEY = 'quickex:generator-form-draft';
+export const FORM_DRAFT_VERSION = 1;
+
+export function isFormDraftWorthSaving(
+  draft: Pick<GeneratorFormDraft, 'amount' | 'memo'>,
+): boolean {
+  return Boolean(draft.amount.trim() || draft.memo.trim());
+}
+
+export function saveFormDraft(
+  draft: Pick<GeneratorFormDraft, 'amount' | 'asset' | 'memo' | 'displayOptions'>,
+  storage: Storage,
+): void {
+  const payload: GeneratorFormDraft = {
+    ...draft,
+    version: FORM_DRAFT_VERSION,
+    savedAt: new Date().toISOString(),
+  };
+  storage.setItem(FORM_DRAFT_STORAGE_KEY, JSON.stringify(payload));
+}
+
+export function readFormDraft(storage: Storage): GeneratorFormDraft | null {
+  try {
+    const raw = storage.getItem(FORM_DRAFT_STORAGE_KEY);
+    if (!raw) {
+      return null;
+    }
+    const parsed = JSON.parse(raw) as Partial<GeneratorFormDraft> | null;
+    if (!parsed || typeof parsed !== 'object') {
+      return null;
+    }
+    if (parsed.version !== FORM_DRAFT_VERSION) {
+      return null;
+    }
+    if (
+      typeof parsed.amount !== 'string' ||
+      typeof parsed.asset !== 'string' ||
+      typeof parsed.memo !== 'string' ||
+      !parsed.displayOptions ||
+      typeof parsed.displayOptions.advancedOpen !== 'boolean' ||
+      typeof parsed.displayOptions.slippagePct !== 'string'
+    ) {
+      return null;
+    }
+    return parsed as GeneratorFormDraft;
+  } catch {
+    return null;
+  }
+}
+
+export function clearFormDraft(storage: Storage): void {
+  storage.removeItem(FORM_DRAFT_STORAGE_KEY);
 }

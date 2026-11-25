@@ -13,7 +13,13 @@ import {
 import { ApiOperation, ApiResponse, ApiTags } from "@nestjs/swagger";
 import { IsBoolean, IsInt, IsNotEmpty, IsOptional, IsString, Min, IsArray } from "class-validator";
 
-import { SorobanEventIndexerService, LedgerRangeResult } from "./soroban-event-indexer.service";
+import {
+  SorobanEventIndexerService,
+  LedgerRangeResult,
+  IndexerCheckpointStatus,
+  CheckpointBackupResult,
+  SafeRestartResult,
+} from "./soroban-event-indexer.service";
 import type { UnparsedSorobanEventRecord, UnparsedSorobanEventReason } from "./unparsed-soroban-event.repository";
 import { ApiKeyGuard } from "../auth/guards/api-key.guard";
 import { RequireScopes } from "../auth/decorators/require-scopes.decorator";
@@ -44,6 +50,35 @@ class ReplayBatchDto {
   @IsArray()
   @IsString({ each: true })
   pagingTokens!: string[];
+}
+
+class CheckpointBackupDto {
+  @IsString()
+  @IsNotEmpty()
+  contractId!: string;
+
+  /**
+   * Explicit operator approval. Destructive checkpoint edits are refused
+   * unless this is set to true, and a backup is always taken first.
+   */
+  @IsBoolean()
+  @IsOptional()
+  approveDestructiveEdit?: boolean;
+}
+
+class SafeRestartDto {
+  @IsString()
+  @IsNotEmpty()
+  contractId!: string;
+
+  /**
+   * Optional ledger to resume from. When omitted the stored checkpoint is
+   * used, so already-processed events are not re-emitted.
+   */
+  @IsInt()
+  @Min(1)
+  @IsOptional()
+  resumeFromLedger?: number;
 }
 
 /**
@@ -87,6 +122,59 @@ export class SorobanIndexerController {
     } finally {
       this.running = false;
     }
+  }
+
+  @Get("checkpoint")
+  @ApiOperation({
+    summary: "Inspect the current indexer checkpoint and lag (admin only)",
+    description:
+      "Returns the stored checkpoint for a contract together with the latest indexed ledger and the " +
+      "lag between them. Use this to diagnose a stalled indexer before restarting it.",
+  })
+  @ApiResponse({ status: 200, description: "Current checkpoint and lag" })
+  getCheckpoint(
+    @Query("contractId") contractId: string,
+  ): Promise<IndexerCheckpointStatus> {
+    return this.indexer.getCheckpointStatus(contractId);
+  }
+
+  @Post("restart")
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: "Safely restart the indexer from its checkpoint (admin only)",
+    description:
+      "Resumes indexing from the stored checkpoint (or an explicit resumeFromLedger). " +
+      "Idempotent upserts preserve exactly-once effects across the restart.",
+  })
+  @ApiResponse({ status: 200, description: "Restart completed" })
+  @ApiResponse({ status: 409, description: "A reindex run is already in progress" })
+  async restart(@Body() dto: SafeRestartDto): Promise<SafeRestartResult> {
+    if (this.running) {
+      throw new ConflictException("A reindex run is already in progress");
+    }
+
+    this.running = true;
+    try {
+      return await this.indexer.safeRestart(dto.contractId, dto.resumeFromLedger);
+    } finally {
+      this.running = false;
+    }
+  }
+
+  @Post("checkpoint/backup")
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: "Back up the indexer checkpoint before a destructive edit (admin only)",
+    description:
+      "Snapshots the current checkpoint so it can be restored if a destructive edit goes wrong. " +
+      "Destructive checkpoint edits require explicit approval (approveDestructiveEdit=true).",
+  })
+  @ApiResponse({ status: 200, description: "Checkpoint backup created" })
+  @ApiResponse({ status: 403, description: "Destructive edit not approved" })
+  async backupCheckpoint(
+    @Body() dto: CheckpointBackupDto,
+  ): Promise<CheckpointBackupResult> {
+    return this.indexer.backupCheckpoint(dto.contractId, dto.approveDestructiveEdit ?? false);
   }
 
   @Get("unparsed-events")

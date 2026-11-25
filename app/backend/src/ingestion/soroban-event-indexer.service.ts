@@ -425,6 +425,14 @@ export class SorobanEventIndexerService {
     return this.replayBatch(records);
   }
 
+  /**
+   * Returns the durable checkpoint for a contract so operators can inspect
+   * progress during stall diagnosis. Read-only: never mutates the checkpoint.
+   */
+  async getCheckpoint(contractId: string) {
+    return this.checkpointRepo.getCheckpoint(contractId);
+  }
+
   async replayBatch(records: UnparsedSorobanEventRecord[]): Promise<ReplayUnparsedResult> {
     let replayed = 0;
     let stillUnparsed = 0;

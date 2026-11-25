@@ -9,6 +9,7 @@
  */
 
 import { useEffect, useState, useCallback } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   AreaChart,
   Area,
@@ -31,8 +32,11 @@ import type {
 import {
   fetchAnalytics,
   exportAnalyticsReport,
+  getAnalyticsFreshness,
+  invalidateAnalyticsCache,
   type DateRange,
   type AnalyticsData,
+  type AnalyticsFreshness,
 } from "@/hooks/analyticsApi";
 import { getQuickexApiBase } from "@/lib/api";
 import { resolvePublicKey } from "@/lib/publicKey";
@@ -45,6 +49,12 @@ const RANGES: { label: string; value: DateRange }[] = [
   { label: "30d", value: "30d" },
   { label: "All Time", value: "all" },
 ];
+
+const RANGE_QUERY_PARAM = "range";
+
+function isDateRange(value: string | null): value is DateRange {
+  return value === "24h" || value === "7d" || value === "30d" || value === "all";
+}
 
 function DateRangeFilter({
   active,
@@ -171,8 +181,15 @@ function DonutLabel({
 // ─── Main component ───────────────────────────────────────────────────────────
 
 export default function AnalyticsDashboard() {
-  const [range, setRange] = useState<DateRange>("30d");
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const initialRange = isDateRange(searchParams.get(RANGE_QUERY_PARAM))
+    ? (searchParams.get(RANGE_QUERY_PARAM) as DateRange)
+    : "30d";
+  const [range, setRangeState] = useState<DateRange>(initialRange);
   const [data, setData] = useState<AnalyticsData | null>(null);
+  const [freshness, setFreshness] = useState<AnalyticsFreshness | null>(null);
   const [loading, setLoading] = useState(true);
   const [realtimeConnected, setRealtimeConnected] = useState(false);
   const [reportType, setReportType] = useState<"accounting" | "tax">("accounting");
@@ -183,9 +200,30 @@ export default function AnalyticsDashboard() {
     setLoading(true);
     fetchAnalytics(r).then((d) => {
       setData(d);
+      setFreshness(getAnalyticsFreshness(r) ?? null);
       setLoading(false);
     });
   }, []);
+
+  const setRange = useCallback(
+    (r: DateRange) => {
+      setRangeState(r);
+      const params = new URLSearchParams(searchParams.toString());
+      params.set(RANGE_QUERY_PARAM, r);
+      router.replace(`${pathname}?${params.toString()}`, { scroll: false });
+    },
+    [pathname, router, searchParams],
+  );
+
+  useEffect(() => {
+    const fromUrl = searchParams.get(RANGE_QUERY_PARAM);
+    if (isDateRange(fromUrl) && fromUrl !== range) {
+      setRangeState(fromUrl);
+    }
+    // Only react to external URL changes (e.g. back/forward navigation);
+    // `range` itself is intentionally excluded to avoid a feedback loop with `setRange`.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
 
   useEffect(() => {
     load(range);
@@ -195,7 +233,10 @@ export default function AnalyticsDashboard() {
     const streamUrl = new URL(`${getQuickexApiBase()}/analytics/events`);
     streamUrl.searchParams.set("publicKey", resolvePublicKey());
     const source = new EventSource(streamUrl.toString());
-    const handleUpdate = () => load(range);
+    const handleUpdate = () => {
+      invalidateAnalyticsCache(range);
+      load(range);
+    };
 
     source.onopen = () => setRealtimeConnected(true);
     source.onerror = () => setRealtimeConnected(false);
@@ -255,6 +296,25 @@ export default function AnalyticsDashboard() {
             <span className={`mr-1.5 inline-block h-2 w-2 rounded-full ${realtimeConnected ? "bg-emerald-400" : "bg-amber-400"}`} />
             {realtimeConnected ? "Live updates enabled" : "Live updates reconnecting"}
           </p>
+          {freshness ? (
+            <p className="mt-1 text-[11px] font-bold text-muted" aria-live="polite">
+              {freshness.failed ? (
+                <span className="rounded-full bg-danger/10 px-2 py-0.5 text-danger">
+                  Unavailable — showing last known values
+                </span>
+              ) : freshness.cached ? (
+                <span className="rounded-full bg-amber-400/10 px-2 py-0.5 text-amber-500">
+                  Cached as of{" "}
+                  {new Date(freshness.fetchedAt).toLocaleTimeString()}
+                </span>
+              ) : (
+                <span className="rounded-full bg-emerald-400/10 px-2 py-0.5 text-success">
+                  Updated as of{" "}
+                  {new Date(freshness.fetchedAt).toLocaleTimeString()}
+                </span>
+              )}
+            </p>
+          ) : null}
         </div>
         <div className="flex flex-col gap-3 sm:items-end">
           <DateRangeFilter active={range} onChange={setRange} />

@@ -15,6 +15,7 @@ jobs:
   lint-and-test:
     name: Lint & Unit Tests
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: app/frontend
@@ -23,13 +24,15 @@ jobs:
 
       - uses: pnpm/action-setup@v4
         with:
-          version: 9
+          version: 10.33.0
 
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: pnpm
-          cache-dependency-path: app/frontend/pnpm-lock.yaml
+          cache-dependency-path: |
+            pnpm-lock.yaml
+            app/frontend/package.json
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -40,9 +43,16 @@ jobs:
       - name: Unit tests
         run: pnpm test
 
+      - name: Summarize failure
+        if: failure()
+        run: |
+          echo "### :x: Frontend lint-and-test job failed" >> "$GITHUB_STEP_SUMMARY"
+          echo "See the failed step above for details." >> "$GITHUB_STEP_SUMMARY"
+
   visual-regression:
     name: Visual Regression
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: app/frontend
@@ -51,21 +61,25 @@ jobs:
 
       - uses: pnpm/action-setup@v4
         with:
-          version: 9
+          version: 10.33.0
 
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: pnpm
-          cache-dependency-path: app/frontend/pnpm-lock.yaml
+          cache-dependency-path: |
+            pnpm-lock.yaml
+            app/frontend/package.json
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
       - name: Install Playwright browsers
+        timeout-minutes: 5
         run: pnpm exec playwright install --with-deps chromium
 
       - name: Run visual regression tests
+        timeout-minutes: 10
         # Visual tests run against a mocked API (MSW / route interception);
         # no real Horizon calls are made.
         run: pnpm test:visual
@@ -84,3 +98,9 @@ jobs:
             app/frontend/visual/**/*-actual.png
           if-no-files-found: ignore
           retention-days: 14
+
+      - name: Summarize failure
+        if: failure()
+        run: |
+          echo "### :x: Visual regression job failed" >> "$GITHUB_STEP_SUMMARY"
+          echo "Diff artifacts (if any) are attached to this run." >> "$GITHUB_STEP_SUMMARY"

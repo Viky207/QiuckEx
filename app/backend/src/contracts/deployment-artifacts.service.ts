@@ -1,16 +1,54 @@
-import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ForbiddenException,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { createHash, randomUUID } from 'crypto';
 
 import { AppConfigService } from '../config';
 import { SupabaseService } from '../supabase/supabase.service';
 import { AuditService } from '../audit/audit.service';
+import { FeatureFlagsService } from '../feature-flags/feature-flags.service';
 import {
   DeploymentArtifactResponseDto,
   DeploymentArtifactDownloadResponseDto,
   DeploymentArtifactType,
   UploadDeploymentArtifactDto,
 } from './dto/deployment-artifact.dto';
+
+/**
+ * Thrown when a production promotion or traffic change is attempted while the
+ * environment is under a deploy freeze. Validation-only workflows (build, test,
+ * dry-run) are never gated and therefore never raise this error.
+ */
+export class DeployFrozenException extends ForbiddenException {
+  constructor(
+    readonly environment: string,
+    readonly reason: string | null,
+    readonly generation: number,
+  ) {
+    super({
+      statusCode: 403,
+      error: 'DeployFrozen',
+      message: `Deployments are frozen for environment '${environment}'${
+        reason ? `: ${reason}` : ''
+      }`,
+      environment,
+      reason,
+      generation,
+    });
+  }
+}
+
+export type DeploymentWorkflowKind = 'promotion' | 'traffic-change' | 'validation';
+
+const GATED_WORKFLOW_KINDS: ReadonlySet<DeploymentWorkflowKind> = new Set([
+  'promotion',
+  'traffic-change',
+]);
 
 const RETENTION_DAYS = 180;
 const MAX_ARTIFACT_BYTES = 10 * 1024 * 1024; // 10MB
@@ -38,12 +76,39 @@ export class DeploymentArtifactsService {
     private readonly supabaseService: SupabaseService,
     private readonly configService: AppConfigService,
     private readonly auditService: AuditService,
+    private readonly featureFlagsService: FeatureFlagsService,
   ) {}
+
+  /**
+   * Asserts that the given environment is not under a deploy freeze before a
+   * production traffic change or promotion. Validation-only workflows are not
+   * gated and pass through untouched.
+   *
+   * @throws DeployFrozenException when the environment is frozen.
+   */
+  async assertPromotionAllowed(
+    environment: string,
+    workflowKind: DeploymentWorkflowKind = 'promotion',
+  ): Promise<void> {
+    if (!GATED_WORKFLOW_KINDS.has(workflowKind)) {
+      return;
+    }
+
+    const freeze = await this.featureFlagsService.isFrozen(environment);
+    if (freeze.frozen) {
+      this.logger.warn(
+        `Blocked ${workflowKind} for environment '${environment}' due to deploy freeze (generation ${freeze.generation})`,
+      );
+      throw new DeployFrozenException(environment, freeze.reason, freeze.generation);
+    }
+  }
 
   async upload(
     dto: UploadDeploymentArtifactDto,
     uploadedBy: string,
   ): Promise<DeploymentArtifactResponseDto> {
+    // Uploading an artifact is a validation/build-time activity and is never gated
+    // by the deploy freeze; only promotion and traffic changes are blocked.
     let buffer: Buffer;
     try {
       buffer = Buffer.from(dto.contentBase64, 'base64');
@@ -101,6 +166,8 @@ export class DeploymentArtifactsService {
   }
 
   async download(id: string): Promise<DeploymentArtifactDownloadResponseDto> {
+    // Downloading an artifact is a validation/build-time activity and is never gated
+    // by the deploy freeze.
     const records = await this.readRecords();
     const record = records.find((r) => r.id === id);
     if (!record) {
@@ -116,6 +183,32 @@ export class DeploymentArtifactsService {
       contentBase64: record.content,
       checksumValid: freshChecksum === record.checksumSha256,
     };
+  }
+
+  /**
+   * Promotes a deployment artifact to the target environment. This is a
+   * production traffic change and is blocked while the environment is frozen.
+   */
+  async promote(
+    id: string,
+    environment: string,
+    promotedBy: string,
+  ): Promise<DeploymentArtifactResponseDto> {
+    await this.assertPromotionAllowed(environment, 'promotion');
+
+    const records = await this.readRecords();
+    const record = records.find((r) => r.id === id);
+    if (!record) {
+      throw new NotFoundException(`Deployment artifact ${id} not found`);
+    }
+
+    await this.auditService.log(promotedBy, 'deployment_artifact.promoted', record.id, {
+      deploymentId: record.deploymentId,
+      environment,
+      checksumSha256: record.checksumSha256,
+    });
+
+    return this.toResponseDto(record);
   }
 
   /**

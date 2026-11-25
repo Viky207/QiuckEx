@@ -1,72 +1,58 @@
 # Metrics Reference
 
-This page enumerates every Prometheus metric exported by the NestJS backend via
-[`prom-client`](https://github.com/siimon/prom-client). Metrics are exposed on the
-`/metrics` endpoint (default `http://localhost:4000/metrics`) and scraped by
-Prometheus. Use this page as the on-call quick reference for what each metric
-means and what to alert on.
+This document describes the metrics exposed by the backend and how they are
+collected. It also documents the notification delivery and retry semantics that
+integrators rely on when consuming notification-related metrics.
 
-> Verify the live set of metrics at any time with:
->
-> ```bash
-> curl -s localhost:4000/metrics
-> ```
+## Notification delivery and retry semantics
 
-## Conventions
+### Event creation
 
-- All custom metrics are prefixed with `app_`.
-- Default Node.js process metrics are also exported (prefixed `process_` and
-  `nodejs_`); they are listed at the end for completeness.
-- Histograms expose `_bucket`, `_sum`, and `_count` series.
+Notifications are created when a domain event is emitted (for example, a
+payment status change or an account update). Each event is persisted before any
+delivery attempt is made, so a notification record exists even if delivery is
+delayed or fails. Event creation is the single source of truth for what should
+be delivered; delivery workers only read from persisted events.
 
-## HTTP metrics
+### Preferences
 
-### `app_http_requests_total`
+Per-user channel preferences are evaluated at delivery time, not at event
+creation time. If a user disables a channel, pending deliveries for that channel
+are skipped. Preference changes therefore affect notifications that have not yet
+been delivered.
 
-- **Type:** counter
-- **Labels:** `method`, `route`, `status_code`
-- **Description:** Total number of HTTP requests handled, partitioned by HTTP
-  method, matched route, and response status code.
-- **Example query** — request rate by status class over 5m:
+### Delivery guarantees per channel
 
-  ```promql
-  sum by (status_code) (rate(app_http_requests_total[5m]))
-  ```
+Delivery is **at-least-once** per channel. There is no exactly-once guarantee:
+retries and worker restarts can cause a notification to be delivered more than
+once. Consumers that require exactly-once behavior must deduplicate using the
+notification identifier carried with each delivery. The only idempotency
+boundary is the persisted notification record keyed by its identifier; delivery
+itself is not transactional with the downstream channel.
 
-### `app_http_request_duration_seconds`
+### Retries and backoff
 
-- **Type:** histogram
-- **Labels:** `method`, `route`, `status_code`
-- **Description:** HTTP request latency in seconds. Default buckets cover
-  5ms–10s.
-- **Example query** — p99 latency per route over 5m:
+Failed delivery attempts are retried with exponential backoff up to a bounded
+number of attempts. After the maximum attempts are exhausted the notification is
+marked as failed and no further automatic retries occur. Retry counters and
+failure states are reflected in the notification metrics.
 
-  ```promql
-  histogram_quantile(
-    0.99,
-    sum by (le, route) (rate(app_http_request_duration_seconds_bucket[5m]))
-  )
-  ```
+### Deduplication
 
-### `app_http_requests_in_flight`
+Deduplication is applied at the event level: an event with the same identifier
+is not re-created, so duplicate event emissions do not produce duplicate
+notification records. This is the idempotency boundary. Deduplication does not
+extend to delivery, which remains at-least-once as described above.
 
-- **Type:** gauge
-- **Labels:** `method`
-- **Description:** Number of HTTP requests currently being processed.
-- **Example query** — concurrent requests:
+### Delayed delivery status
 
-  ```promql
-  sum(app_http_requests_in_flight)
-  ```
+Delivery status can lag behind actual delivery because status updates are
+written asynchronously by delivery workers. Metrics that report delivery status
+may therefore be delayed relative to the underlying channel. Treat status
+metrics as eventually consistent and rely on the notification identifier for
+reconciliation.
 
-## Business metrics
-
-### `app_escrow_operations_total`
-
-- **Type:** counter
-- **Labels:** `operation` (`create`, `release`, `refund`), `status` (`success`, `failure`)
-- **Description:** Total escrow operations processed by the backend.
-- **Example query** — escrow failure rate over 5m:
+## Metric collection
 
   ```promql
   sum(rate(app_escrow_operations_total{status="failure"}[5m]))
@@ -97,6 +83,53 @@ means and what to alert on.
   histogram_quantile(
     0.95,
     sum by (le, table) (rate(app_db_query_duration_seconds_bucket[5m]))
+  )
+  ```
+
+## Reconciliation metrics
+
+Reconciliation runs process a bounded ledger range per job and persist a
+resumable cursor with the run metadata. The following metrics expose progress so
+operators can observe a run advancing (or stalling) across bounded batches.
+
+### `app_reconciliation_ledgers_processed_total`
+
+- **Type:** counter
+- **Labels:** `run_id`
+- **Description:** Total ledgers processed by reconciliation, partitioned by run.
+  Increments once per ledger as each bounded batch is committed, so the sum
+  across a run reflects durable progress (no double-counting on resume).
+- **Example query** — ledgers processed per run over 5m:
+
+  ```promql
+  sum by (run_id) (rate(app_reconciliation_ledgers_processed_total[5m]))
+  ```
+
+### `app_reconciliation_cursor_ledger`
+
+- **Type:** gauge
+- **Labels:** `run_id`
+- **Description:** The last ledger sequence durably committed to the run's
+  resumable cursor. On restart the run resumes from this cursor, so a stalled
+  gauge indicates a run that is not making progress.
+- **Example query** — cursor position per run:
+
+  ```promql
+  app_reconciliation_cursor_ledger
+  ```
+
+### `app_reconciliation_batch_duration_seconds`
+
+- **Type:** histogram
+- **Labels:** `run_id`
+- **Description:** Wall-clock duration in seconds of each bounded reconciliation
+  batch. Use this to tune the configured batch size within its safe bounds.
+- **Example query** — p95 batch duration per run over 10m:
+
+  ```promql
+  histogram_quantile(
+    0.95,
+    sum by (le, run_id) (rate(app_reconciliation_batch_duration_seconds_bucket[10m]))
   )
   ```
 
@@ -153,6 +186,15 @@ sum(rate(app_escrow_operations_total{status="failure"}[5m])) > 0.1
 - `for: 5m`
 - Severity: `critical`
 
+**Supabase dependency down** — critical persistence dependency unavailable:
+
+```promql
+app_dependency_up{dependency="supabase"} == 0
+```
+
+- `for: 2m`
+- Severity: `critical`
+
 ### P1 — notify, investigate during business hours
 
 **Elevated error rate** — more than 0.5% of requests failing for 10 minutes:
@@ -188,6 +230,16 @@ histogram_quantile(
 ```
 
 - `for: 10m`
+- Severity: `warning`
+
+**Stalled reconciliation run** — a run whose cursor has not advanced for 15
+minutes while it is still active:
+
+```promql
+increase(app_reconciliation_ledgers_processed_total[15m]) == 0
+```
+
+- `for: 15m`
 - Severity: `warning`
 
 **Event loop lag** — event loop lag above 100ms for 10 minutes:
