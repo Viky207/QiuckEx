@@ -3,6 +3,51 @@ export type TransactionAsset = {
   issuer?: string;
 };
 
+/**
+ * Canonical payment intent lifecycle states.
+ *
+ * These values are the single source of truth shared with the backend
+ * payment intent contract (see docs/payment-intent-lifecycle.md):
+ *
+ * - `pending`   — intent created, not yet submitted to the network.
+ * - `submitted` — transaction broadcast to Horizon; no ledger confirmation yet.
+ * - `confirmed` — transaction included in a ledger (ledger confirmation).
+ * - `expired`   — terminal; submission window elapsed before confirmation.
+ * - `failed`    — terminal; submission or ledger inclusion failed.
+ *
+ * `submitted` must never be treated as `confirmed`: only ledger inclusion
+ * confirms a payment. `expired` and `failed` are terminal and retry-safe
+ * actions must create a new intent rather than mutating these states.
+ */
+export const PAYMENT_INTENT_STATES = [
+  "pending",
+  "submitted",
+  "confirmed",
+  "expired",
+  "failed",
+] as const;
+
+export type PaymentIntentState = (typeof PAYMENT_INTENT_STATES)[number];
+
+export const TERMINAL_PAYMENT_INTENT_STATES = [
+  "confirmed",
+  "expired",
+  "failed",
+] as const satisfies readonly PaymentIntentState[];
+
+export function isPaymentIntentState(value: unknown): value is PaymentIntentState {
+  return (
+    typeof value === "string" &&
+    (PAYMENT_INTENT_STATES as readonly string[]).includes(value)
+  );
+}
+
+export function isTerminalPaymentIntentState(
+  state: PaymentIntentState,
+): boolean {
+  return (TERMINAL_PAYMENT_INTENT_STATES as readonly string[]).includes(state);
+}
+
 export type Transaction = {
   id: string;
   hash: string;
@@ -15,12 +60,101 @@ export type Transaction = {
   timestamp: string;
   feePaid: string;
   shielded?: boolean;
+  /**
+   * Payment intent lifecycle state. Optional for legacy records that predate
+   * the lifecycle contract; consumers should treat a missing value as
+   * `pending` via {@link getPaymentIntentState}.
+   */
+  status?: PaymentIntentState;
 };
 
 export type TransactionDetail = Transaction & {
   explorerUrl: string;
   horizonUrl: string;
 };
+
+/**
+ * Canonical payment status vocabulary shared across web surfaces
+ * (dashboard, link page, confirmation screen).
+ *
+ * Each value maps to a stable backend `LinkState`:
+ * - `pending`   <- DRAFT, ACTIVE
+ * - `confirmed` <- PAID
+ * - `expired`   <- EXPIRED
+ * - `failed`    <- REFUNDED (and any unrecognized/unknown backend state)
+ */
+export type PaymentStatus = "pending" | "confirmed" | "expired" | "failed";
+
+/** Backend link states as returned by the API. */
+export type LinkState = "DRAFT" | "ACTIVE" | "EXPIRED" | "PAID" | "REFUNDED";
+
+export type PaymentStatusPresentation = {
+  status: PaymentStatus;
+  /** Human-readable label, e.g. "Pending". */
+  label: string;
+  /** Non-color-only glyph so status is distinguishable without color. */
+  glyph: string;
+  /** Short text signal paired with the glyph (also non-color-only). */
+  signal: string;
+  /** Text announced to assistive technology via an aria-live region. */
+  announcement: string;
+};
+
+const PAYMENT_STATUS_PRESENTATION: Record<PaymentStatus, Omit<PaymentStatusPresentation, "status">> = {
+  pending: {
+    label: "Pending",
+    glyph: "◷",
+    signal: "Awaiting payment",
+    announcement: "Payment status: Pending. Awaiting payment.",
+  },
+  confirmed: {
+    label: "Confirmed",
+    glyph: "✓",
+    signal: "Payment received",
+    announcement: "Payment status: Confirmed. Payment received.",
+  },
+  expired: {
+    label: "Expired",
+    glyph: "⌛",
+    signal: "Link expired",
+    announcement: "Payment status: Expired. The payment link has expired.",
+  },
+  failed: {
+    label: "Failed",
+    glyph: "✕",
+    signal: "Payment not completed",
+    announcement: "Payment status: Failed. The payment was not completed.",
+  },
+};
+
+/**
+ * Maps a backend `LinkState` to the canonical `PaymentStatus`.
+ * Unknown or unrecognized states fall back to `failed` so the UI never
+ * silently presents an ambiguous state as successful.
+ */
+export function mapBackendStateToPaymentStatus(state: LinkState | string | null | undefined): PaymentStatus {
+  switch (state) {
+    case "DRAFT":
+    case "ACTIVE":
+      return "pending";
+    case "PAID":
+      return "confirmed";
+    case "EXPIRED":
+      return "expired";
+    case "REFUNDED":
+    default:
+      return "failed";
+  }
+}
+
+/**
+ * Returns the presentation (label, non-color glyph/signal, and aria-live
+ * announcement) for a canonical payment status.
+ */
+export function getPaymentStatusPresentation(status: PaymentStatus): PaymentStatusPresentation {
+  const presentation = PAYMENT_STATUS_PRESENTATION[status];
+  return { status, ...presentation };
+}
 
 const STELLAR_NETWORK = (process.env.NEXT_PUBLIC_STELLAR_NETWORK ?? "testnet") as
   | "testnet"
@@ -79,4 +213,28 @@ export function displaySender(tx: Transaction): string {
 
 export function displayRecipient(tx: Transaction): string {
   return tx.shielded ? "Shielded" : tx.recipient;
+}
+
+/**
+ * Resolve the canonical lifecycle state for a transaction. Legacy records
+ * without a status are treated as `pending` (not yet confirmed).
+ */
+export function getPaymentIntentState(tx: Transaction): PaymentIntentState {
+  return tx.status ?? "pending";
+}
+
+export function displayPaymentIntentState(tx: Transaction): string {
+  const state = getPaymentIntentState(tx);
+  switch (state) {
+    case "pending":
+      return "Pending";
+    case "submitted":
+      return "Submitted";
+    case "confirmed":
+      return "Confirmed";
+    case "expired":
+      return "Expired";
+    case "failed":
+      return "Failed";
+  }
 }

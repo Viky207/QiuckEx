@@ -14,6 +14,20 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useSecurity } from "@/hooks/use-security";
 import { useTheme } from "../src/theme/ThemeContext";
 
+/**
+ * Minimum interactive target size (in dp) required by the project
+ * accessibility standard. Every tappable control on this screen must meet
+ * or exceed this in both dimensions so it stays operable on touch devices
+ * and does not overlap when the UI is zoomed.
+ */
+export const MIN_TOUCH_TARGET = 44;
+
+/**
+ * Minimum spacing (in dp) between adjacent interactive targets so that
+ * zoomed layouts do not create overlapping hit areas.
+ */
+export const MIN_TOUCH_SPACING = 8;
+
 const TIMEOUT_OPTIONS = [
   { value: 1, label: "1 min", detail: "Maximum security — re-authenticate frequently" },
   { value: 5, label: "5 min", detail: "Balanced for rapid testing cycles" },
@@ -118,11 +132,13 @@ export default function SecurityScreen() {
                 Prompt on app open and before critical transactions.
               </Text>
             </View>
-            <Switch
-              value={settings.biometricLockEnabled}
-              onValueChange={onToggle}
-              disabled={!isBiometricAvailable}
-            />
+            <View style={styles.switchTarget}>
+              <Switch
+                value={settings.biometricLockEnabled}
+                onValueChange={onToggle}
+                disabled={!isBiometricAvailable}
+              />
+            </View>
           </View>
 
           <View style={[styles.divider, { backgroundColor: theme.border }]} />
@@ -170,6 +186,8 @@ export default function SecurityScreen() {
             style={[styles.saveBtn, { backgroundColor: theme.buttonPrimaryBg }]}
             onPress={submitPin}
             disabled={savingPin}
+            accessibilityRole="button"
+            accessibilityState={{ disabled: savingPin }}
           >
             <Text style={[styles.saveBtnText, { color: theme.buttonPrimaryText }]}>
               {savingPin ? "Saving..." : "Save PIN"}
@@ -207,6 +225,8 @@ export default function SecurityScreen() {
                     },
                   ]}
                   onPress={() => setSessionTimeoutMinutes(option.value)}
+                  accessibilityRole="button"
+                  accessibilityState={{ selected: active }}
                 >
                   <Text
                     style={[
@@ -277,6 +297,7 @@ export default function SecurityScreen() {
                   styles.resetSessionBtn,
                   { borderColor: theme.status.error },
                 ]}
+                accessibilityRole="button"
                 onPress={async () => {
                   await resetSession();
                   setSessionValid(false);
@@ -337,6 +358,12 @@ const styles = StyleSheet.create({
   rowTextWrap: {
     flex: 1,
   },
+  switchTarget: {
+    minWidth: MIN_TOUCH_TARGET,
+    minHeight: MIN_TOUCH_TARGET,
+    alignItems: "center",
+    justifyContent: "center",
+  },
   rowTitle: {
     fontSize: 17,
     fontWeight: "700",
@@ -350,13 +377,15 @@ const styles = StyleSheet.create({
     fontSize: 13,
   },
   timeoutOptions: {
-    gap: 10,
+    gap: MIN_TOUCH_SPACING,
     marginTop: 14,
   },
   timeoutCard: {
     borderWidth: 1,
     borderRadius: 14,
     padding: 14,
+    minHeight: MIN_TOUCH_TARGET,
+    justifyContent: "center",
   },
   timeoutValue: {
     fontSize: 16,
@@ -394,6 +423,9 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     paddingHorizontal: 14,
     alignSelf: "flex-start",
+    minHeight: MIN_TOUCH_TARGET,
+    minWidth: MIN_TOUCH_TARGET,
+    justifyContent: "center",
   },
   resetSessionText: {
     fontSize: 13,
@@ -408,14 +440,17 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     paddingHorizontal: 14,
     paddingVertical: 12,
-    marginTop: 12,
+    marginTop: MIN_TOUCH_SPACING,
     fontSize: 15,
+    minHeight: MIN_TOUCH_TARGET,
   },
   saveBtn: {
     marginTop: 14,
     borderRadius: 12,
     alignItems: "center",
+    justifyContent: "center",
     paddingVertical: 14,
+    minHeight: MIN_TOUCH_TARGET,
   },
   saveBtnText: {
     fontWeight: "700",

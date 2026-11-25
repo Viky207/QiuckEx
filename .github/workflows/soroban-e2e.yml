@@ -10,23 +10,25 @@ jobs:
   e2e-testnet:
     name: E2E Testnet Contract Flows
     runs-on: ubuntu-latest
+    timeout-minutes: 25
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.0
+          run_install: false
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "20"
 
-      - name: Install pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          run_install: false
-
       - name: Install dependencies
-        run: pnpm install --no-frozen-lockfile
+        run: pnpm install --frozen-lockfile
 
       - name: Build backend
         run: pnpm turbo run build --filter=@quickex/backend
@@ -45,6 +47,13 @@ jobs:
           QUICKEX_CONTRACT_ID: ${{ secrets.QUICKEX_CONTRACT_ID }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        timeout-minutes: 15
         run: |
           echo "Starting E2E tests against Soroban testnet..."
           pnpm turbo run test:e2e --filter=@quickex/backend -- test/soroban-flow.e2e-spec.ts
+
+      - name: Summarize failure
+        if: failure()
+        run: |
+          echo "### :x: Soroban E2E testnet flow failed" >> "$GITHUB_STEP_SUMMARY"
+          echo "See the failed step above for details." >> "$GITHUB_STEP_SUMMARY"

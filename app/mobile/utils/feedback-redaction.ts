@@ -9,6 +9,24 @@ import { scrubPii } from './piiScrubber';
  * raw account public key — neither of which the generic {@link scrubPii}
  * handles. This module layers Stellar-aware redaction on top of the existing
  * PII scrubber so a single call covers emails/phones/cards *and* wallet keys.
+ *
+ * Field inventory mapping (see the field-level privacy & retention reference):
+ * - `feedback.description` / free-text context: scrubbed for standard PII
+ *   (email, phone, card) via {@link scrubPii}; retained only in the submitted
+ *   report and deleted with it.
+ * - `feedback.context.*` (structured metadata): every string value is scrubbed
+ *   recursively by {@link redactContext} before attachment; keys are preserved.
+ * - Stellar secret seeds (`S…`, 56 base32 chars): fully removed and replaced
+ *   with `[REDACTED_SECRET_KEY]`. These are never transmitted — redaction runs
+ *   on-device before the payload leaves the device.
+ * - Stellar public keys (`G…`, 56 base32 chars): masked to `GABC…WXYZ` rather
+ *   than dropped, so reports stay correlatable without exposing the account.
+ * - `feedback.supportBundleRef`: reduced to its safe leading identifier by
+ *   {@link redactSupportBundleReference}; any pipelined session tokens or env
+ *   markers are dropped before display or sharing.
+ *
+ * All redaction happens locally; the raw values above are never logged or sent
+ * off-device, and any locally buffered feedback is deleted with the report.
  */
 
 // Stellar secret seeds start with `S` and are 56 base32 chars. These must never
@@ -74,6 +92,10 @@ export function redactContext<T>(value: T): T {
  * Expects formats like 'support-12345-bundle|session-token:9876xyz|env:prod' and returns just 'support-12345-bundle'.
  * If the string doesn't match a pipelined format, it safely redacts it using `redactFeedbackText`
  * and obscures the rest if there's no clear safe part.
+ *
+ * Per the field inventory, only the leading support identifier is retained for
+ * display/sharing; trailing session tokens and environment markers are dropped
+ * on-device and never leave the device.
  */
 export function redactSupportBundleReference(ref: string | undefined): string {
   if (!ref) return '';

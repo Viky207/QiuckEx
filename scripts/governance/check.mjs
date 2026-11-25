@@ -17,7 +17,7 @@
  */
 import { existsSync, writeFileSync } from "node:fs";
 import { checkAdrs } from "./lib/adr.mjs";
-import { checkAssetListingPolicy } from "./lib/assets.mjs";
+import { checkAssetListingPolicy, checkAssetOnboardingGuide } from "./lib/assets.mjs";
 import { checkRetentionSchedule } from "./lib/retention.mjs";
 import { buildBaseline, validateI18n } from "./lib/i18n.mjs";
 import { checkBranchProtection } from "./lib/branch-protection.mjs";
@@ -41,6 +41,7 @@ export function runCheck(root = REPO_ROOT, { only = "all" } = {}) {
   }
   if (only === "all" || only === "assets") {
     checks.assets = checkAssetListingPolicy(root);
+    checks["asset-onboarding"] = checkAssetOnboardingGuide(root);
   }
   if (only === "all" || only === "retention") {
     checks.retention = checkRetentionSchedule(root);
@@ -67,7 +68,12 @@ export function runCheck(root = REPO_ROOT, { only = "all" } = {}) {
         errors.push(`${PATHS.governanceDoc}: missing required section "${section}"`);
       }
     }
-    for (const doc of [PATHS.assetListingDoc, PATHS.retentionDoc, PATHS.a11yDoc]) {
+    for (const doc of [
+      PATHS.assetListingDoc,
+      PATHS.assetOnboardingGuideDoc,
+      PATHS.retentionDoc,
+      PATHS.a11yDoc,
+    ]) {
       if (!readText(root, doc).includes("GOVERNANCE.md")) {
         warnings.push(`${doc}: does not link back to docs/GOVERNANCE.md`);
       }

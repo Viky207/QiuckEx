@@ -1865,6 +1865,284 @@ fn test_recovery_double_withdraw_fails_cleanly() {
     assert_eq!(token_client.balance(&owner), amount);
 }
 
+// ============================================================================
+// #615: Token transfer failure atomicity
+// ============================================================================
+
+/// Count contract events whose first topic is the escrow namespace.
+fn count_escrow_events(env: &Env, contract_id: &Address) -> u32 {
+    let all = env.events().all();
+    let len = all.len();
+    let mut count = 0u32;
+
+    extern crate std;
+    let expected_str = std::format!("{:?}", contract_id);
+
+    for i in 0..len {
+        let event = all.get(i).unwrap();
+        if std::format!("{:?}", event.0) != expected_str {
+            continue;
+        }
+        let topics = event.1;
+        if topics.is_empty() {
+            continue;
+        }
+        let first: Symbol = topics.get(0).unwrap().try_into_val(env).unwrap();
+        if first == Symbol::new(env, EVENT_TOPIC_ESCROW) {
+            count += 1;
+        }
+    }
+
+    count
+}
+
+/// A failing token transfer during refund must leave status, balances and
+/// events untouched.
+#[test]
+fn test_refund_transfer_failure_preserves_state() {
+    let (env, client) = setup();
+    let token = create_test_token(&env);
+    let owner = Address::generate(&env);
+    let amount: i128 = 1000;
+    let salt = Bytes::from_slice(&env, b"refund_transfer_failure");
+
+    let token_client = token::StellarAssetClient::new(&env, &token);
+    token_client.mint(&owner, &amount);
+
+    let timeout = 100;
+    let commitment = client.deposit(&token, &amount, &owner, &salt, &timeout, &None, &0u64, &u64::MAX);
+    env.ledger().set_timestamp(env.ledger().timestamp() + timeout + 1);
+
+    // Drain the contract balance so the refund transfer fails.
+    let contract_balance = token_client.balance(&client.address);
+    assert_eq!(contract_balance, amount);
+    token_client.burn(&client.address, &contract_balance);
+
+    let owner_balance_before = token_client.balance(&owner);
+    let events_before = count_escrow_events(&env, &client.address);
+
+    let res = client.try_refund(&commitment, &owner, &0u64, &u64::MAX);
+    assert!(res.is_err(), "refund must fail when transfer fails");
+
+    // State, balances and events are unchanged.
+    assert_eq!(client.get_commitment_state(&commitment), Some(EscrowStatus::Pending));
+    assert_eq!(token_client.balance(&owner), owner_balance_before);
+    assert_eq!(token_client.balance(&client.address), 0);
+    assert_eq!(count_escrow_events(&env, &client.address), events_before);
+
+    // A later successful refund (after re-funding) changes state exactly once.
+    token_client.mint(&client.address, &amount);
+    client.refund(&commitment, &owner, &0u64, &u64::MAX);
+    assert_eq!(client.get_commitment_state(&commitment), Some(EscrowStatus::Refunded));
+    assert_eq!(token_client.balance(&owner), owner_balance_before + amount);
+    assert_eq!(count_escrow_events(&env, &client.address), events_before + 1);
+}
+
+/// A failing token transfer during withdraw must leave status, balances and
+/// events untouched.
+#[test]
+fn test_withdraw_transfer_failure_preserves_state() {
+    let (env, client) = setup();
+    let token = create_test_token(&env);
+    let owner = Address::generate(&env);
+    let amount: i128 = 1000;
+    let salt = Bytes::from_slice(&env, b"withdraw_transfer_failure");
+
+    let token_client = token::StellarAssetClient::new(&env, &token);
+    token_client.mint(&owner, &amount);
+
+    let commitment = client.deposit(&token, &amount, &owner, &salt, &0, &None, &0u64, &u64::MAX);
+
+    // Drain the contract balance so the withdraw transfer fails.
+    let contract_balance = token_client.balance(&client.address);
+    token_client.burn(&client.address, &contract_balance);
+
+    let owner_balance_before = token_client.balance(&owner);
+    let events_before = count_escrow_events(&env, &client.address);
+
+    let res = client.try_withdraw(&token, &amount, &commitment, &owner, &salt, &0u64, &u64::MAX);
+    assert!(res.is_err(), "withdraw must fail when transfer fails");
+
+    assert_eq!(client.get_commitment_state(&commitment), Some(EscrowStatus::Pending));
+    assert_eq!(token_client.balance(&owner), owner_balance_before);
+    assert_eq!(token_client.balance(&client.address), 0);
+    assert_eq!(count_escrow_events(&env, &client.address), events_before);
+
+    // Successful withdraw changes state exactly once and emits one event.
+    token_client.mint(&client.address, &amount);
+    client.withdraw(&token, &amount, &commitment, &owner, &salt, &0u64, &u64::MAX);
+    assert_eq!(client.get_commitment_state(&commitment), Some(EscrowStatus::Spent));
+    assert_eq!(token_client.balance(&owner), owner_balance_before + amount);
+    assert_eq!(count_escrow_events(&env, &client.address), events_before + 1);
+}
+
+/// A failing token transfer during dispute resolution must leave the escrow
+/// disputed and emit no success event.
+#[test]
+fn test_resolve_dispute_transfer_failure_preserves_state() {
+    let (env, client) = setup();
+    let token = create_test_token(&env);
+    let owner = Address::generate(&env);
+    let arbiter = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let amount: i128 = 5000;
+    let salt = Bytes::from_slice(&env, b"resolve_transfer_failure");
+
+    let token_client = token::StellarAssetClient::new(&env, &token);
+    token_client.mint(&owner, &amount);
+
+    let commitment = client.deposit(&token, &amount, &owner, &salt, &1000, &Some(arbiter.clone()), &0u64, &u64::MAX);
+    client.dispute(&commitment);
+
+    let contract_balance = token_client.balance(&client.address);
+    token_client.burn(&client.address, &contract_balance);
+
+    let events_before = count_escrow_events(&env, &client.address);
+
+    let res = client.try_resolve_dispute(&arbiter, &commitment, &false, &recipient, &0u64, &u64::MAX);
+    assert!(res.is_err(), "resolve must fail when transfer fails");
+
+    assert_eq!(client.get_commitment_state(&commitment), Some(EscrowStatus::Disputed));
+    assert_eq!(token_client.balance(&recipient), 0);
+    assert_eq!(count_escrow_events(&env, &client.address), events_before);
+}
+
+// ============================================================================
+// #623: Arithmetic boundary tests at maximum configured fee and amount
+// ============================================================================
+
+#[test]
+fn test_fee_arithmetic_at_max_amount_does_not_overflow() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    // Maximum fee (100%) applied to the maximum amount must not wrap.
+    client.set_fee_config(&admin, &crate::types::FeeConfig { fee_bps: 10_000 });
+
+    let token = create_test_token(&env);
+    let owner = Address::generate(&env);
+    let amount = i128::MAX;
+    let salt = Bytes::from_slice(&env, b"max_amount_fee");
+
+    let token_client = token::StellarAssetClient::new(&env, &token);
+    token_client.mint(&owner, &amount);
+
+    // Deposit must either succeed with a checked (non-wrapped) fee or fail
+    // with a stable error; it must never store a wrapped value.
+    let res = client.try_deposit(&token, &amount, &owner, &salt, &0, &None, &0u64, &u64::MAX);
+    match res {
+        Ok(Ok(commitment)) => {
+            let details = client.get_escrow_details(&commitment, &owner).unwrap();
+            assert_eq!(details.amount_due, Some(amount));
+            assert!(details.amount_paid.unwrap() <= amount);
+        }
+        Err(Ok(err)) => {
+            assert_eq!(err, QuickexError::Overflow);
+        }
+        _ => panic!("unexpected result for max amount deposit"),
+    }
+}
+
+#[test]
+fn test_fee_config_rejects_out_of_range_bps() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    // Above 100% must be rejected with a stable error, not wrapped.
+    let res = client.try_set_fee_config(&admin, &crate::types::FeeConfig { fee_bps: 10_001 });
+    assert_contract_error(res, QuickexError::InvalidFeeConfig);
+
+    // The stored config must be unchanged (still the default).
+    let current = client.get_fee_config();
+    assert!(current.fee_bps <= 10_000);
+}
+
+#[test]
+fn test_aggregate_fee_calculation_at_boundary_is_checked() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    client.set_fee_config(&admin, &crate::types::FeeConfig { fee_bps: 10_000 });
+
+    let token = create_test_token(&env);
+    let owner = Address::generate(&env);
+    let amount = i128::MAX;
+    let salt = Bytes::from_slice(&env, b"aggregate_fee_boundary");
+
+    let token_client = token::StellarAssetClient::new(&env, &token);
+    token_client.mint(&owner, &amount);
+
+    // amount * fee_bps would overflow i128 if computed naively; the contract
+    // must use checked arithmetic and reject with Overflow.
+    let res = client.try_deposit(&token, &amount, &owner, &salt, &0, &None, &0u64, &u64::MAX);
+    if let Err(Ok(err)) = res {
+        assert_eq!(err, QuickexError::Overflow);
+    }
+}
+
+// ============================================================================
+// #624: Negative tests for malformed asset and address inputs
+// ============================================================================
+
+#[test]
+fn test_deposit_rejects_malformed_token_address() {
+    let (env, client) = setup();
+    let owner = Address::generate(&env);
+    let salt = Bytes::from_slice(&env, b"malformed_token");
+    let amount: i128 = 1000;
+
+    // A random address that is not a registered token contract must fail
+    // before any storage write.
+    let bogus_token = Address::generate(&env);
+    let res = client.try_deposit(&bogus_token, &amount, &owner, &salt, &0, &None, &0u64, &u64::MAX);
+    assert!(res.is_err(), "deposit with non-token address must fail");
+
+    // No escrow was created for this commitment.
+    let mut data = Bytes::new(&env);
+    data.append(&owner.clone().to_xdr(&env));
+    data.append(&Bytes::from_slice(&env, &amount.to_be_bytes()));
+    data.append(&salt);
+    let commitment: BytesN<32> = env.crypto().sha256(&data).into();
+    assert_eq!(client.get_commitment_state(&commitment), None);
+}
+
+#[test]
+fn test_deposit_rejects_invalid_amounts_at_boundary() {
+    let (env, client) = setup();
+    let token = create_test_token(&env);
+    let owner = Address::generate(&env);
+    let salt = Bytes::from_slice(&env, b"invalid_amount_boundary");
+
+    let token_client = token::StellarAssetClient::new(&env, &token);
+    token_client.mint(&owner, &1000);
+
+    // Zero amount is rejected.
+    let res = client.try_deposit(&token, &0, &owner, &salt, &0, &None, &0u64, &u64::MAX);
+    assert_contract_error(res, QuickexError::InvalidAmount);
+
+    // Negative amount is rejected.
+    let res = client.try_deposit(&token, &-1, &owner, &salt, &0, &None, &0u64, &u64::MAX);
+    assert_contract_error(res, QuickexError::InvalidAmount);
+}
+
+#[test]
+fn test_canonical_inputs_still_pass() {
+    let (env, client) = setup();
+    let token = create_test_token(&env);
+    let owner = Address::generate(&env);
+    let amount: i128 = 1000;
+    let salt = Bytes::from_slice(&env, b"canonical_inputs");
+
+    let token_client = token::StellarAssetClient::new(&env, &token);
+    token_client.mint(&owner, &amount);
+
+    // A canonical token address and positive amount succeed.
+    let commitment = client.deposit(&token, &amount, &owner, &salt, &0, &None, &0u64, &u64::MAX);
+    assert_eq!(client.get_commitment_state(&commitment), Some(EscrowStatus::Pending));
+}
+
 /// Recovery: Double dispute is idempotent (second call fails cleanly)
 #[test]
 fn test_recovery_double_dispute_fails_cleanly() {

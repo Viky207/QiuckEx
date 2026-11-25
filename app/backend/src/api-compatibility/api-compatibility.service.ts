@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { OpenApiDocumentHolder } from './openapi-document.holder';
+import { ERROR_REGISTRY } from '../errors/error-registry';
 
 /**
  * Classification of a detected change between two OpenAPI documents.
@@ -71,6 +72,91 @@ export interface ApiCompatibilityReport {
   nonBreaking: ApiChange[];
   /** True when there are no unsuppressed breaking changes. */
   compatible: boolean;
+  /**
+   * Public stable error codes whose presence in the canonical registry differs
+   * between the baseline and current documents. Used to keep the
+   * troubleshooting guide in sync when codes are added or removed.
+   */
+  errorCodeChanges: ErrorCodeChange[];
+}
+
+/**
+ * A change to the set of public stable error codes.
+ */
+export interface ErrorCodeChange {
+  /** The public stable error code (e.g. `RESOURCE_NOT_FOUND`). */
+  code: string;
+  /** Whether the code was added or removed relative to the baseline. */
+  change: 'added' | 'removed';
+}
+
+/**
+ * Extracts the set of public stable error codes referenced by an OpenAPI
+ * document. Codes are sourced from the canonical error registry; internal-only
+ * codes are excluded so they never leak into the troubleshooting guide.
+ */
+function collectPublicErrorCodes(
+  doc: OpenApiDocument | undefined,
+): Set<string> {
+  const codes = new Set<string>();
+  if (!doc) {
+    return codes;
+  }
+
+  const publicCodes = new Set(
+    ERROR_REGISTRY.filter((entry) => entry.public).map((entry) => entry.code),
+  );
+
+  const visit = (value: unknown): void => {
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        visit(item);
+      }
+      return;
+    }
+    if (!isPlainObject(value)) {
+      return;
+    }
+    const enumValues = value.enum;
+    if (Array.isArray(enumValues)) {
+      for (const candidate of enumValues) {
+        if (typeof candidate === 'string' && publicCodes.has(candidate)) {
+          codes.add(candidate);
+        }
+      }
+    }
+    for (const key of Object.keys(value)) {
+      visit(value[key]);
+    }
+  };
+
+  visit(doc);
+  return codes;
+}
+
+/**
+ * Computes the added/removed public stable error codes between two documents.
+ */
+function diffErrorCodes(
+  baseline: OpenApiDocument | undefined,
+  current: OpenApiDocument | undefined,
+): ErrorCodeChange[] {
+  const baselineCodes = collectPublicErrorCodes(baseline);
+  const currentCodes = collectPublicErrorCodes(current);
+
+  const changes: ErrorCodeChange[] = [];
+  for (const code of currentCodes) {
+    if (!baselineCodes.has(code)) {
+      changes.push({ code, change: 'added' });
+    }
+  }
+  for (const code of baselineCodes) {
+    if (!currentCodes.has(code)) {
+      changes.push({ code, change: 'removed' });
+    }
+  }
+
+  return changes.sort((a, b) => (a.code < b.code ? -1 : a.code > b.code ? 1 : 0));
 }
 
 /**
@@ -1205,12 +1291,21 @@ export class ApiCompatibilityService {
       );
     }
 
+    const errorCodeChanges = diffErrorCodes(baseline, current);
+    if (errorCodeChanges.length > 0) {
+      this.logger.warn(
+        `Detected ${errorCodeChanges.length} public error code change(s); ` +
+          'update the troubleshooting guide to match',
+      );
+    }
+
     return {
       changes: sortChanges(changes),
       allowed: sortChanges(allowed),
       breaking: sortChanges(breaking),
       nonBreaking: sortChanges(nonBreaking),
       compatible: breaking.length === 0,
+      errorCodeChanges,
     };
   }
 

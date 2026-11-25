@@ -31,9 +31,16 @@ import '@/lib/i18n';
 import { useTranslation } from 'react-i18next';
 import {
   MAX_MEMO_LENGTH,
+  clearFormDraft,
+  formatIssuerPreview,
   getVerifiedAssetOptions,
+  GeneratorFormDraft,
+  isCustomAssetUnverified,
+  isFormDraftWorthSaving,
   readDraftLinks,
+  readFormDraft,
   saveDraftLink,
+  saveFormDraft,
   validateAmountInput,
   validatePaymentLinkPreview,
   validateMemoInput,
@@ -104,6 +111,13 @@ type ComposeError = {
   error?: string;
 };
 
+type BulkRejectedRow = {
+  row: number;
+  field: string;
+  code: string;
+  message: string;
+};
+
 type BulkGenerateSuccess = {
   success: boolean;
   total: number;
@@ -117,6 +131,7 @@ type BulkGenerateSuccess = {
     destination?: string;
     referenceId?: string;
   }>;
+  rejected?: BulkRejectedRow[];
 };
 
 type BulkLinkRequestItem = {
@@ -161,6 +176,8 @@ export default function Generator() {
     createdAt: string;
   }>>([]);
 
+  const [pendingFormDraft, setPendingFormDraft] = useState<GeneratorFormDraft | null>(null);
+
   const [verifiedAssets, setVerifiedAssets] = useState<VerifiedAsset[]>([]);
   const [assetsLoading, setAssetsLoading] = useState(true);
   const [assetsError, setAssetsError] = useState<string | null>(null);
@@ -197,6 +214,7 @@ export default function Generator() {
   const [bulkResult, setBulkResult] = useState<BulkGenerateSuccess | null>(null);
   const [bulkProgress, setBulkProgress] = useState(0);
   const [bulkSource, setBulkSource] = useState<"directory" | "csv" | null>(null);
+  const [bulkSourceRows, setBulkSourceRows] = useState<number[]>([]);
   const [csvDragActive, setCsvDragActive] = useState(false);
   const [csvFileName, setCsvFileName] = useState("");
   const [csvFileErrors, setCsvFileErrors] = useState<string[]>([]);
@@ -284,6 +302,50 @@ export default function Generator() {
     }
   }, []);
 
+  useEffect(() => {
+    const found = readFormDraft(window.localStorage);
+    if (found) {
+      setPendingFormDraft(found);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (pendingFormDraft) {
+      // Don't overwrite the stored draft while its restore prompt is unanswered.
+      return;
+    }
+    const handle = window.setTimeout(() => {
+      if (!isFormDraftWorthSaving({ amount: form.amount, memo: form.memo })) {
+        clearFormDraft(window.localStorage);
+        return;
+      }
+      saveFormDraft(
+        {
+          amount: form.amount,
+          asset: recipientAssetCode,
+          memo: form.memo,
+          displayOptions: { advancedOpen, slippagePct },
+        },
+        window.localStorage,
+      );
+    }, 500);
+    return () => window.clearTimeout(handle);
+  }, [form.amount, form.memo, recipientAssetCode, advancedOpen, slippagePct, pendingFormDraft]);
+
+  const restoreFormDraft = useCallback(() => {
+    if (!pendingFormDraft) return;
+    setForm((prev) => ({ ...prev, amount: pendingFormDraft.amount, memo: pendingFormDraft.memo }));
+    setRecipientAssetCode(pendingFormDraft.asset);
+    setAdvancedOpen(pendingFormDraft.displayOptions.advancedOpen);
+    setSlippagePct(pendingFormDraft.displayOptions.slippagePct);
+    setPendingFormDraft(null);
+  }, [pendingFormDraft]);
+
+  const discardFormDraft = useCallback(() => {
+    clearFormDraft(window.localStorage);
+    setPendingFormDraft(null);
+  }, []);
+
   const assetOptions = useMemo(
     () => getVerifiedAssetOptions(verifiedAssets),
     [verifiedAssets],
@@ -325,14 +387,20 @@ export default function Generator() {
     };
   }, [apiBase, form.destination]);
 
+  const selectedRecipientAsset = useMemo(
+    () =>
+      verifiedAssets.find(
+        (x) => x.code.toUpperCase() === recipientAssetCode.toUpperCase(),
+      ) ?? null,
+    [verifiedAssets, recipientAssetCode],
+  );
+
   const recipientRef = useMemo(() => {
-    const a = verifiedAssets.find(
-      (x) => x.code.toUpperCase() === recipientAssetCode.toUpperCase(),
-    );
+    const a = selectedRecipientAsset;
     return a
       ? { code: a.code, issuer: a.issuer ?? undefined }
       : { code: recipientAssetCode };
-  }, [verifiedAssets, recipientAssetCode]);
+  }, [selectedRecipientAsset, recipientAssetCode]);
 
   const sourceRefsForPreview = useMemo(() => {
     const refs: { code: string; issuer?: string }[] = [];
@@ -899,11 +967,13 @@ export default function Generator() {
     async (
       linksPayload: BulkLinkRequestItem[],
       source: "directory" | "csv",
+      sourceRows?: number[],
     ) => {
       setBulkLoading(true);
       setBulkError(null);
       setBulkResult(null);
       setBulkSource(source);
+      setBulkSourceRows(sourceRows ?? []);
       setBulkProgress(6);
 
       const progressTimer = window.setInterval(() => {
@@ -1039,6 +1109,7 @@ export default function Generator() {
     await submitBulkLinks(
       validCsvRows.map((row) => toBulkLinkPayloadFromCsvRow(row)),
       "csv",
+      validCsvRows.map((row) => row.sourceRow),
     );
   };
 
@@ -1099,6 +1170,34 @@ export default function Generator() {
           </p>
         </header>
 
+        {pendingFormDraft && (
+          <div
+            role="alert"
+            className="mb-8 max-w-3xl rounded-2xl border border-indigo-400/40 bg-indigo-500/10 p-5 flex flex-wrap items-center justify-between gap-4"
+          >
+            <p className="text-sm text-muted">
+              You have an unfinished payment link draft from{' '}
+              {new Date(pendingFormDraft.savedAt).toLocaleString()}. Restore it?
+            </p>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={restoreFormDraft}
+                className={`px-4 py-2 rounded-xl text-sm font-bold bg-indigo-500 text-white hover:bg-indigo-400 transition ${FOCUS_RING_CLASS}`}
+              >
+                Restore draft
+              </button>
+              <button
+                type="button"
+                onClick={discardFormDraft}
+                className={`px-4 py-2 rounded-xl text-sm font-bold border border-border-strong text-muted hover:text-foreground transition ${FOCUS_RING_CLASS}`}
+              >
+                Discard
+              </button>
+            </div>
+          </div>
+        )}
+
         <PaymentWizard />
 
         <details className="mt-10 max-w-7xl border-t border-border-strong pt-5">
@@ -1140,7 +1239,11 @@ export default function Generator() {
                             type="button"
                             onClick={() => setRecipientAssetCode(a.code)}
                             aria-pressed={recipientAssetCode === a.code}
-                            aria-label={`Set recipient asset to ${a.code}`}
+                            aria-label={
+                              isCustomAssetUnverified(a)
+                                ? `Set recipient asset to ${a.code} (unverified issuer)`
+                                : `Set recipient asset to ${a.code}`
+                            }
                             className={`
                             px-3 py-2 text-xs sm:text-sm rounded-xl transition ${FOCUS_RING_CLASS}
                             ${
@@ -1151,6 +1254,12 @@ export default function Generator() {
                           `}
                           >
                             {a.code}
+                            {isCustomAssetUnverified(a) && (
+                              <span aria-hidden="true" className="text-amber-400">
+                                {" "}
+                                ⚠
+                              </span>
+                            )}
                           </button>
                         ))
                       )}
@@ -1211,6 +1320,18 @@ export default function Generator() {
                   <span>Memo</span>
                   <span className={memoRemaining < 0 ? 'text-red-400' : ''}>{memoCharacterCount}/{MAX_MEMO_LENGTH}</span>
                 </div>
+                {!pendingFormDraft && isFormDraftWorthSaving({ amount: form.amount, memo: form.memo }) && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      discardFormDraft();
+                      setForm((prev) => ({ ...prev, amount: '', memo: '' }));
+                    }}
+                    className={`mt-3 text-xs font-bold text-muted hover:text-foreground underline ${FOCUS_RING_CLASS}`}
+                  >
+                    Clear saved draft
+                  </button>
+                )}
               </div>
 
               <div className="rounded-3xl border border-border-strong bg-background/30 p-6 space-y-4">
@@ -1250,8 +1371,9 @@ export default function Generator() {
                           <option key={a.code} value={a.code}>
                             {a.code}
                             {a.type !== "native" && a.issuer
-                              ? ` (${a.issuer.slice(0, 4)}…)`
+                              ? ` (${formatIssuerPreview(a.issuer)})`
                               : ""}
+                            {isCustomAssetUnverified(a) ? " • Unverified" : ""}
                           </option>
                         ))}
                       </select>
@@ -1259,6 +1381,42 @@ export default function Generator() {
                         <p role="alert" className="text-red-400 text-xs mt-2">
                           {errors.asset}
                         </p>
+                      )}
+                      {selectedRecipientAsset && selectedRecipientAsset.type !== "native" && selectedRecipientAsset.issuer && (
+                        <div
+                          data-testid="asset-issuer-details"
+                          className="mt-3 rounded-2xl border border-border-strong bg-background/40 p-4 space-y-2"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-xs font-bold uppercase tracking-wider text-muted">
+                              Issuer
+                            </span>
+                            {isCustomAssetUnverified(selectedRecipientAsset) ? (
+                              <span className="px-2 py-0.5 rounded-full text-[11px] font-black uppercase bg-amber-500/20 text-amber-400 border border-amber-400/40">
+                                Unverified
+                              </span>
+                            ) : (
+                              <span className="px-2 py-0.5 rounded-full text-[11px] font-black uppercase bg-success/20 text-success border border-success/40">
+                                Verified
+                              </span>
+                            )}
+                          </div>
+                          <div className="flex items-center justify-between gap-3">
+                            <code className="text-xs font-mono break-all text-foreground">
+                              {selectedRecipientAsset.issuer}
+                            </code>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                void navigator.clipboard?.writeText(selectedRecipientAsset.issuer ?? "")
+                              }
+                              aria-label="Copy issuer address"
+                              className={`shrink-0 px-3 py-1.5 rounded-xl text-xs font-bold border border-border-strong text-muted hover:text-foreground transition ${FOCUS_RING_CLASS}`}
+                            >
+                              Copy
+                            </button>
+                          </div>
+                        </div>
                       )}
                     </div>
 
@@ -1864,10 +2022,15 @@ export default function Generator() {
             {bulkResult && bulkSource === "csv" && (
               <div className="mt-8 rounded-[32px] border border-emerald-300/25 bg-success-soft p-6">
                 <p className="text-xs font-black uppercase tracking-widest text-success">
-                  Batch Success
+                  {bulkResult.rejected && bulkResult.rejected.length > 0
+                    ? "Batch Completed With Errors"
+                    : "Batch Success"}
                 </p>
                 <h4 className="mt-2 text-2xl font-black text-foreground">
                   {bulkResult.total} payment link{bulkResult.total === 1 ? "" : "s"} generated
+                  {bulkResult.rejected && bulkResult.rejected.length > 0
+                    ? `, ${bulkResult.rejected.length} row${bulkResult.rejected.length === 1 ? "" : "s"} rejected`
+                    : ""}
                 </h4>
                 <p className="mt-2 max-w-2xl text-sm text-success/80">
                   Review the exported CSV or copy individual links from the generated output panel below.
@@ -1894,6 +2057,33 @@ export default function Generator() {
                     Copy all links
                   </button>
                 </div>
+
+                {bulkResult.rejected && bulkResult.rejected.length > 0 && (
+                  <div className="mt-6 rounded-2xl border border-red-500/20 bg-background/40 p-4">
+                    <p className="text-xs font-black uppercase tracking-widest text-danger">
+                      Rejected rows ({bulkResult.rejected.length})
+                    </p>
+                    <ul className="mt-3 space-y-2">
+                      {bulkResult.rejected.map((rejection, idx) => {
+                        const sourceRow =
+                          bulkSourceRows[rejection.row - 1] ?? rejection.row;
+                        return (
+                          <li
+                            key={`${rejection.row}-${idx}`}
+                            className="rounded-xl bg-card px-3 py-2 text-xs text-foreground"
+                          >
+                            <span className="font-black">Row {sourceRow}</span>
+                            <span className="text-subtle"> · field "{rejection.field}"</span>
+                            <span className="ml-2 rounded-full bg-danger/10 px-2 py-0.5 font-mono text-[10px] text-danger">
+                              {rejection.code}
+                            </span>
+                            <p className="mt-1 text-subtle">{rejection.message}</p>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  </div>
+                )}
               </div>
             )}
           </div>

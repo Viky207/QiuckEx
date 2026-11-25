@@ -65,11 +65,49 @@ type ApiReport = {
   timeSeries: ApiTimeSeriesItem[];
 };
 
-const analyticsCache: Partial<Record<DateRange, AnalyticsData>> = {};
+// Keyed by `${publicKey}:${range}` — switching accounts must not serve a
+// previous account's cached report for the same range.
+const analyticsCache: Record<string, AnalyticsData> = {};
+
+function analyticsCacheKey(publicKey: string, range: DateRange): string {
+  return `${publicKey}:${range}`;
+}
+
+export function clearAnalyticsCache(): void {
+  for (const key of Object.keys(analyticsCache)) {
+    delete analyticsCache[key];
+  }
+}
+
 const ASSET_COLORS: Record<string, string> = {
   USDC: "#6366f1",
   XLM: "#8b5cf6",
 };
+
+/**
+ * Freshness metadata (retrieval time, cached/failed) for the last
+ * `fetchAnalytics` call for a given range. Lets callers show "as of HH:MM"
+ * and distinguish a cached/fallback value from a just-fetched live one.
+ */
+export function getAnalyticsFreshness(range: DateRange): AnalyticsFreshness | undefined {
+  return lastFreshness[range];
+}
+
+/**
+ * Drop cached analytics data so the next `fetchAnalytics` call hits the
+ * network again. Call this when something changed upstream (a realtime
+ * update event, a new payment) instead of relying on the in-memory cache
+ * forever, which would otherwise keep serving the same snapshot.
+ */
+export function invalidateAnalyticsCache(range?: DateRange): void {
+  if (range) {
+    delete analyticsCache[range];
+  } else {
+    for (const key of Object.keys(analyticsCache) as DateRange[]) {
+      delete analyticsCache[key];
+    }
+  }
+}
 
 function rangeToWindow(range: DateRange): {
   startDate: string;
@@ -186,12 +224,15 @@ function fallbackEmpty(): AnalyticsData {
   };
 }
 
-export async function fetchAnalytics(range: DateRange): Promise<AnalyticsData> {
-  if (analyticsCache[range]) {
-    return Promise.resolve(analyticsCache[range] as AnalyticsData);
+export async function fetchAnalytics(
+  range: DateRange,
+  publicKey: string = resolvePublicKey(),
+): Promise<AnalyticsData> {
+  const cacheKey = analyticsCacheKey(publicKey, range);
+  if (analyticsCache[cacheKey]) {
+    return Promise.resolve(analyticsCache[cacheKey]);
   }
 
-  const publicKey = resolvePublicKey();
   const { startDate, endDate, interval } = rangeToWindow(range);
   const url = new URL(`${getQuickexApiBase()}/analytics/report`);
   url.searchParams.set("publicKey", publicKey);
@@ -206,12 +247,12 @@ export async function fetchAnalytics(range: DateRange): Promise<AnalyticsData> {
     }
     const report = (await res.json()) as ApiReport;
     const parsed = toUiModel(report);
-    analyticsCache[range] = parsed;
+    analyticsCache[cacheKey] = parsed;
     return parsed;
   } catch (error) {
     console.warn("Falling back to empty analytics data:", error);
     const empty = fallbackEmpty();
-    analyticsCache[range] = empty;
+    analyticsCache[cacheKey] = empty;
     return empty;
   }
 }

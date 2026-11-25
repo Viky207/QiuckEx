@@ -6,6 +6,30 @@ export enum LinkState {
   REFUNDED = 'REFUNDED',
 }
 
+/**
+ * Canonical payment status vocabulary shared across web surfaces (dashboard,
+ * link page, confirmation screen). Each LinkState maps to exactly one
+ * PaymentStatus so a payment is never described differently per surface.
+ */
+export enum PaymentStatus {
+  PENDING = 'PENDING',
+  CONFIRMED = 'CONFIRMED',
+  EXPIRED = 'EXPIRED',
+  FAILED = 'FAILED',
+}
+
+const PAYMENT_STATUS_BY_LINK_STATE: Record<LinkState, PaymentStatus> = {
+  [LinkState.DRAFT]: PaymentStatus.PENDING,
+  [LinkState.ACTIVE]: PaymentStatus.PENDING,
+  [LinkState.EXPIRED]: PaymentStatus.EXPIRED,
+  [LinkState.PAID]: PaymentStatus.CONFIRMED,
+  [LinkState.REFUNDED]: PaymentStatus.FAILED,
+};
+
+export function getPaymentStatus(state: LinkState): PaymentStatus {
+  return PAYMENT_STATUS_BY_LINK_STATE[state];
+}
+
 const TRANSITIONS: Record<LinkState, LinkState[]> = {
   [LinkState.DRAFT]: [LinkState.ACTIVE],
   [LinkState.ACTIVE]: [LinkState.EXPIRED, LinkState.PAID],
@@ -53,6 +77,17 @@ export function getReceiptRank(state: LinkState): number {
   return RECEIPT_RANK[state];
 }
 
+const PAYMENT_STATUS_RANK: Record<PaymentStatus, number> = {
+  [PaymentStatus.PENDING]: 0,
+  [PaymentStatus.EXPIRED]: 1,
+  [PaymentStatus.CONFIRMED]: 2,
+  [PaymentStatus.FAILED]: 3,
+};
+
+export function getPaymentStatusRank(status: PaymentStatus): number {
+  return PAYMENT_STATUS_RANK[status];
+}
+
 export type ReceiptTransitionOutcome =
   | { kind: 'applied'; state: LinkState }
   | { kind: 'duplicate'; state: LinkState }
@@ -95,4 +130,15 @@ export function applyReceiptTransition(
     observed: to,
     reason: `Receipt status regression rejected: ${from} -> ${to}`,
   };
+}
+
+/**
+ * Resolve the payment status label a surface should display for a receipt
+ * transition outcome. Conflicting observations never change the displayed
+ * label, so a rejected regression cannot surface an inconsistent status.
+ */
+export function getOutcomePaymentStatus(
+  outcome: ReceiptTransitionOutcome,
+): PaymentStatus {
+  return getPaymentStatus(outcome.state);
 }

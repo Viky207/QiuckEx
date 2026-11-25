@@ -18,6 +18,9 @@ const config: Config = {
         neutral: Object.fromEntries(
           Object.entries(tokens.color.neutral).map(([key, value]) => [key, value])
         ),
+        unverified: Object.fromEntries(
+          Object.entries(tokens.color.unverified).map(([key, value]) => [key, value])
+        ),
       },
       fontSize: Object.fromEntries(
         Object.entries(tokens.fontSize).map(([key, value]) => [key, px(value)])
@@ -30,6 +33,9 @@ const config: Config = {
       ),
       borderRadius: Object.fromEntries(
         Object.entries(tokens.borderRadius).map(([key, value]) => [key, px(value)])
+      ),
+      borderWidth: Object.fromEntries(
+        Object.entries(tokens.borderWidth).map(([key, value]) => [key, px(value)])
       ),
     },
   },

@@ -12,6 +12,29 @@ import { LightTheme, DarkTheme } from '../src/theme/tokens';
 const tintColorLight = LightTheme.tint;
 const tintColorDark = DarkTheme.tint;
 
+/**
+ * Unverified-asset visual treatment tokens.
+ *
+ * Re-exported from `src/theme/tokens` so legacy ThemedText / ThemedView
+ * consumers render the same badge treatment as the new components.
+ * The treatment never relies on color alone: it pairs a text label and
+ * icon with the color, and the explanation is keyboard accessible.
+ */
+export const UnverifiedAssetColors = {
+  light: {
+    background: LightTheme.unverifiedBackground,
+    border: LightTheme.unverifiedBorder,
+    text: LightTheme.unverifiedText,
+    icon: LightTheme.unverifiedIcon,
+  },
+  dark: {
+    background: DarkTheme.unverifiedBackground,
+    border: DarkTheme.unverifiedBorder,
+    text: DarkTheme.unverifiedText,
+    icon: DarkTheme.unverifiedIcon,
+  },
+};
+
 export const Colors = {
   light: {
     text: LightTheme.textPrimary,
@@ -20,6 +43,7 @@ export const Colors = {
     icon: LightTheme.tabIconDefault,
     tabIconDefault: LightTheme.tabIconDefault,
     tabIconSelected: tintColorLight,
+    unverified: UnverifiedAssetColors.light,
   },
   dark: {
     text: DarkTheme.textPrimary,
@@ -28,8 +52,33 @@ export const Colors = {
     icon: DarkTheme.tabIconDefault,
     tabIconDefault: DarkTheme.tabIconDefault,
     tabIconSelected: tintColorDark,
+    unverified: UnverifiedAssetColors.dark,
   },
 };
+
+/**
+ * Minimum interactive target size and spacing for dense screens (issue #604).
+ *
+ * `minSize` follows the project accessibility standard (44x44 logical pixels,
+ * matching WCAG 2.5.5 / Apple HIG). `rowGap` is the minimum vertical spacing
+ * between adjacent interactive rows, and `hitSlop` expands small controls
+ * (toggles, copy buttons, row actions) without visually enlarging them or
+ * hiding secondary information.
+ */
+export const touchTarget = {
+  minSize: 44,
+  rowGap: 12,
+  hitSlop: 8,
+} as const;
+
+/**
+ * Returns the minimum size style for an interactive target. Apply to toggles,
+ * copy buttons, and row actions so zoomed layouts do not create overlapping
+ * actions.
+ */
+export function touchTargetStyle(): { minWidth: number; minHeight: number } {
+  return { minWidth: touchTarget.minSize, minHeight: touchTarget.minSize };
+}
 
 export const Fonts = Platform.select({
   ios: {

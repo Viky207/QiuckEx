@@ -17,6 +17,14 @@ REPO_ROOT="$(cd "${CONTRACT_DIR}/../.." && pwd)"
 DEPLOYED_VERSION_FILE="${CONTRACT_DIR}/deployed-version.txt"
 FEATURE_FLAGS_DIR="${REPO_ROOT}/app/backend/src/feature-flags"
 
+# Deploy freeze switch. When the freeze marker file exists, mainnet promotion is
+# blocked unless an auditable override is supplied via the environment:
+#   DEPLOY_FREEZE_OVERRIDE_ACTOR   - identity of the operator granting override
+#   DEPLOY_FREEZE_OVERRIDE_REASON  - justification for bypassing the freeze
+# Overrides are appended to the audit log (never containing secrets).
+DEPLOY_FREEZE_FILE="${DEPLOY_FREEZE_FILE:-${CONTRACT_DIR}/deploy-freeze}"
+DEPLOY_FREEZE_AUDIT_LOG="${DEPLOY_FREEZE_AUDIT_LOG:-${CONTRACT_DIR}/deploy-freeze-audit.log}"
+
 # Post-deploy health check / rollback configuration.
 # The readiness endpoint is polled until it reports healthy or the timeout
 # elapses; on failure the rollback path in deploy.sh is invoked using the
@@ -44,8 +52,29 @@ pass() {
   echo "PASS: $1"
 }
 
+# --- Gate 0: deploy freeze switch -------------------------------------------
+# A hold prevents production traffic changes. Clearing the hold resumes only
+# new eligible runs; it never retroactively unblocks a failed gate.
+echo "==> [0/7] deploy freeze"
+if [ ! -e "${DEPLOY_FREEZE_FILE}" ]; then
+  pass "no deploy freeze active"
+else
+  OVERRIDE_ACTOR="${DEPLOY_FREEZE_OVERRIDE_ACTOR:-}"
+  OVERRIDE_REASON="${DEPLOY_FREEZE_OVERRIDE_REASON:-}"
+  if [ -z "${OVERRIDE_ACTOR}" ] || [ -z "${OVERRIDE_REASON}" ]; then
+    fail "deploy freeze active (${DEPLOY_FREEZE_FILE}); promotion blocked. Set DEPLOY_FREEZE_OVERRIDE_ACTOR and DEPLOY_FREEZE_OVERRIDE_REASON to override."
+  else
+    TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    if ! printf '%s\tactor=%s\treason=%s\n' "${TIMESTAMP}" "${OVERRIDE_ACTOR}" "${OVERRIDE_REASON}" >> "${DEPLOY_FREEZE_AUDIT_LOG}" 2>/dev/null; then
+      fail "deploy freeze override could not be recorded in ${DEPLOY_FREEZE_AUDIT_LOG}; refusing to proceed"
+    else
+      pass "deploy freeze overridden by ${OVERRIDE_ACTOR} (logged to ${DEPLOY_FREEZE_AUDIT_LOG})"
+    fi
+  fi
+fi
+
 # --- Gate 1: cargo test passes with 0 failures -------------------------------
-echo "==> [1/6] cargo test"
+echo "==> [1/7] cargo test"
 if (cd "${CONTRACT_DIR}" && cargo test --workspace); then
   pass "cargo test"
 else
@@ -53,7 +82,7 @@ else
 fi
 
 # --- Gate 2: cargo clippy -- -D warnings -------------------------------------
-echo "==> [2/6] cargo clippy -- -D warnings"
+echo "==> [2/7] cargo clippy -- -D warnings"
 if (cd "${CONTRACT_DIR}" && cargo clippy --workspace --all-targets -- -D warnings); then
   pass "cargo clippy"
 else
@@ -61,7 +90,7 @@ else
 fi
 
 # --- Gate 3: cargo audit, no active advisories with CVSS >= 7.0 --------------
-echo "==> [3/6] cargo audit (CVSS >= 7.0)"
+echo "==> [3/7] cargo audit (CVSS >= 7.0)"
 if ! command -v cargo-audit >/dev/null 2>&1; then
   fail "cargo-audit is not installed; cannot verify advisories"
 else
@@ -106,7 +135,7 @@ for item in high:
 fi
 
 # --- Gate 4: contract version higher than last deployed version --------------
-echo "==> [4/6] contract version vs deployed version"
+echo "==> [4/7] contract version vs deployed version"
 CURRENT_VERSION="$(cd "${CONTRACT_DIR}" && cargo metadata --no-deps --format-version 1 2>/dev/null | python3 -c '
 import json, sys
 
@@ -161,7 +190,7 @@ print("yes" if current > deployed else "no")
 fi
 
 # --- Gate 5: mainnet.* feature flags verified against backend ---------------
-echo "==> [5/6] mainnet.* feature flags"
+echo "==> [5/7] mainnet.* feature flags"
 if [ ! -d "${FEATURE_FLAGS_DIR}" ]; then
   fail "feature flags directory not found: ${FEATURE_FLAGS_DIR}"
 else
@@ -179,7 +208,7 @@ else
 fi
 
 # --- Gate 6: post-deploy health check with automated rollback ---------------
-echo "==> [6/6] post-deploy health check"
+echo "==> [6/7] post-deploy health check"
 
 # Poll the readiness endpoint until healthy or the timeout elapses.
 check_readiness() {
