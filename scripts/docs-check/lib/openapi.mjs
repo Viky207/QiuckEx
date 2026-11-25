@@ -8,7 +8,19 @@
  * Every rule here is internal to the document (it never needs the server to be
  * running), which is what lets the gate run on a fresh clone in CI.
  */
-import { PATHS, readJson, unique } from "./shared.mjs";
+import { PATHS, readJson, readText, unique } from "./shared.mjs";
+
+/**
+ * Canonical payment intent lifecycle states — issue #568.
+ *
+ * These are the implemented stable values from the backend contract. The
+ * lifecycle document and the OpenAPI schema must both agree with this list,
+ * otherwise client and operator docs drift from the delivered behavior.
+ */
+export const PAYMENT_INTENT_STATES = ["pending", "submitted", "confirmed", "expired", "failed"];
+
+/** Terminal states: no further transitions are possible from these. */
+export const PAYMENT_INTENT_TERMINAL_STATES = ["confirmed", "expired", "failed"];
 
 const HTTP_METHODS = ["get", "put", "post", "delete", "patch", "options", "head", "trace"];
 

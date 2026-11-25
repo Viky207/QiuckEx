@@ -50,6 +50,9 @@ export class MetricsService implements OnModuleInit {
   private operatorReplayTotal: client.Counter<string>;
   private testnetFixtureTotal: client.Counter<string>;
   private testnetFixtureDuration: client.Histogram<string>;
+  // Blue-green traffic switch outcomes (#562)
+  private blueGreenSwitchTotal: client.Counter<string>;
+  private blueGreenActiveSlot: client.Gauge<string>;
   private initialized = false;
 
   onModuleInit() {
@@ -368,8 +371,25 @@ export class MetricsService implements OnModuleInit {
       this.register.registerMetric(this.dependencyProbeUp);
       this.register.registerMetric(this.traceContexts);
       this.register.registerMetric(this.operatorReplayTotal);
+      // Blue-green traffic switch outcomes (#562). `outcome` is a bounded
+      // enum (see BLUE_GREEN_SWITCH_OUTCOMES) so a controller response body
+      // can never become a label value.
+      this.blueGreenSwitchTotal = new client.Counter({
+        name: "quickex_blue_green_switch_total",
+        help: "Blue-green traffic switch outcomes by bounded outcome code",
+        labelNames: ["outcome"],
+      });
+
+      this.blueGreenActiveSlot = new client.Gauge({
+        name: "quickex_blue_green_active_slot",
+        help: "Active blue-green slot (1=active, 0=inactive)",
+        labelNames: ["slot"],
+      });
+
       this.register.registerMetric(this.testnetFixtureTotal);
       this.register.registerMetric(this.testnetFixtureDuration);
+      this.register.registerMetric(this.blueGreenSwitchTotal);
+      this.register.registerMetric(this.blueGreenActiveSlot);
 
       this.initialized = true;
     } catch {
@@ -809,7 +829,55 @@ export class MetricsService implements OnModuleInit {
       }
     } catch (error) {}
   }
+
+  /**
+   * Record the outcome of a blue-green traffic switch (#562).
+   *
+   * `outcome` must be one of `BLUE_GREEN_SWITCH_OUTCOMES`; unknown values are
+   * collapsed to `unknown` so a malformed controller response can never grow
+   * the label cardinality.
+   */
+  recordBlueGreenSwitch(outcome: string) {
+    if (!this.initialized || !this.blueGreenSwitchTotal) return;
+    try {
+      const bounded = BLUE_GREEN_SWITCH_OUTCOMES.includes(outcome)
+        ? outcome
+        : "unknown";
+      this.blueGreenSwitchTotal.labels(bounded).inc();
+    } catch (error) {}
+  }
+
+  /**
+   * Publish which blue-green slot currently receives traffic. `null` means the
+   * active slot is unknown (e.g. after an uncertain switch result); in that
+   * case every known slot is marked inactive rather than guessing.
+   */
+  setBlueGreenActiveSlot(activeSlot: string | null, allSlots: string[] = []) {
+    if (!this.initialized || !this.blueGreenActiveSlot) return;
+    try {
+      const slots = new Set(allSlots);
+      if (activeSlot) {
+        slots.add(activeSlot);
+      }
+      for (const slot of slots) {
+        this.blueGreenActiveSlot.labels(slot).set(slot === activeSlot ? 1 : 0);
+      }
+    } catch (error) {}
+  }
 }
+
+/** Bounded outcome codes for blue-green traffic switches (#562). */
+export const BLUE_GREEN_SWITCH_OUTCOMES = [
+  "success",
+  "switch_timeout",
+  "switch_malformed_response",
+  "switch_uncertain_result",
+  "switch_retry",
+  "switch_blocked_unready_target",
+] as const;
+
+export type BlueGreenSwitchOutcome =
+  (typeof BLUE_GREEN_SWITCH_OUTCOMES)[number];
 
 const SLO_STATUS_CODES: Record<string, number> = {
   ok: 0,

@@ -306,4 +306,5 @@ module.exports = {
   validateImageProvenance,
   validateReleaseManifest,
   normalizeDigest,
+  validateDeployFreeze,
 };

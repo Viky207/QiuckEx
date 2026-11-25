@@ -27,6 +27,9 @@ import {
 } from "./lib/contract.mjs";
 import { checkMobileDocs } from "./lib/mobile.mjs";
 import { checkEnvPrecedence } from "./lib/env-precedence.mjs";
+import { checkPaymentIntentLifecycle } from "./lib/payment-intents.mjs";
+
+const VALID_TARGETS = ["all", "openapi", "contract", "mobile", "env", "payment-intents"];
 import { checkTroubleshootingGuide } from "./lib/troubleshooting.mjs";
 import { checkPrivacyFieldInventory } from "./lib/privacy-inventory.mjs";
 

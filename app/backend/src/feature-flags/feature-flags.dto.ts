@@ -8,6 +8,7 @@ import {
   IsOptional,
   IsString,
   Max,
+  MaxLength,
   Min,
 } from 'class-validator';
 
@@ -234,4 +235,85 @@ export class FeatureFlagSnapshotResponseDto {
 
   @ApiProperty({ type: [FeatureFlagSnapshotEntryDto] })
   flags!: FeatureFlagSnapshotEntryDto[];
+}
+
+// ── Deploy Freeze DTOs (#561) ────────────────────────────────────────────────
+
+export class SetDeployFreezeDto {
+  @ApiProperty({
+    description: 'Reason for placing the environment under a deploy freeze',
+    example: 'Incident INC-1234: payment provider degradation',
+    maxLength: 500,
+  })
+  @IsString()
+  @MaxLength(500)
+  reason!: string;
+}
+
+export class ClearDeployFreezeDto {
+  @ApiPropertyOptional({
+    description: 'Optional reason for clearing the deploy freeze',
+    example: 'Incident resolved; resuming normal promotion',
+    maxLength: 500,
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  reason?: string;
+}
+
+export class DeployFreezeOverrideDto {
+  @ApiProperty({
+    description: 'Reason justifying the authorized override of the deploy freeze',
+    example: 'Emergency hotfix for security vulnerability',
+    maxLength: 500,
+  })
+  @IsString()
+  @MaxLength(500)
+  reason!: string;
+
+  @ApiPropertyOptional({
+    description: 'Optional ticket or incident reference for audit trail',
+    example: 'SEC-5678',
+    maxLength: 200,
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  ticketReference?: string;
+}
+
+export class DeployFreezeResponseDto {
+  @ApiProperty({
+    description: 'Whether the environment is currently under a deploy freeze',
+    example: true,
+  })
+  frozen!: boolean;
+
+  @ApiProperty({
+    description: 'Reason recorded when the freeze was set',
+    example: 'Incident INC-1234: payment provider degradation',
+    required: false,
+  })
+  reason?: string;
+
+  @ApiProperty({
+    description: 'Actor who set the freeze',
+    example: 'operator@example.com',
+    required: false,
+  })
+  actor?: string;
+
+  @ApiProperty({
+    description: 'Timestamp when the freeze was set',
+    example: '2024-01-01T00:00:00.000Z',
+    required: false,
+  })
+  frozenAt?: string;
+
+  @ApiProperty({
+    description: 'Monotonic generation counter for the freeze state',
+    example: 3,
+  })
+  generation!: number;
 }

@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Injectable,
   Logger,
   NotFoundException,
@@ -26,6 +27,36 @@ type CacheState = {
   source: 'store' | 'bootstrap' | 'cache';
   storeAvailable: boolean;
   expiresAt: number;
+};
+
+/**
+ * Environment-level deployment hold. While `frozen` is true, automatic
+ * production promotion is blocked for the environment. Validation workflows
+ * are unaffected.
+ */
+export type DeployFreezeState = {
+  environment: string;
+  frozen: boolean;
+  reason: string | null;
+  actor: string | null;
+  frozenAt: string | null;
+  overrideId: string | null;
+  /** Increments on every clear so in-flight runs started before it are not resumed. */
+  freezeGeneration: number;
+};
+
+export type DeployFreezeStatus = DeployFreezeState & {
+  /** Generation a promotion run must have started at to be eligible to resume. */
+  eligibleGeneration: number;
+};
+
+export type DeployFreezeOverrideResult = {
+  environment: string;
+  overrideId: string;
+  actor: string;
+  reason: string;
+  timestamp: string;
+  freezeGeneration: number;
 };
 
 const DEFAULT_FLAGS: FeatureFlagRecord[] = [
@@ -283,6 +314,7 @@ const DEFAULT_FLAGS: FeatureFlagRecord[] = [
 export class FeatureFlagsService {
   private readonly logger = new Logger(FeatureFlagsService.name);
   private cache: CacheState | null = null;
+  private readonly deployFreezes = new Map<string, DeployFreezeState>();
 
   constructor(
     private readonly supabaseService: SupabaseService,
@@ -470,6 +502,212 @@ export class FeatureFlagsService {
         error: 'FEATURE_FLAG_STORE_UNAVAILABLE',
         message: 'Feature flag store is unavailable; safe defaults remain active.',
       });
+    }
+  }
+
+  // ── Deploy freeze ─────────────────────────────────────────────────────────
+
+  private normalizeEnvironment(environment: string): string {
+    const normalized = environment?.trim().toLowerCase();
+    if (!normalized) {
+      throw new BadRequestException({
+        error: 'INVALID_ENVIRONMENT',
+        message: 'An environment is required for deploy freeze operations.',
+      });
+    }
+    return normalized;
+  }
+
+  private getFreezeState(environment: string): DeployFreezeState {
+    const normalized = this.normalizeEnvironment(environment);
+    const existing = this.deployFreezes.get(normalized);
+    if (existing) {
+      return existing;
+    }
+    return {
+      environment: normalized,
+      frozen: false,
+      reason: null,
+      actor: null,
+      frozenAt: null,
+      overrideId: null,
+      freezeGeneration: 0,
+    };
+  }
+
+  async setFreeze(
+    environment: string,
+    reason: string,
+    actor: string,
+  ): Promise<DeployFreezeState> {
+    const normalized = this.normalizeEnvironment(environment);
+    const trimmedReason = reason?.trim();
+    if (!trimmedReason) {
+      throw new BadRequestException({
+        error: 'FREEZE_REASON_REQUIRED',
+        message: 'A reason is required to set a deploy freeze.',
+      });
+    }
+
+    const previous = this.getFreezeState(normalized);
+    const next: DeployFreezeState = {
+      ...previous,
+      frozen: true,
+      reason: trimmedReason,
+      actor,
+      frozenAt: new Date().toISOString(),
+      overrideId: null,
+    };
+    this.deployFreezes.set(normalized, next);
+
+    await this.recordFreezeAudit('deploy_freeze.set', next, actor, trimmedReason);
+    return { ...next };
+  }
+
+  async clearFreeze(environment: string, actor: string): Promise<DeployFreezeState> {
+    const normalized = this.normalizeEnvironment(environment);
+    const previous = this.getFreezeState(normalized);
+    const next: DeployFreezeState = {
+      ...previous,
+      frozen: false,
+      reason: null,
+      actor,
+      frozenAt: null,
+      overrideId: null,
+      freezeGeneration: previous.freezeGeneration + 1,
+    };
+    this.deployFreezes.set(normalized, next);
+
+    await this.recordFreezeAudit(
+      'deploy_freeze.clear',
+      next,
+      actor,
+      previous.reason ?? 'freeze cleared',
+    );
+    return { ...next };
+  }
+
+  async isFrozen(environment: string): Promise<boolean> {
+    return this.getFreezeState(environment).frozen;
+  }
+
+  async getFreezeStatus(environment: string): Promise<DeployFreezeStatus> {
+    const state = this.getFreezeState(environment);
+    return { ...state, eligibleGeneration: state.freezeGeneration };
+  }
+
+  /**
+   * Authorized override of a deploy freeze. The override is logged and returns
+   * an override id that must be presented by the promotion run.
+   */
+  async overrideFreeze(
+    environment: string,
+    reason: string,
+    actor: string,
+  ): Promise<DeployFreezeOverrideResult> {
+    const normalized = this.normalizeEnvironment(environment);
+    const trimmedReason = reason?.trim();
+    if (!trimmedReason) {
+      throw new BadRequestException({
+        error: 'OVERRIDE_REASON_REQUIRED',
+        message: 'A reason is required to override a deploy freeze.',
+      });
+    }
+
+    const state = this.getFreezeState(normalized);
+    if (!state.frozen) {
+      throw new BadRequestException({
+        error: 'NOT_FROZEN',
+        message: `Environment "${normalized}" is not frozen; no override is required.`,
+      });
+    }
+
+    const timestamp = new Date().toISOString();
+    const overrideId = createHash('sha256')
+      .update(`${normalized}:${actor}:${timestamp}:${state.freezeGeneration}`)
+      .digest('hex')
+      .slice(0, 32);
+
+    const next: DeployFreezeState = { ...state, overrideId };
+    this.deployFreezes.set(normalized, next);
+
+    await this.recordFreezeAudit(
+      'deploy_freeze.override',
+      next,
+      actor,
+      trimmedReason,
+      { overrideId, timestamp },
+    );
+
+    return {
+      environment: normalized,
+      overrideId,
+      actor,
+      reason: trimmedReason,
+      timestamp,
+      freezeGeneration: next.freezeGeneration,
+    };
+  }
+
+  /**
+   * Gate for promotion. Returns true only when the environment is not frozen,
+   * or when a valid override id is presented for the current freeze.
+   */
+  async assertPromotionAllowed(
+    environment: string,
+    options: { overrideId?: string } = {},
+  ): Promise<void> {
+    const state = this.getFreezeState(environment);
+    if (!state.frozen) {
+      return;
+    }
+    if (options.overrideId && state.overrideId && options.overrideId === state.overrideId) {
+      return;
+    }
+    throw new ServiceUnavailableException({
+      error: 'DEPLOY_FROZEN',
+      environment: state.environment,
+      reason: state.reason,
+      frozenAt: state.frozenAt,
+      message: `Deploy freeze is active for "${state.environment}"; promotion is blocked.`,
+    });
+  }
+
+  /**
+   * A promotion run is eligible to resume only if it started at or after the
+   * current freeze generation. Runs started before a clear are not resumed.
+   */
+  async isRunEligibleToResume(environment: string, runGeneration: number): Promise<boolean> {
+    const state = this.getFreezeState(environment);
+    return runGeneration >= state.freezeGeneration;
+  }
+
+  private async recordFreezeAudit(
+    action: string,
+    state: DeployFreezeState,
+    actor: string,
+    reason: string,
+    extra: Record<string, unknown> = {},
+  ): Promise<void> {
+    try {
+      await this.auditService.log({
+        action,
+        actor,
+        resourceType: 'deploy_freeze',
+        resourceId: state.environment,
+        metadata: {
+          environment: state.environment,
+          frozen: state.frozen,
+          reason,
+          timestamp: new Date().toISOString(),
+          freezeGeneration: state.freezeGeneration,
+          ...extra,
+        },
+      });
+    } catch (error) {
+      this.logger.warn(
+        `Failed to record deploy freeze audit entry (${action}) for ${state.environment}: ${(error as Error).message}`,
+      );
     }
   }
 

@@ -137,6 +137,30 @@ jobs:
       - name: Horizon-Backed Endpoints Performance Regression Tests
         run: pnpm run test:perf:horizon
 
+      - name: Deploy Freeze and Override Tests
+        run: pnpm run test:unit -- deploy-freeze
+        env:
+          NODE_ENV: test
+          STELLAR_NETWORK: testnet
+          SUPABASE_URL: https://test.supabase.co
+          SUPABASE_ANON_KEY: test-key
+
+      - name: Payment Lifecycle Documentation Check
+        run: pnpm run docs:check:payment-lifecycle
+        env:
+          NODE_ENV: test
+          NETWORK: testnet
+          SUPABASE_URL: https://spec-export.supabase.co
+          SUPABASE_ANON_KEY: spec-export-key
+
+      - name: Event Indexer Runbook Check
+        run: pnpm run docs:check:indexer-runbook
+        env:
+          NODE_ENV: test
+          NETWORK: testnet
+          SUPABASE_URL: https://spec-export.supabase.co
+          SUPABASE_ANON_KEY: spec-export-key
+
       # Credential rotation rehearsal (#567): exercises the rotation path with
       # placeholder, non-secret values only. Output is redacted; no real
       # deployment credentials are read or logged.

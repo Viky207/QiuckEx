@@ -1,12 +1,47 @@
 import { Injectable, Logger, OnModuleInit } from "@nestjs/common";
 import { AppConfigService } from "../config/app-config.service";
 import { MetricsService } from "../metrics/metrics.service";
+import { HealthService } from "../health/health.service";
 
 export interface ParityCheckResult {
   check: string;
   status: "pass" | "fail" | "warning";
   details?: string;
 }
+
+export type TrafficSlot = "blue" | "green";
+
+export interface TrafficSwitchResult {
+  status: "switched" | "already_active" | "refused" | "failed";
+  activeSlot: TrafficSlot | null;
+  targetSlot: TrafficSlot | null;
+  attempts: number;
+  reason?: string;
+}
+
+/**
+ * Error raised when a promotion is attempted while a deploy freeze is active.
+ */
+export class DeployFreezeError extends Error {
+  constructor(public readonly reason: string) {
+    super(`Deploy freeze active: ${reason}`);
+    this.name = "DeployFreezeError";
+  }
+}
+
+/**
+ * Error raised when the traffic controller returns an unusable response.
+ */
+export class TrafficControllerError extends Error {
+  constructor(
+    message: string,
+    public readonly kind: "timeout" | "malformed" | "uncertain" | "unready",
+  ) {
+    super(message);
+    this.name = "TrafficControllerError";
+  }
+}
+=======
 
 /**
  * EnvironmentParityService validates that staging environment configuration
@@ -27,6 +62,7 @@ export class EnvironmentParityService implements OnModuleInit {
   constructor(
     private readonly config: AppConfigService,
     private readonly metricsService: MetricsService,
+    private readonly healthService: HealthService,
   ) {}
 
   async onModuleInit() {
@@ -89,6 +125,220 @@ export class EnvironmentParityService implements OnModuleInit {
    */
   getResults(): ParityCheckResult[] {
     return this.parityResults;
+  }
+
+  /**
+   * Whether automatic production promotion is currently held by a deploy freeze.
+   */
+  isFrozen(): boolean {
+    return this.config.deployFreezeEnabled;
+  }
+
+  /**
+   * Gate a promotion on the deploy-freeze state.
+   *
+   * Validation workflows remain enabled while frozen; only traffic-changing
+   * promotion is refused. An authorized override must be recorded by the
+   * caller (with actor and reason) before invoking this method with
+   * `override: true`.
+   */
+  assertPromotionAllowed(override = false): void {
+    if (!this.isFrozen() || override) {
+      return;
+    }
+
+    const reason = this.config.deployFreezeReason || "unspecified";
+    this.metricsService.recordParityCheckResult("deploy_freeze", 0, 1, 0);
+    this.logger.warn(`Promotion refused: deploy freeze active (${reason})`);
+    throw new DeployFreezeError(reason);
+  }
+
+  /**
+   * Switch blue-green traffic to the given slot idempotently.
+   *
+   * The active slot is always queried from the controller before any switch
+   * attempt so that retries after an uncertain result never re-send traffic to
+   * an already-active or unready target. Timeouts, malformed responses and
+   * uncertain results are retried a bounded number of times and surfaced in
+   * metrics with an explicit error state.
+   */
+  async switchTraffic(
+    targetSlot: TrafficSlot,
+    options: { maxAttempts?: number } = {},
+  ): Promise<TrafficSwitchResult> {
+    const maxAttempts = Math.max(1, options.maxAttempts ?? 3);
+    let attempts = 0;
+    let lastError: TrafficControllerError | undefined;
+
+    while (attempts < maxAttempts) {
+      attempts += 1;
+
+      let activeSlot: TrafficSlot | null;
+      try {
+        activeSlot = await this.queryActiveSlot();
+      } catch (error) {
+        lastError = this.toControllerError(error, "uncertain");
+        this.recordTrafficSwitch("query_failed", targetSlot, attempts);
+        continue;
+      }
+
+      if (activeSlot === targetSlot) {
+        this.recordTrafficSwitch("already_active", targetSlot, attempts);
+        return {
+          status: "already_active",
+          activeSlot,
+          targetSlot,
+          attempts,
+        };
+      }
+
+      const ready = await this.isTargetReady(targetSlot);
+      if (!ready) {
+        this.recordTrafficSwitch("unready_target", targetSlot, attempts);
+        return {
+          status: "refused",
+          activeSlot,
+          targetSlot,
+          attempts,
+          reason: `Target slot ${targetSlot} is not ready`,
+        };
+      }
+
+      try {
+        await this.sendSwitch(targetSlot);
+        this.recordTrafficSwitch("switched", targetSlot, attempts);
+        return { status: "switched", activeSlot, targetSlot, attempts };
+      } catch (error) {
+        lastError = this.toControllerError(error, "uncertain");
+        this.recordTrafficSwitch(lastError.kind, targetSlot, attempts);
+        // Loop re-queries the active slot before retrying so an uncertain
+        // result is resolved rather than blindly re-sent.
+      }
+    }
+
+    this.recordTrafficSwitch("failed", targetSlot, attempts);
+    return {
+      status: "failed",
+      activeSlot: null,
+      targetSlot,
+      attempts,
+      reason: lastError?.message ?? "Traffic switch failed",
+    };
+  }
+
+  private async queryActiveSlot(): Promise<TrafficSlot> {
+    const response = await this.callController("GET", "/active");
+    const slot = (response as { activeSlot?: unknown })?.activeSlot;
+    if (slot !== "blue" && slot !== "green") {
+      throw new TrafficControllerError(
+        "Malformed active-slot response",
+        "malformed",
+      );
+    }
+    return slot;
+  }
+
+  private async isTargetReady(targetSlot: TrafficSlot): Promise<boolean> {
+    try {
+      const health = await this.healthService.check();
+      return Boolean(health) && health.status === "ok";
+    } catch {
+      return false;
+    }
+  }
+
+  private async sendSwitch(targetSlot: TrafficSlot): Promise<void> {
+    await this.callController("POST", "/switch", { targetSlot });
+  }
+
+  private async callController(
+    method: "GET" | "POST",
+    path: string,
+    body?: unknown,
+  ): Promise<unknown> {
+    const baseUrl = this.config.trafficControllerUrl;
+    if (!baseUrl) {
+      throw new TrafficControllerError(
+        "Traffic controller URL not configured",
+        "uncertain",
+      );
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(
+      () => controller.abort(),
+      this.config.trafficControllerTimeoutMs,
+    );
+
+    try {
+      const response = await fetch(`${baseUrl}${path}`, {
+        method,
+        headers: { "content-type": "application/json" },
+        body: body ? JSON.stringify(body) : undefined,
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        throw new TrafficControllerError(
+          `Traffic controller returned ${response.status}`,
+          "uncertain",
+        );
+      }
+
+      try {
+        return await response.json();
+      } catch {
+        throw new TrafficControllerError(
+          "Malformed traffic controller response",
+          "malformed",
+        );
+      }
+    } catch (error) {
+      if (error instanceof TrafficControllerError) {
+        throw error;
+      }
+      if ((error as Error)?.name === "AbortError") {
+        throw new TrafficControllerError(
+          "Traffic controller request timed out",
+          "timeout",
+        );
+      }
+      throw new TrafficControllerError(
+        (error as Error)?.message ?? "Traffic controller request failed",
+        "uncertain",
+      );
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  private toControllerError(
+    error: unknown,
+    fallback: TrafficControllerError["kind"],
+  ): TrafficControllerError {
+    if (error instanceof TrafficControllerError) {
+      return error;
+    }
+    return new TrafficControllerError(
+      (error as Error)?.message ?? "Traffic controller error",
+      fallback,
+    );
+  }
+
+  private recordTrafficSwitch(
+    outcome: string,
+    targetSlot: TrafficSlot,
+    attempts: number,
+  ): void {
+    this.logger.log(
+      `Blue-green traffic switch outcome=${outcome} target=${targetSlot} attempts=${attempts}`,
+    );
+    this.metricsService.recordParityCheckResult(
+      `traffic_switch_${outcome}`,
+      0,
+      outcome === "switched" || outcome === "already_active" ? 0 : 1,
+      0,
+    );
   }
 
   /**
