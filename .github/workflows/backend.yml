@@ -21,7 +21,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Install pnpm
         uses: pnpm/action-setup@v4
@@ -36,7 +36,7 @@ jobs:
       # Keys are scoped to OS + package manager + the workspace lockfile plus
       # this package's manifest, so a change to either invalidates the cache.
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
         with:
           node-version: "20"
           cache: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop') && 'pnpm' || '' }}
@@ -96,7 +96,7 @@ jobs:
 
       - name: Upload unit test coverage report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
         with:
           name: backend-unit-coverage
           path: app/backend/coverage
@@ -113,7 +113,7 @@ jobs:
 
       - name: Upload integration test coverage report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
         with:
           name: backend-integration-coverage
           path: app/backend/coverage
@@ -191,7 +191,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Install pnpm
         uses: pnpm/action-setup@v4
@@ -203,7 +203,7 @@ jobs:
       # dependency caching is deliberately disabled to keep untrusted runs
       # out of the shared cache.
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
         with:
           node-version: "20"
 

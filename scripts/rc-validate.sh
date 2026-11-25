@@ -99,6 +99,8 @@ FULL_STAGES=(
   "fuzz|pnpm|1|Property-based suites (fast-check)"
   "contract|cargo|1|cargo fmt + clippy + test in app/contract"
   "openapi|pnpm|0|Committed openapi.json matches the code"
+  "actions-pinned|git|0|All workflow/action uses: refs are pinned to full commit SHAs"
+  "attestation|gh|1|Release artifacts carry verifiable provenance attestations"
   "sign-images|cosign|1|Release image digests signed with cosign"
   "verify-images|cosign|0|Image signatures and provenance verified before deploy"
   "release-manifest|node|0|Release manifest generated, schema-valid, digest-complete"
@@ -381,6 +383,29 @@ for stage in "${STAGES[@]}"; do
         ok=1; detail="cargo fmt + clippy + test clean"
       else
         detail="FAILED: contract checks (see /tmp/rc-fmt.log, /tmp/rc-clippy.log, /tmp/rc-cargo-test.log)"
+      fi
+      ;;
+
+    actions-pinned)
+      # Issue #547: every external `uses:` reference must be an immutable full
+      # commit SHA. Mutable tags can be retargeted after review, so a candidate
+      # whose workflows reference a tag is not reproducible. The checker is the
+      # single definition of the rule; CI runs the same script.
+      if bash scripts/check-actions-pinned.sh >/tmp/rc-actions-pinned.log 2>&1; then
+        ok=1; detail="all uses: refs pinned to full commit SHAs"
+      else
+        detail="FAILED: mutable action reference (see /tmp/rc-actions-pinned.log)"
+      fi
+      ;;
+
+    attestation)
+      # Issues #550/#551: release artifacts must carry provenance attestations
+      # tied to an immutable digest before promotion. Verification runs here so
+      # a candidate whose artifacts cannot be verified is rejected, not promoted.
+      if bash scripts/verify-attestations.sh >/tmp/rc-attestation.log 2>&1; then
+        ok=1; detail="provenance attestations verified for release artifacts"
+      else
+        detail="FAILED: attestation verification (see /tmp/rc-attestation.log)"
       fi
       ;;
 

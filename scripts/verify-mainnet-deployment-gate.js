@@ -119,6 +119,33 @@ function validateGate(gate, options) {
   }
 }
 
+function validateProvenanceAttestation(attestation, options) {
+  const { wasmHash, commit, repository, workflow, now = Date.now() } = options;
+  if (!attestation || typeof attestation !== 'object' || Array.isArray(attestation)) {
+    throw new Error('Build provenance attestation is required');
+  }
+  const subject = Array.isArray(attestation.subject) ? attestation.subject : [];
+  const digest = wasmHash.toLowerCase();
+  const matchesArtifact = subject.some((entry) =>
+    String(entry?.digest?.sha256 ?? '').toLowerCase() === digest);
+  if (!matchesArtifact) {
+    throw new Error('Build provenance attestation does not cover the WASM artifact digest');
+  }
+  if (attestation.repository !== repository) {
+    throw new Error('Build provenance attestation repository does not match the release repository');
+  }
+  if (attestation.commit !== commit) {
+    throw new Error('Build provenance attestation commit does not match the checked-out commit');
+  }
+  if (attestation.workflow !== workflow) {
+    throw new Error('Build provenance attestation workflow does not match the release workflow');
+  }
+  const createdAt = Date.parse(attestation.created_at);
+  if (!Number.isFinite(createdAt) || createdAt > now) {
+    throw new Error('Build provenance attestation must have a valid creation timestamp');
+  }
+}
+
 function readImageSigningKeys() {
   const raw = process.env.QUICKEX_IMAGE_SIGNING_PUBLIC_KEYS ?? process.env.QUICKEX_MAINNET_REVIEWER_PUBLIC_KEYS ?? '{}';
   let keys;
@@ -249,6 +276,19 @@ function sha256(filePath) {
   return createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
 }
 
+function verifyAttestationWithGh(attestationPath, wasmPath, repository) {
+  try {
+    execFileSync('gh', [
+      'attestation', 'verify', wasmPath,
+      '--repo', repository,
+      '--bundle', attestationPath,
+      '--format', 'json',
+    ], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  } catch (error) {
+    throw new Error(`gh attestation verify failed: ${error.message}`);
+  }
+}
+
 function main() {
   const args = parseArgs(process.argv.slice(2));
   for (const required of ['gate', 'testnet-manifest', 'audit-report', 'wasm', 'image-digest', 'image-signature', 'image-provenance', 'expected-source-repo', 'release-manifest']) {
@@ -258,6 +298,14 @@ function main() {
   const testnetManifest = JSON.parse(fs.readFileSync(args['testnet-manifest'], 'utf8'));
   const wasmHash = sha256(args.wasm);
   const commit = execFileSync('git', ['-C', ROOT, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+  const repository = process.env.GITHUB_REPOSITORY;
+  const workflow = process.env.GITHUB_WORKFLOW_REF;
+  if (!repository || !workflow) {
+    throw new Error('GITHUB_REPOSITORY and GITHUB_WORKFLOW_REF are required to verify build provenance');
+  }
+  const attestation = JSON.parse(fs.readFileSync(args.attestation, 'utf8'));
+  validateProvenanceAttestation(attestation, { wasmHash, commit, repository, workflow });
+  verifyAttestationWithGh(args.attestation, args.wasm, repository);
   validateGate(gate, {
     wasmHash,
     commit,
@@ -302,6 +350,7 @@ if (require.main === module) {
 module.exports = {
   canonicalJson,
   validateGate,
+  validateProvenanceAttestation,
   validateImageSignature,
   validateImageProvenance,
   validateReleaseManifest,

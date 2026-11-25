@@ -41,7 +41,6 @@ FAILED=0
 OLD_DIGEST=""
 NEW_DIGEST=""
 ROLLBACK_PERFORMED="no"
-=======
 
 fail() {
   echo "FAIL: $1" >&2

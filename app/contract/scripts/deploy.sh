@@ -135,6 +135,33 @@ fi
 WASM_SHA="$(sha256sum "$WASM_PATH" | awk '{print $1}')"
 echo "WASM SHA-256: 0x${WASM_SHA}"
 
+# ── Provenance attestation verification ─────────────────────────────────────
+# Verifies that the WASM artifact was produced by a trusted GitHub Actions
+# workflow. Runs before the mainnet gate so unverified artifacts never reach
+# promotion. Mainnet deployments always require a verified attestation.
+
+if [[ "$NETWORK" == "mainnet" ]]; then
+  REQUIRE_ATTESTATION=1
+fi
+
+if [[ "$REQUIRE_ATTESTATION" == "1" ]]; then
+  need "$GH_BIN"
+  ATTESTATION_ARGS=(attestation verify "$WASM_PATH")
+  if [[ -n "$ATTESTATION_REPO" ]]; then
+    ATTESTATION_ARGS+=(--repo "$ATTESTATION_REPO")
+  fi
+  if [[ -n "$ATTESTATION_SIGNER_WORKFLOW" ]]; then
+    ATTESTATION_ARGS+=(--signer-workflow "$ATTESTATION_SIGNER_WORKFLOW")
+  fi
+  echo "==> Verifying build provenance attestation for $WASM_PATH"
+  if ! "$GH_BIN" "${ATTESTATION_ARGS[@]}" 2>&1; then
+    echo "error: no verified provenance attestation found for $WASM_PATH" >&2
+    echo "       refusing to promote an artifact with unverified provenance" >&2
+    exit 1
+  fi
+  echo "Provenance attestation verified"
+fi
+
 if [[ "$NETWORK" == "mainnet" && "$DRY_RUN" != "1" ]]; then
   need node
   for gate_input in "$MAINNET_GATE_FILE" "$TESTNET_MANIFEST" "$AUDIT_REPORT"; do
