@@ -231,6 +231,82 @@ export function checkContractDrift(root) {
  * the contract map calls out explicitly, because a client that prepends /api
  * would break every route at once.
  */
+/**
+ * Migration authoring and rollback review - issue #583.
+ *
+ * Every forward migration needs a way back. This check pairs each
+ * `*.sql` migration with a rollback counterpart (`*.down.sql` or
+ * `*_rollback.sql`) and accepts a migration without one only when the guide
+ * marks it explicitly irreversible. It also verifies the guide documents the
+ * current verification commands.
+ */
+export function checkMigrationRollbacks(root) {
+  const errors = [];
+  const warnings = [];
+  const summary = { migrations: 0, withRollback: 0, irreversible: 0, missing: 0 };
+
+  if (!fileExists(root, MIGRATION_GUIDE)) {
+    return {
+      errors: [`${MIGRATION_GUIDE} is missing - it must document migration authoring and rollback review`],
+      warnings,
+      summary,
+    };
+  }
+
+  const guide = readText(root, MIGRATION_GUIDE);
+  for (const command of MIGRATION_VERIFICATION_COMMANDS) {
+    if (!guide.includes(command)) {
+      errors.push(`${MIGRATION_GUIDE} does not document the verification command "${command}"`);
+    }
+  }
+
+  const files = listFiles(root, MIGRATIONS_DIR).filter((file) => file.endsWith(".sql"));
+  const forward = files.filter((file) => !isRollbackFile(file));
+  const rollbacks = new Set(files.filter(isRollbackFile).map(rollbackBase));
+  summary.migrations = forward.length;
+
+  for (const file of forward) {
+    const base = file.replace(/\.sql$/, "");
+    if (rollbacks.has(base)) {
+      summary.withRollback += 1;
+      continue;
+    }
+    if (isMarkedIrreversible(guide, file)) {
+      summary.irreversible += 1;
+      continue;
+    }
+    summary.missing += 1;
+    errors.push(
+      `${MIGRATIONS_DIR}/${file}: no rollback script (expected ${base}.down.sql) and it is not marked irreversible in ${MIGRATION_GUIDE}. Add a rollback or document why the change cannot be reversed.`,
+    );
+  }
+
+  return { errors, warnings, summary };
+}
+
+/** A rollback script is a `.down.sql` or `_rollback.sql` sibling. */
+export function isRollbackFile(file) {
+  return /(\.down|_rollback)\.sql$/.test(file);
+}
+
+/** The forward-migration base name a rollback file belongs to. */
+export function rollbackBase(file) {
+  return file.replace(/(\.down|_rollback)\.sql$/, "");
+}
+
+/**
+ * A migration is explicitly irreversible when the guide names its file (or
+ * base name) on a line that also says "irreversible". Naming the file keeps
+ * the exception auditable instead of blanket-exempting a directory.
+ */
+export function isMarkedIrreversible(guide, file) {
+  const base = file.replace(/\.sql$/, "");
+  return guide
+    .split("\n")
+    .filter((line) => /irreversible/i.test(line))
+    .some((line) => line.includes(file) || line.includes(base));
+}
+
 export function checkGlobalPrefixInvariant(root) {
   const errors = [];
   if (!fileExists(root, PATHS.mainEntry)) {

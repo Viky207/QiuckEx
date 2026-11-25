@@ -22,6 +22,8 @@ export const PATHS = {
   controllers: "app/backend/src",
   mobileReadme: "app/mobile/README.md",
   mobileConfig: "app/mobile/app.config.ts",
+  scorecardGenerator: "scripts/generate-release-scorecard.mjs",
+  scorecardGuide: "docs/RELEASE-SCORECARD-GUIDE.md",
   accessibilityGuide: "docs/ACCESSIBILITY-TESTING-GUIDE.md",
   glossary: "docs/GLOSSARY.md",
   troubleshootingGuide: "docs/API-TROUBLESHOOTING-GUIDE.md",
@@ -173,6 +175,67 @@ export function missingSections(markdown, required) {
         heading.replace(/^[0-9]+\.\s*/, "") === needed.replace(/^[0-9]+\.\s*/, ""),
     );
   });
+}
+
+/**
+ * Field names emitted by the release scorecard generator.
+ *
+ * The generator is parsed as text (never imported) so the docs gate keeps its
+ * zero-execution guarantee. Only `name: "<identifier>"` object literals are
+ * considered, which is how the generator declares every scorecard field.
+ */
+export function scorecardFieldNames(source) {
+  const names = [];
+  const pattern = /\bname:\s*["']([A-Za-z][A-Za-z0-9_]*)["']/g;
+  let match;
+  while ((match = pattern.exec(source)) !== null) names.push(match[1]);
+  return unique(names);
+}
+
+/**
+ * Scorecard fields that are not documented in the guide.
+ *
+ * A field counts as documented when the guide mentions it as inline code
+ * (`` `field` ``) or as a table cell / heading token, so the guide can link
+ * each field to its generating check without a rigid layout.
+ */
+export function undocumentedScorecardFields(guide, fields) {
+  return fields.filter((field) => {
+    const escaped = field.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return !new RegExp(`(^|[^A-Za-z0-9_])${escaped}([^A-Za-z0-9_]|$)`).test(guide);
+  });
+}
+
+/**
+ * Threshold statements the guide must make, expressed as regexes so wording
+ * can evolve while the semantics stay pinned.
+ */
+export const SCORECARD_THRESHOLD_RULES = [
+  {
+    id: "pass-threshold",
+    description: "states the PASS score threshold",
+    pattern: /PASS[\s\S]{0,120}?(?:>=|≥|at least|minimum of)\s*90\b/i,
+  },
+  {
+    id: "warn-threshold",
+    description: "states the WARN score band",
+    pattern: /WARN[\s\S]{0,120}?(?:>=|≥|at least|minimum of)\s*70\b/i,
+  },
+  {
+    id: "blocked-threshold",
+    description: "states the BLOCKED score boundary",
+    pattern: /BLOCKED[\s\S]{0,120}?(?:<|below|under|less than)\s*70\b/i,
+  },
+  {
+    id: "grade-thresholds",
+    description: "states the A/B/C/D grade thresholds",
+    pattern: /grade[\s\S]{0,200}?A[\s\S]{0,40}?90[\s\S]{0,80}?B[\s\S]{0,40}?80[\s\S]{0,80}?C[\s\S]{0,40}?70/i,
+  },
+];
+
+/** Threshold rules the guide does not satisfy. */
+export function missingScorecardThresholds(guide) {
+  return SCORECARD_THRESHOLD_RULES.filter((rule) => !rule.pattern.test(guide));
 }
 
 /**
