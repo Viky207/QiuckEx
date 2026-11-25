@@ -38,6 +38,27 @@ Link the invariants from [../INVARIANTS.md](../INVARIANTS.md) that this decision
 protects or constrains. Write `None` if the decision is not financial or
 state-machine related.
 
+## API Deprecation
+
+<!--
+Optional. Complete this section only when the decision deprecates an API alias
+or endpoint. Follow the existing alias policy: every deprecated alias must name
+its supported replacement, a warning period, and the compatibility tests that
+prove clients can migrate. Leave timeline dates as placeholders (TBD) for
+maintainers to fill in; do not invent dates.
+-->
+
+- **Deprecated alias / endpoint:** `<alias or endpoint>`
+- **Replacement endpoint:** `<supported replacement>`
+- **Warning period:** `<duration, e.g. N release cycles / N days>` (starts on `<TBD: warning start date>`)
+- **Removal / sunset date:** `<TBD: sunset date>`
+- **Migration timeline:**
+  - `<TBD>` — warning announced, alias still served
+  - `<TBD>` — alias returns deprecation warning header / log entry
+  - `<TBD>` — alias removed, replacement only
+- **Compatibility tests:** `<test paths proving the replacement satisfies the alias contract, including the failure/boundary case>`
+- **Client migration guide:** `<link to the versioned migration template or docs>`
+
 ## References
 
 - Owning code paths

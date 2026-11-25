@@ -45,7 +45,9 @@ export interface ApiChange {
     | 'response-enum-value-removed'
     | 'response-enum-value-added'
     | 'error-code-removed'
-    | 'error-code-added';
+    | 'error-code-added'
+    | 'alias-deprecated'
+    | 'alias-warning-expired';
   /** HTTP path the change applies to (e.g. `/users/{id}`). */
   path: string;
   /** HTTP method (lowercase) the change applies to, when applicable. */
@@ -155,6 +157,42 @@ function diffErrorCodes(
   }
 
   return changes.sort((a, b) => (a.code < b.code ? -1 : a.code > b.code ? 1 : 0));
+}
+
+/**
+ * Describes a deprecated API alias and the supported replacement it maps to.
+ *
+ * Aliases follow the existing alias policy: an alias must always point at a
+ * supported replacement endpoint and must carry a warning period that ends
+ * before the alias is removed. Dates are supplied by maintainers (never
+ * invented by the service) as ISO-8601 date strings.
+ */
+export interface DeprecatedAlias {
+  /** The deprecated alias path (e.g. `/v1/users`). */
+  aliasPath: string;
+  /** The supported replacement path (e.g. `/v2/users`). */
+  replacementPath: string;
+  /** ISO-8601 timestamp at which the deprecation warning period ends. */
+  warningPeriodEndsAt: string;
+  /** ISO-8601 timestamp at which the alias will be removed. */
+  removalDate: string;
+}
+
+/**
+ * Result of validating a single deprecated alias declaration.
+ */
+export interface DeprecatedAliasValidation {
+  aliasPath: string;
+  /** True when the alias has a replacement and a valid, non-expired window. */
+  valid: boolean;
+  /** Machine-readable reasons the alias is invalid (empty when valid). */
+  problems: Array<
+    | 'missing-replacement'
+    | 'invalid-warning-period'
+    | 'warning-period-expired'
+    | 'invalid-removal-date'
+    | 'removal-before-warning-end'
+  >;
 }
 
 /**
@@ -1024,6 +1062,101 @@ export function diffOpenApiDocuments(
   return sortChanges(changes);
 }
 
+function parseDate(value: string | undefined): Date | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return undefined;
+  }
+  return parsed;
+}
+
+/**
+ * Validates a deprecated alias declaration against the alias policy.
+ *
+ * An alias is valid when it declares a replacement endpoint, a parseable
+ * warning period that has not yet expired, and a removal date that is not
+ * earlier than the end of the warning period.
+ */
+export function validateDeprecatedAlias(
+  alias: DeprecatedAlias,
+  now: Date = new Date(),
+): DeprecatedAliasValidation {
+  const problems: DeprecatedAliasValidation['problems'] = [];
+
+  if (!alias.replacementPath || alias.replacementPath === alias.aliasPath) {
+    problems.push('missing-replacement');
+  }
+
+  const warningEnd = parseDate(alias.warningPeriodEndsAt);
+  if (!warningEnd) {
+    problems.push('invalid-warning-period');
+  } else if (warningEnd.getTime() <= now.getTime()) {
+    problems.push('warning-period-expired');
+  }
+
+  const removal = parseDate(alias.removalDate);
+  if (!removal) {
+    problems.push('invalid-removal-date');
+  } else if (warningEnd && removal.getTime() < warningEnd.getTime()) {
+    problems.push('removal-before-warning-end');
+  }
+
+  return {
+    aliasPath: alias.aliasPath,
+    valid: problems.length === 0,
+    problems,
+  };
+}
+
+/**
+ * Produces deterministic change entries for a set of deprecated aliases.
+ *
+ * - Every alias yields an `alias-deprecated` (non-breaking) entry describing
+ *   the migration window.
+ * - Aliases whose warning period has expired yield an additional
+ *   `alias-warning-expired` (breaking) entry.
+ */
+export function diffDeprecatedAliases(
+  aliases: DeprecatedAlias[] | undefined,
+  now: Date = new Date(),
+): ApiChange[] {
+  if (!aliases || aliases.length === 0) {
+    return [];
+  }
+
+  const changes: ApiChange[] = [];
+
+  for (const alias of aliases) {
+    changes.push(
+      buildChange({
+        severity: 'non-breaking',
+        kind: 'alias-deprecated',
+        path: alias.aliasPath,
+        message: `Alias ${alias.aliasPath} deprecated in favor of ${
+          alias.replacementPath || '(missing replacement)'
+        } until ${alias.warningPeriodEndsAt || '(unspecified)'}`,
+      }),
+    );
+
+    const validation = validateDeprecatedAlias(alias, now);
+    if (validation.problems.includes('warning-period-expired')) {
+      changes.push(
+        buildChange({
+          severity: 'breaking',
+          kind: 'alias-warning-expired',
+          path: alias.aliasPath,
+          message: `Alias ${alias.aliasPath} warning period ended at ${alias.warningPeriodEndsAt}`,
+        }),
+      );
+    }
+  }
+
+  return sortChanges(changes);
+}
+
 function sortChanges(changes: ApiChange[]): ApiChange[] {
   return changes.slice().sort((a, b) => {
     if (a.path !== b.path) {
@@ -1061,6 +1194,16 @@ export interface ApiCompatibilityOptions {
    * change to non-breaking (or vice versa).
    */
   overrides?: Record<string, ChangeSeverity>;
+  /**
+   * Deprecated aliases to surface alongside structural changes. When omitted,
+   * no alias changes are emitted.
+   */
+  deprecatedAliases?: DeprecatedAlias[];
+  /**
+   * Reference timestamp used to evaluate whether an alias warning period has
+   * expired. Defaults to the current time. Exposed for deterministic testing.
+   */
+  now?: Date;
 }
 
 /**
@@ -1116,8 +1259,12 @@ export class ApiCompatibilityService {
   ): ApiCompatibilityReport {
     const allowlist = new Set(options.allowlist ?? []);
     const overrides = options.overrides ?? {};
+    const now = options.now ?? new Date();
 
-    const rawChanges = diffOpenApiDocuments(baseline, current);
+    const rawChanges = [
+      ...diffOpenApiDocuments(baseline, current),
+      ...diffDeprecatedAliases(options.deprecatedAliases, now),
+    ];
 
     const changes: ApiChange[] = [];
     const allowed: ApiChange[] = [];
@@ -1160,6 +1307,20 @@ export class ApiCompatibilityService {
       compatible: breaking.length === 0,
       errorCodeChanges,
     };
+  }
+
+  /**
+   * Lists the deprecated aliases supplied in `options` together with their
+   * validation result. Aliases are returned in a deterministic order.
+   */
+  public listDeprecatedAliases(
+    options: ApiCompatibilityOptions = {},
+  ): DeprecatedAliasValidation[] {
+    const now = options.now ?? new Date();
+    const aliases = options.deprecatedAliases ?? [];
+    return aliases
+      .map((alias) => validateDeprecatedAlias(alias, now))
+      .sort((a, b) => (a.aliasPath < b.aliasPath ? -1 : a.aliasPath > b.aliasPath ? 1 : 0));
   }
 }
 </｜｜DSML｜｜ parameter>
