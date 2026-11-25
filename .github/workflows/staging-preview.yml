@@ -19,8 +19,7 @@ jobs:
   guard:
     name: Enforce testnet-only staging
     runs-on: ubuntu-latest
-    # Static checks only; no repository or API access required.
-    permissions: {}
+    timeout-minutes: 5
     steps:
       - name: Verify STELLAR_NETWORK is testnet
         run: |
@@ -40,10 +39,7 @@ jobs:
     needs: guard
     if: github.event.action != 'closed'
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      # Required to post the preview URL comment on the pull request
-      pull-requests: write
+    timeout-minutes: 15
     outputs:
       frontend_url: ${{ steps.frontend.outputs.url }}
       backend_url: ${{ steps.backend.outputs.url }}
@@ -131,12 +127,17 @@ jobs:
               });
             }
 
+      - name: Summarize failure
+        if: failure()
+        run: |
+          echo "### :x: Staging preview deploy failed" >> "$GITHUB_STEP_SUMMARY"
+          echo "See the failed step above (frontend deploy, backend deploy, or health check) for details." >> "$GITHUB_STEP_SUMMARY"
+
   teardown:
     name: Tear down preview
     if: github.event.action == 'closed'
     runs-on: ubuntu-latest
-    # External Vercel/deploy-hook tokens are supplied as secrets, not GITHUB_TOKEN.
-    permissions: {}
+    timeout-minutes: 10
     steps:
       - name: Remove frontend preview
         env:

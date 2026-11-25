@@ -11,6 +11,12 @@ import {
   BranchPreviewResponseDto,
 } from './branch-preview.model';
 
+export interface StalePreviewCleanupSummary {
+  runId: string;
+  deletedCount: number;
+  deletedIdentifiers: string[];
+}
+
 @Injectable()
 export class BranchPreviewService {
   private readonly logger = new Logger(BranchPreviewService.name);
@@ -189,6 +195,27 @@ export class BranchPreviewService {
    */
   async cleanupExpiredPreviews(): Promise<number> {
     return this.autoExpiryService.runAutoExpirySweep(uuidv4());
+  }
+
+  /**
+   * Trigger the scheduled stale-preview cleanup sweep and return a summary
+   * of the deleted resource identifiers. Idempotent: repeated runs on an
+   * already-clean state return an empty identifier list.
+   */
+  async runStalePreviewCleanup(): Promise<StalePreviewCleanupSummary> {
+    const runId = uuidv4();
+    const deletedCount = await this.autoExpiryService.runAutoExpirySweep(runId);
+    const deletedIdentifiers = this.autoExpiryService.getLastDeletedIdentifiers();
+
+    this.logger.log(
+      `Stale preview cleanup run ${runId} completed: ${deletedCount} resource(s) deleted`,
+    );
+
+    return {
+      runId,
+      deletedCount,
+      deletedIdentifiers,
+    };
   }
 
   /**

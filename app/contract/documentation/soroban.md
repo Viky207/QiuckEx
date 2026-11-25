@@ -190,6 +190,105 @@ The following checks are required before a deploy PR can be merged:
 - [ ] Post-deploy validation is defined: metadata view and event smoke test
 - [ ] Environment registry is updated for every affected network
 
+### Upgrade safety gate
+
+Any change that touches deployed contract state (storage keys, value layouts, schema/version metadata, or initialization) must pass the upgrade safety gate before merge. Run it from `app/contract`:
+
+```bash
+# Upgrade harness: prior-state selection, migration, and rollback coverage
+cargo test upgrade_harness_ -- --nocapture
+
+# Storage/version metadata comparison and boundary cases
+cargo test upgrade_ -- --nocapture
+
+# Full suite (includes the gates above)
+cargo test
+```
+
+The gate fails the PR when any of the following hold:
+
+- A storage key or value layout changes without a migration path.
+- The schema version is not bumped for a layout change, or is bumped without a migration.
+- `get_deployment_metadata` no longer reports the expected contract ID, schema version, or wasm hash.
+- The upgrade harness cannot select prior state or cannot restore it after rollback.
+
+### Upgrade rehearsal checklist
+
+Before changing deployed contract state, rehearse the upgrade using [upgrade-rehearsal-checklist.md](upgrade-rehearsal-checklist.md). The checklist is the contributor-facing companion to the upgrade safety gate above and covers:
+
+1. **Select prior state** — capture the current deployed contract ID, wasm hash, schema version, and a storage snapshot from the network being upgraded.
+2. **Run upgrade tests** — execute the upgrade harness against the selected prior state, including the failure/boundary case (missing migration, version mismatch, rollback).
+3. **Compare storage/version metadata** — diff pre- and post-upgrade `get_deployment_metadata` output and storage entries; every difference must be intentional and documented.
+4. **Preserve rollback evidence** — attach the pre-upgrade snapshot, the rollback command, and the post-rollback metadata comparison to the PR.
+
+Required artifacts for an upgrade PR:
+
+- [ ] Prior-state snapshot (contract ID, wasm hash, schema version, storage dump)
+- [ ] Upgrade harness output showing the migration and boundary case passing
+- [ ] Pre/post `get_deployment_metadata` comparison
+- [ ] Rollback evidence: command used and post-rollback metadata comparison
+- [ ] Updated [environment-registry.toml](environment-registry.toml) entry for every affected network
+
+Stop conditions — do not proceed with the upgrade if any apply:
+
+- Prior state cannot be reproduced or the snapshot does not match the deployed wasm hash.
+- The upgrade harness fails, or the boundary/failure case is skipped.
+- Storage or version metadata differs from the documented expectation.
+- Rollback cannot be demonstrated or its evidence is missing.
+- The environment registry is not updated for an affected network.
+=======
+
+## Contract error codes for client integrators
+
+Clients must distinguish **retryable** failures (transient network, timeout, or internal conditions) from **stable contract rejections** (validation, authorization, state, replay, and stealth errors). A retryable failure may succeed if the same request is retried with backoff; a contract rejection will deterministically fail again with the same input and must be surfaced to the user instead of retried.
+
+The table below is sourced from the contract ABI/error definitions and cross-checked against `QuickexErrorCode` in `app/mobile/utils/contract-error-mapper.ts`. Every code emitted by the contract is listed; the `Retryable` column is explicit for each row.
+
+| Code | Name | Category | Retryable | User-facing interpretation | Recommended client action |
+| --- | --- | --- | --- | --- | --- |
+| 100 | `Unauthorized` | Auth | No | You are not authorized to perform this action. | Do not retry. Re-authenticate or ask the account owner for permission. |
+| 101 | `NotInitialized` | State | No | The contract is not ready yet. | Do not retry blindly. Verify the contract is initialized/deployed correctly and report to operators. |
+| 102 | `AlreadyInitialized` | State | No | The contract has already been set up. | Do not retry. Treat as a configuration error and report to operators. |
+| 200 | `InvalidAmount` | Validation | No | The amount is not valid. | Do not retry. Prompt the user to enter a valid amount. |
+| 201 | `InvalidRecipient` | Validation | No | The recipient address is not valid. | Do not retry. Ask the user to correct the recipient. |
+| 202 | `InvalidAsset` | Validation | No | The asset is not supported. | Do not retry. Ask the user to choose a supported asset. |
+| 300 | `InsufficientBalance` | Validation | No | You do not have enough funds for this operation. | Do not retry. Show the balance and let the user adjust the amount. |
+| 301 | `InvalidSignature` | Auth | No | The signature could not be verified. | Do not retry. Re-sign the request or re-authenticate. |
+| 302 | `Expired` | Validation | No | This request has expired. | Do not retry the same request. Build a fresh request with a new deadline. |
+| 303 | `NotFound` | State | No | The requested record does not exist. | Do not retry. Refresh local state and confirm the identifier. |
+| 304 | `AlreadyExists` | State | No | This record already exists. | Do not retry. Treat as an idempotency conflict and reconcile state. |
+| 305 | `InvalidState` | State | No | The operation is not allowed in the current state. | Do not retry. Refresh state and guide the user to a valid flow. |
+| 306 | `Paused` | State | No | The contract is temporarily paused. | Do not retry immediately. Inform the user and retry only after operators resume the contract. |
+| 307 | `InvalidFee` | Validation | No | The fee value is not valid. | Do not retry. Correct the fee input. |
+| 308 | `InvalidDeadline` | Validation | No | The deadline is not valid. | Do not retry. Correct the deadline and resubmit. |
+| 309 | `InvalidNonce` | Replay | No | This request was already used or is out of order. | Do not retry the same nonce. Generate a new nonce and resubmit. |
+| 310 | `ReplayDetected` | Replay | No | This request has already been processed. | Do not retry. Treat as a duplicate and reconcile with the original result. |
+| 311 | `InvalidThreshold` | Validation | No | The approval threshold is not valid. | Do not retry. Correct the threshold configuration. |
+| 312 | `InvalidOwner` | Validation | No | The owner address is not valid. | Do not retry. Correct the owner address. |
+| 313 | `InvalidAdmin` | Validation | No | The admin address is not valid. | Do not retry. Correct the admin address. |
+| 314 | `InvalidToken` | Validation | No | The token is not valid. | Do not retry. Ask the user to select a valid token. |
+| 315 | `InvalidMemo` | Validation | No | The memo is not valid. | Do not retry. Correct the memo and resubmit. |
+| 316 | `InvalidMetadata` | Validation | No | The metadata is not valid. | Do not retry. Correct the metadata payload. |
+| 317 | `InvalidVersion` | Validation | No | The version is not supported. | Do not retry. Upgrade the client to a supported version. |
+| 318 | `InvalidOperation` | Validation | No | The operation is not supported. | Do not retry. Use a supported operation. |
+| 319 | `InvalidParameter` | Validation | No | A parameter is not valid. | Do not retry. Correct the input and resubmit. |
+| 320 | `InvalidStealthAddress` | Stealth | No | The stealth address is not valid. | Do not retry. Ask the user to provide a valid stealth address. |
+| 321 | `StealthAddressAlreadyUsed` | Stealth | No | This stealth address has already been used. | Do not retry. Generate a new stealth address. |
+| 400 | `InvalidProof` | Validation | No | The proof could not be verified. | Do not retry. Recompute the proof and resubmit. |
+| 401 | `ProofExpired` | Validation | No | The proof has expired. | Do not retry the same proof. Generate a fresh proof. |
+| 402 | `InvalidCommitment` | Validation | No | The commitment is not valid. | Do not retry. Recompute the commitment and resubmit. |
+| 500 | `InternalError` | Internal | Yes | Something went wrong on our side. | Retry with exponential backoff and a bounded attempt count; if it persists, report to operators. |
+| 501 | `NotSupported` | Validation | No | This feature is not supported. | Do not retry. Hide or disable the unsupported feature. |
+| 900 | `NetworkError` | Network | Yes | A network problem interrupted the request. | Retry with exponential backoff; verify connectivity before resubmitting. |
+| 901 | `RegistryError` | Network | Yes | A registry lookup failed. | Retry with backoff; if it persists, report to operators. |
+
+Retry guidance summary:
+
+- **Retryable:** network/timeout failures and transient internal or registry conditions (`500`, `900`, `901`). Retry with exponential backoff and a bounded attempt count.
+- **Non-retryable:** all stable contract rejections — validation, auth, state, replay, and stealth codes. Surface the user-facing interpretation and let the user correct the input; do not retry automatically.
+
+This table is validated by `node scripts/docs-check/check.mjs --only contract`, which checks it against the contract ABI and the mobile `QuickexErrorCode` mapper. Update all three together when adding or changing an error code (see issue #573).
+
 ## Recommended local quality checks
 
 ```bash

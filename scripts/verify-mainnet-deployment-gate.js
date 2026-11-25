@@ -119,6 +119,134 @@ function validateGate(gate, options) {
   }
 }
 
+function validateProvenanceAttestation(attestation, options) {
+  const { wasmHash, commit, repository, workflow, now = Date.now() } = options;
+  if (!attestation || typeof attestation !== 'object' || Array.isArray(attestation)) {
+    throw new Error('Build provenance attestation is required');
+  }
+  const subject = Array.isArray(attestation.subject) ? attestation.subject : [];
+  const digest = wasmHash.toLowerCase();
+  const matchesArtifact = subject.some((entry) =>
+    String(entry?.digest?.sha256 ?? '').toLowerCase() === digest);
+  if (!matchesArtifact) {
+    throw new Error('Build provenance attestation does not cover the WASM artifact digest');
+  }
+  if (attestation.repository !== repository) {
+    throw new Error('Build provenance attestation repository does not match the release repository');
+  }
+  if (attestation.commit !== commit) {
+    throw new Error('Build provenance attestation commit does not match the checked-out commit');
+  }
+  if (attestation.workflow !== workflow) {
+    throw new Error('Build provenance attestation workflow does not match the release workflow');
+  }
+  const createdAt = Date.parse(attestation.created_at);
+  if (!Number.isFinite(createdAt) || createdAt > now) {
+    throw new Error('Build provenance attestation must have a valid creation timestamp');
+  }
+}
+
+function readImageSigningKeys() {
+  const raw = process.env.QUICKEX_IMAGE_SIGNING_PUBLIC_KEYS ?? process.env.QUICKEX_MAINNET_REVIEWER_PUBLIC_KEYS ?? '{}';
+  let keys;
+  try {
+    keys = JSON.parse(raw);
+  } catch {
+    throw new Error('QUICKEX_IMAGE_SIGNING_PUBLIC_KEYS must be valid JSON');
+  }
+  if (!keys || typeof keys !== 'object' || Array.isArray(keys)) {
+    throw new Error('QUICKEX_IMAGE_SIGNING_PUBLIC_KEYS must map key IDs to public keys');
+  }
+  return keys;
+}
+
+function normalizeDigest(value) {
+  return String(value ?? '').trim().toLowerCase().replace(/^sha256:/, '');
+}
+
+function validateImageSignature(signature, options) {
+  const { imageDigest, commit, signingKeys } = options;
+  const digest = normalizeDigest(imageDigest);
+  if (!/^[a-f0-9]{64}$/.test(digest)) throw new Error('Image digest must be a sha256 digest');
+  if (!signature || typeof signature !== 'object') throw new Error('Image signature is required; refusing to deploy an unsigned image');
+  if (normalizeDigest(signature.digest) !== digest) {
+    throw new Error('Image signature digest does not match the image to deploy');
+  }
+  if (signature.commit !== commit) {
+    throw new Error('Image signature commit does not match the checked-out commit');
+  }
+  const trustedKey = signingKeys?.[signature.key_id];
+  if (!trustedKey) throw new Error(`Untrusted image signing key: ${signature.key_id}`);
+  const publicKey = typeof trustedKey === 'string' ? trustedKey : trustedKey.public_key;
+  const message = Buffer.from(`${digest}\n${commit}`);
+  let sig;
+  try {
+    sig = Buffer.from(signature.signature, 'base64');
+  } catch {
+    throw new Error(`Invalid image signature for ${signature.key_id}`);
+  }
+  if (sig.length !== 64 || !verify(null, message, publicKey, sig)) {
+    throw new Error(`Invalid image signature for ${signature.key_id}`);
+  }
+  return { digest, signer: signature.key_id };
+}
+
+function validateImageProvenance(provenance, options) {
+  const { imageDigest, commit, expectedSourceRepo } = options;
+  const digest = normalizeDigest(imageDigest);
+  if (!provenance || typeof provenance !== 'object') {
+    throw new Error('Image provenance attestation is required');
+  }
+  if (normalizeDigest(provenance.digest) !== digest) {
+    throw new Error('Image provenance digest does not match the image to deploy');
+  }
+  if (provenance.source_repo !== expectedSourceRepo) {
+    throw new Error(`Image provenance source repo ${provenance.source_repo} does not match expected ${expectedSourceRepo}`);
+  }
+  if (provenance.commit !== commit) {
+    throw new Error('Image provenance commit does not match the checked-out commit');
+  }
+  return { digest, sourceRepo: provenance.source_repo };
+}
+
+function validateReleaseManifest(manifest, options) {
+  const { imageDigest, wasmHash, commit } = options;
+  if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) {
+    throw new Error('Release manifest is required');
+  }
+  if (manifest.version !== 1) throw new Error('Release manifest must be version 1');
+  if (!/^[a-f0-9]{40}$/i.test(manifest.commit ?? '') || manifest.commit !== commit) {
+    throw new Error('Release manifest commit does not match the checked-out commit');
+  }
+  if (!Array.isArray(manifest.artifacts) || manifest.artifacts.length === 0) {
+    throw new Error('Release manifest must list at least one artifact');
+  }
+  const digest = normalizeDigest(imageDigest);
+  const expectedWasm = String(wasmHash ?? '').toLowerCase();
+  const seen = new Set();
+  let matchedImage = false;
+  let matchedWasm = false;
+  for (const artifact of manifest.artifacts) {
+    if (!artifact || typeof artifact !== 'object') throw new Error('Release manifest artifacts must be objects');
+    const name = String(artifact.name ?? '');
+    if (!name) throw new Error('Release manifest artifacts must have a name');
+    if (seen.has(name)) throw new Error(`Duplicate release manifest artifact: ${name}`);
+    seen.add(name);
+    if (artifact.commit !== commit) {
+      throw new Error(`Release manifest artifact ${name} commit does not match the checked-out commit`);
+    }
+    const artifactDigest = normalizeDigest(artifact.digest);
+    if (!/^[a-f0-9]{64}$/.test(artifactDigest)) {
+      throw new Error(`Release manifest artifact ${name} digest must be a sha256 digest`);
+    }
+    if (artifact.type === 'container-image' && artifactDigest === digest) matchedImage = true;
+    if (artifact.type === 'wasm' && artifactDigest === expectedWasm) matchedWasm = true;
+  }
+  if (!matchedImage) throw new Error('Release manifest does not contain the deployed image digest');
+  if (!matchedWasm) throw new Error('Release manifest does not contain the deployed WASM hash');
+  return { commit, artifacts: manifest.artifacts.length };
+}
+
 function readReviewerKeys() {
   let keys;
   try {
@@ -148,15 +276,36 @@ function sha256(filePath) {
   return createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
 }
 
+function verifyAttestationWithGh(attestationPath, wasmPath, repository) {
+  try {
+    execFileSync('gh', [
+      'attestation', 'verify', wasmPath,
+      '--repo', repository,
+      '--bundle', attestationPath,
+      '--format', 'json',
+    ], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  } catch (error) {
+    throw new Error(`gh attestation verify failed: ${error.message}`);
+  }
+}
+
 function main() {
   const args = parseArgs(process.argv.slice(2));
-  for (const required of ['gate', 'testnet-manifest', 'audit-report', 'wasm']) {
+  for (const required of ['gate', 'testnet-manifest', 'audit-report', 'wasm', 'image-digest', 'image-signature', 'image-provenance', 'expected-source-repo', 'release-manifest']) {
     if (!args[required]) throw new Error(`--${required} is required`);
   }
   const gate = JSON.parse(fs.readFileSync(args.gate, 'utf8'));
   const testnetManifest = JSON.parse(fs.readFileSync(args['testnet-manifest'], 'utf8'));
   const wasmHash = sha256(args.wasm);
   const commit = execFileSync('git', ['-C', ROOT, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+  const repository = process.env.GITHUB_REPOSITORY;
+  const workflow = process.env.GITHUB_WORKFLOW_REF;
+  if (!repository || !workflow) {
+    throw new Error('GITHUB_REPOSITORY and GITHUB_WORKFLOW_REF are required to verify build provenance');
+  }
+  const attestation = JSON.parse(fs.readFileSync(args.attestation, 'utf8'));
+  validateProvenanceAttestation(attestation, { wasmHash, commit, repository, workflow });
+  verifyAttestationWithGh(args.attestation, args.wasm, repository);
   validateGate(gate, {
     wasmHash,
     commit,
@@ -165,6 +314,27 @@ function main() {
     auditReportSha256: sha256(args['audit-report']),
     reviewerKeys: readReviewerKeys(),
   });
+  const imageSignature = JSON.parse(fs.readFileSync(args['image-signature'], 'utf8'));
+  const imageProvenance = JSON.parse(fs.readFileSync(args['image-provenance'], 'utf8'));
+  const signingKeys = readImageSigningKeys();
+  const signatureResult = validateImageSignature(imageSignature, {
+    imageDigest: args['image-digest'],
+    commit,
+    signingKeys,
+  });
+  const provenanceResult = validateImageProvenance(imageProvenance, {
+    imageDigest: args['image-digest'],
+    commit,
+    expectedSourceRepo: args['expected-source-repo'],
+  });
+  const releaseManifest = JSON.parse(fs.readFileSync(args['release-manifest'], 'utf8'));
+  const manifestResult = validateReleaseManifest(releaseManifest, {
+    imageDigest: args['image-digest'],
+    wasmHash,
+    commit,
+  });
+  console.log(`Image verification: digest=sha256:${signatureResult.digest} signer=${signatureResult.signer} source=${provenanceResult.sourceRepo} result=verified`);
+  console.log(`Release manifest verified: commit=${manifestResult.commit} artifacts=${manifestResult.artifacts}`);
   console.log(`Mainnet deployment gate approved for ${commit} (WASM SHA-256 ${wasmHash}).`);
 }
 
@@ -177,4 +347,13 @@ if (require.main === module) {
   }
 }
 
-module.exports = { canonicalJson, validateGate };
+module.exports = {
+  canonicalJson,
+  validateGate,
+  validateProvenanceAttestation,
+  validateImageSignature,
+  validateImageProvenance,
+  validateReleaseManifest,
+  normalizeDigest,
+  validateDeployFreeze,
+};

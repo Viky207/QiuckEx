@@ -29,6 +29,19 @@ export const ASSET_LISTING_DOC_SECTIONS = [
   "10. References",
 ];
 
+/**
+ * Required sections of the maintainer onboarding guide — issue #572.
+ *
+ * Canonical guide: docs/ASSET-ONBOARDING-GUIDE.md
+ */
+export const ASSET_ONBOARDING_GUIDE_SECTIONS = [
+  "Required issuer proof",
+  "Review ownership",
+  "Registry update path",
+  "Cache invalidation checks",
+  "Delisting and rollback",
+];
+
 export function errorCodes(policy) {
   return Object.keys(policy.errorCodes ?? {});
 }
@@ -210,6 +223,43 @@ function validateDocAndMirror(policy, { docContent, seedCodes = [], mirrorConten
   }
 }
 
+/**
+ * Validate the maintainer onboarding guide against the policy — issue #572.
+ *
+ * Fails when the guide is missing, when a required section is absent, or when
+ * a delisting trigger id / `ASSET_LISTING_*` error code is not mentioned.
+ */
+export function validateAssetOnboardingGuide(policy, guideContent) {
+  const errors = [];
+  if (!guideContent) {
+    errors.push(`${PATHS.assetOnboardingGuide}: guide is missing`);
+    return { errors };
+  }
+  for (const section of missingSections(guideContent, ASSET_ONBOARDING_GUIDE_SECTIONS)) {
+    errors.push(`${PATHS.assetOnboardingGuide}: missing required section "${section}"`);
+  }
+  const tokens = [
+    ...(policy.delistingTriggers ?? []).map((trigger) => trigger.id),
+    ...errorCodes(policy).filter((code) => code.startsWith("ASSET_LISTING_")),
+  ];
+  for (const token of missingMentions(guideContent, tokens)) {
+    errors.push(`${PATHS.assetOnboardingGuide}: does not document "${token}"`);
+  }
+  return { errors };
+}
+
+/** Load + validate the onboarding guide from disk. */
+export function checkAssetOnboardingGuide(root) {
+  const policy = readJson(root, PATHS.assetListingPolicy);
+  let guideContent = "";
+  try {
+    guideContent = readText(root, PATHS.assetOnboardingGuide);
+  } catch {
+    guideContent = "";
+  }
+  return validateAssetOnboardingGuide(policy, guideContent);
+}
+
 export function validateAssetListingPolicy(policy, context = {}) {
   const errors = [];
   const warnings = [];
@@ -217,6 +267,9 @@ export function validateAssetListingPolicy(policy, context = {}) {
   validateVocabulary(policy, errors);
   validateEvidenceAndTriggers(policy, errors);
   validateDocAndMirror(policy, context, errors, warnings);
+  if (context.guideContent !== undefined) {
+    errors.push(...validateAssetOnboardingGuide(policy, context.guideContent).errors);
+  }
   return { errors, warnings };
 }
 
@@ -235,8 +288,14 @@ export function checkAssetListingPolicy(root) {
   } catch {
     mirrorContent = "";
   }
+  let guideContent = "";
+  try {
+    guideContent = readText(root, PATHS.assetOnboardingGuide);
+  } catch {
+    guideContent = "";
+  }
   const seedCodes = parseSeedCodes(readText(root, PATHS.verifiedAssetsMigration));
-  const result = validateAssetListingPolicy(policy, { docContent, seedCodes, mirrorContent });
+  const result = validateAssetListingPolicy(policy, { docContent, seedCodes, mirrorContent, guideContent });
   return { ...result, policy, seedCodes };
 }
 

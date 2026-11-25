@@ -4,6 +4,14 @@ import {
   EnvironmentParityService,
   ParityCheckResult,
 } from "./environment-parity.service";
+import {
+  DeployFreezeService,
+  DeployFreezeState,
+} from "./deploy-freeze.service";
+import {
+  BlueGreenSwitchService,
+  BlueGreenSwitchStatus,
+} from "./blue-green-switch.service";
 
 interface ParityStatusResponse {
   success: boolean;
@@ -27,12 +35,26 @@ interface HealthResponse {
   };
 }
 
+interface DeployFreezeResponse {
+  success: boolean;
+  data: DeployFreezeState;
+}
+
+interface SwitchStatusResponse {
+  success: boolean;
+  data: BlueGreenSwitchStatus;
+}
+
 @ApiTags("Environment Parity")
 @Controller("api/environment-parity")
 export class EnvironmentParityController {
   private readonly logger = new Logger(EnvironmentParityController.name);
 
-  constructor(private readonly parityService: EnvironmentParityService) {}
+  constructor(
+    private readonly parityService: EnvironmentParityService,
+    private readonly deployFreezeService: DeployFreezeService,
+    private readonly blueGreenSwitchService: BlueGreenSwitchService,
+  ) {}
 
   @Get("status")
   @ApiOperation({ summary: "Get environment parity check status" })
@@ -68,6 +90,34 @@ export class EnvironmentParityController {
         failedChecks: failed,
         totalChecks: results.length,
       },
+    };
+  }
+
+  @Get("deploy-freeze")
+  @ApiOperation({
+    summary: "Get the current deploy freeze (deployment hold) state",
+    description:
+      "Reports whether automatic production promotion is held, who set the hold, and any audited overrides.",
+  })
+  @ApiResponse({ status: 200, description: "Returns deploy freeze state" })
+  getDeployFreeze(): DeployFreezeResponse {
+    return {
+      success: true,
+      data: this.deployFreezeService.getState(),
+    };
+  }
+
+  @Get("switch-status")
+  @ApiOperation({
+    summary: "Get blue-green traffic switch status",
+    description:
+      "Reports the currently active slot, the readiness of the target slot, and the outcome of the last switch attempt.",
+  })
+  @ApiResponse({ status: 200, description: "Returns switch status" })
+  getSwitchStatus(): SwitchStatusResponse {
+    return {
+      success: true,
+      data: this.blueGreenSwitchService.getStatus(),
     };
   }
 }

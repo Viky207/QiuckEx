@@ -10,7 +10,8 @@ export type InvalidationEventType =
   | "link_created"
   | "payment_completed"
   | "payment_status_changed"
-  | "activity_feed_cleared";
+  | "activity_feed_cleared"
+  | "account_switched";
 
 export interface CacheInvalidationEvent {
   type: InvalidationEventType;
@@ -22,6 +23,7 @@ export interface CacheInvalidationEvent {
     amount?: string;
     asset?: string;
     state?: string;
+    publicKey?: string;
   };
 }
 

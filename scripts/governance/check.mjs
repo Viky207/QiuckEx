@@ -9,7 +9,7 @@
  *
  * Usage:
  *   node scripts/governance/check.mjs                     # all checks
- *   node scripts/governance/check.mjs --only adr           # adr|assets|retention|a11y|docs
+ *   node scripts/governance/check.mjs --only adr           # adr|assets|retention|a11y|branch-protection|docs
  *   node scripts/governance/check.mjs --json               # machine-readable report
  *   node scripts/governance/check.mjs --only a11y --write-baseline
  *
@@ -17,9 +17,10 @@
  */
 import { existsSync, writeFileSync } from "node:fs";
 import { checkAdrs } from "./lib/adr.mjs";
-import { checkAssetListingPolicy } from "./lib/assets.mjs";
+import { checkAssetListingPolicy, checkAssetOnboardingGuide } from "./lib/assets.mjs";
 import { checkRetentionSchedule } from "./lib/retention.mjs";
 import { buildBaseline, validateI18n } from "./lib/i18n.mjs";
+import { checkBranchProtection } from "./lib/branch-protection.mjs";
 import { PATHS, REPO_ROOT, missingSections, readText } from "./lib/shared.mjs";
 
 export const GOVERNANCE_DOC_SECTIONS = [
@@ -40,6 +41,7 @@ export function runCheck(root = REPO_ROOT, { only = "all" } = {}) {
   }
   if (only === "all" || only === "assets") {
     checks.assets = checkAssetListingPolicy(root);
+    checks["asset-onboarding"] = checkAssetOnboardingGuide(root);
   }
   if (only === "all" || only === "retention") {
     checks.retention = checkRetentionSchedule(root);
@@ -53,6 +55,9 @@ export function runCheck(root = REPO_ROOT, { only = "all" } = {}) {
     }
     checks.a11y = validateI18n(root, { docContent });
   }
+  if (only === "all" || only === "branch-protection") {
+    checks["branch-protection"] = checkBranchProtection(root);
+  }
   if (only === "all" || only === "docs") {
     const errors = [];
     const warnings = [];
@@ -63,7 +68,12 @@ export function runCheck(root = REPO_ROOT, { only = "all" } = {}) {
         errors.push(`${PATHS.governanceDoc}: missing required section "${section}"`);
       }
     }
-    for (const doc of [PATHS.assetListingDoc, PATHS.retentionDoc, PATHS.a11yDoc]) {
+    for (const doc of [
+      PATHS.assetListingDoc,
+      PATHS.assetOnboardingGuideDoc,
+      PATHS.retentionDoc,
+      PATHS.a11yDoc,
+    ]) {
       if (!readText(root, doc).includes("GOVERNANCE.md")) {
         warnings.push(`${doc}: does not link back to docs/GOVERNANCE.md`);
       }
@@ -103,7 +113,7 @@ function parseArgs(argv) {
   return options;
 }
 
-const VALID_TARGETS = ["all", "adr", "assets", "retention", "a11y", "docs"];
+const VALID_TARGETS = ["all", "adr", "assets", "retention", "a11y", "branch-protection", "docs"];
 
 function main() {
   const options = parseArgs(process.argv.slice(2));

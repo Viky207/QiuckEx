@@ -46,3 +46,31 @@ export interface ApiKeyPublic {
 export interface ApiKeyCreated extends ApiKeyPublic {
   key: string;
 }
+
+/**
+ * Outcome of an attempted API-key scope mutation, as recorded in audit metadata.
+ * `denied` / `failed` outcomes make unsuccessful attempts distinguishable from
+ * successful ones without exposing any secret material.
+ */
+export type ScopeChangeOutcome = 'success' | 'denied' | 'failed';
+
+/**
+ * Secret-free audit metadata for API-key scope changes.
+ *
+ * Identifies the actor and the affected key record (by id, never by secret or
+ * hash) and captures the before/after scope state so scope mutations are
+ * auditable. Must not contain raw keys, key hashes, or signing material.
+ */
+export interface ScopeChangeAuditMetadata {
+  /** Identifier of the actor performing (or attempting) the change. */
+  actorId: string;
+  /** Identifier of the API-key record whose scopes are being changed. */
+  keyId: string;
+  /** Scopes present on the key before the attempted change. */
+  beforeScopes: ApiKeyScope[];
+  /** Scopes requested/present after the attempted change. */
+  afterScopes: ApiKeyScope[];
+  /** Whether the mutation succeeded, was denied, or otherwise failed. */
+  outcome: ScopeChangeOutcome;
+}
+</｜｜DSML｜｜ parameter>

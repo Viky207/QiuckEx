@@ -33,6 +33,29 @@ import {
   STELLAR_NETWORK,
 } from "../src/config/build";
 
+// Minimum interactive target size (in density-independent pixels) required by
+// the project accessibility standard. Every tappable control on this dense
+// settings screen must expose at least this hit area so it stays operable on
+// touch devices and does not overlap neighbouring actions when zoomed.
+export const MIN_TOUCH_TARGET_SIZE = 44;
+
+// Shared hit-slop token used to expand small controls (e.g. switches, chips)
+// to the minimum touch target without changing their visual footprint.
+export const touchTargetHitSlop = {
+  top: 8,
+  bottom: 8,
+  left: 8,
+  right: 8,
+} as const;
+
+// Shared style token guaranteeing a minimum 44x44 hit area.
+export const touchTargetStyle = {
+  minWidth: MIN_TOUCH_TARGET_SIZE,
+  minHeight: MIN_TOUCH_TARGET_SIZE,
+  alignItems: "center",
+  justifyContent: "center",
+} as const;
+
 const FREQUENCY_OPTIONS: Array<{
   value: SyncFrequency;
   label: string;
@@ -137,7 +160,15 @@ export default function SettingsScreen() {
           </Text>
           <View style={styles.actionRow}>
             <Link href="/wallet-connect" asChild>
-              <Pressable style={[styles.actionButton, { backgroundColor: theme.buttonPrimaryBg }]}>
+              <Pressable
+                accessibilityRole="button"
+                hitSlop={touchTargetHitSlop}
+                style={[
+                  styles.actionButton,
+                  touchTargetStyle,
+                  { backgroundColor: theme.buttonPrimaryBg },
+                ]}
+              >
                 <Text style={{ color: theme.buttonPrimaryText, fontWeight: "700" }}>
                   {wallet.connected ? "Switch Wallet" : "Connect Wallet"}
                 </Text>
@@ -145,7 +176,13 @@ export default function SettingsScreen() {
             </Link>
             {wallet.connected ? (
               <Pressable
-                style={[styles.actionButton, { borderColor: theme.status.error, borderWidth: 1 }]}
+                accessibilityRole="button"
+                hitSlop={touchTargetHitSlop}
+                style={[
+                  styles.actionButton,
+                  touchTargetStyle,
+                  { borderColor: theme.status.error, borderWidth: 1 },
+                ]}
                 onPress={() => void disconnect()}
               >
                 <Text style={{ color: theme.status.error, fontWeight: "700" }}>Disconnect</Text>
@@ -168,7 +205,11 @@ export default function SettingsScreen() {
           </Text>
 
           <Link href="/security-center" asChild>
-            <Pressable style={styles.row}>
+            <Pressable
+              accessibilityRole="button"
+              hitSlop={touchTargetHitSlop}
+              style={[styles.row, styles.rowTouchable]}
+            >
               <View style={styles.rowCopy}>
                 <Text style={[styles.label, { color: theme.textPrimary }]}>
                   Security Center
@@ -181,7 +222,7 @@ export default function SettingsScreen() {
             </Pressable>
           </Link>
 
-          <View style={styles.row}>
+          <View style={[styles.row, styles.rowTouchable]}>
             <View style={styles.rowCopy}>
               <Text style={[styles.label, { color: theme.textPrimary }]}>Biometric Lock</Text>
               <Text style={[styles.helper, { color: theme.textMuted }]}>
@@ -190,11 +231,15 @@ export default function SettingsScreen() {
                   : "Biometric authentication is unavailable on this device."}
               </Text>
             </View>
-            <Switch
-              value={securitySettings.biometricLockEnabled}
-              disabled={!isBiometricAvailable || !hasPinConfigured}
-              onValueChange={(value) => void setBiometricLockEnabled(value)}
-            />
+            <View style={touchTargetStyle}>
+              <Switch
+                accessibilityRole="switch"
+                hitSlop={touchTargetHitSlop}
+                value={securitySettings.biometricLockEnabled}
+                disabled={!isBiometricAvailable || !hasPinConfigured}
+                onValueChange={(value) => void setBiometricLockEnabled(value)}
+              />
+            </View>
           </View>
 
           <Text style={[styles.subheading, { color: theme.textPrimary }]}>Session timeout</Text>
@@ -204,9 +249,12 @@ export default function SettingsScreen() {
               return (
                 <Pressable
                   key={minutes}
+                  accessibilityRole="button"
+                  hitSlop={touchTargetHitSlop}
                   onPress={() => void setSessionTimeoutMinutes(minutes)}
                   style={[
                     styles.timeoutOption,
+                    touchTargetStyle,
                     { borderColor: active ? theme.primary : theme.border },
                     active && { backgroundColor: theme.chipActiveBg },
                   ]}
@@ -232,8 +280,11 @@ export default function SettingsScreen() {
           </Text>
           <Link href="/inbox" asChild>
             <Pressable
+              accessibilityRole="button"
+              hitSlop={touchTargetHitSlop}
               style={[
                 styles.actionButton,
+                touchTargetStyle,
                 { borderColor: theme.buttonSecondaryBorder, borderWidth: 1 },
               ]}
             >
@@ -254,7 +305,7 @@ export default function SettingsScreen() {
             Notifications
           </Text>
 
-          <View style={styles.row}>
+          <View style={[styles.row, styles.rowTouchable]}>
             <View style={styles.rowCopy}>
               <Text style={[styles.label, { color: theme.textPrimary }]}>
                 Sound Effects
@@ -263,10 +314,17 @@ export default function SettingsScreen() {
                 Play a short tone when a new synced notification appears.
               </Text>
             </View>
-            <Switch value={soundEnabled} onValueChange={setSoundEnabled} />
+            <View style={touchTargetStyle}>
+              <Switch
+                accessibilityRole="switch"
+                hitSlop={touchTargetHitSlop}
+                value={soundEnabled}
+                onValueChange={setSoundEnabled}
+              />
+            </View>
           </View>
 
-          <View style={styles.row}>
+          <View style={[styles.row, styles.rowTouchable]}>
             <View style={styles.rowCopy}>
               <Text style={[styles.label, { color: theme.textPrimary }]}>
                 App Badge
@@ -275,15 +333,19 @@ export default function SettingsScreen() {
                 Keep the launcher badge aligned with unread notifications.
               </Text>
             </View>
-            <Switch
-              value={backgroundSyncSettings.badgeEnabled}
-              onValueChange={(value) => {
-                void setBackgroundSyncSettings((current) => ({
-                  ...current,
-                  badgeEnabled: value,
-                }));
-              }}
-            />
+            <View style={touchTargetStyle}>
+              <Switch
+                accessibilityRole="switch"
+                hitSlop={touchTargetHitSlop}
+                value={backgroundSyncSettings.badgeEnabled}
+                onValueChange={(value) => {
+                  void setBackgroundSyncSettings((current) => ({
+                    ...current,
+                    badgeEnabled: value,
+                  }));
+                }}
+              />
+            </View>
           </View>
         </View>
 
@@ -301,7 +363,7 @@ export default function SettingsScreen() {
             foreground refreshes when periodic work is unavailable.
           </Text>
 
-          <View style={styles.row}>
+          <View style={[styles.row, styles.rowTouchable]}>
             <View style={styles.rowCopy}>
               <Text style={[styles.label, { color: theme.textPrimary }]}>
                 Periodic Sync
@@ -311,18 +373,22 @@ export default function SettingsScreen() {
                 app.
               </Text>
             </View>
-            <Switch
-              value={backgroundSyncSettings.enabled}
-              onValueChange={(value) => {
-                void setBackgroundSyncSettings((current) => ({
-                  ...current,
-                  enabled: value,
-                }));
-              }}
-            />
+            <View style={touchTargetStyle}>
+              <Switch
+                accessibilityRole="switch"
+                hitSlop={touchTargetHitSlop}
+                value={backgroundSyncSettings.enabled}
+                onValueChange={(value) => {
+                  void setBackgroundSyncSettings((current) => ({
+                    ...current,
+                    enabled: value,
+                  }));
+                }}
+              />
+            </View>
           </View>
 
-          <View style={styles.row}>
+          <View style={[styles.row, styles.rowTouchable]}>
             <View style={styles.rowCopy}>
               <Text style={[styles.label, { color: theme.textPrimary }]}>
                 Wi-Fi Only
@@ -331,15 +397,19 @@ export default function SettingsScreen() {
                 Skip background work on mobile data for better battery life.
               </Text>
             </View>
-            <Switch
-              value={backgroundSyncSettings.wifiOnly}
-              onValueChange={(value) => {
-                void setBackgroundSyncSettings((current) => ({
-                  ...current,
-                  wifiOnly: value,
-                }));
-              }}
-            />
+            <View style={touchTargetStyle}>
+              <Switch
+                accessibilityRole="switch"
+                hitSlop={touchTargetHitSlop}
+                value={backgroundSyncSettings.wifiOnly}
+                onValueChange={(value) => {
+                  void setBackgroundSyncSettings((current) => ({
+                    ...current,
+                    wifiOnly: value,
+                  }));
+                }}
+              />
+            </View>
           </View>
 
           <Text style={[styles.subheading, { color: theme.textPrimary }]}>
@@ -351,8 +421,11 @@ export default function SettingsScreen() {
               return (
                 <Pressable
                   key={option.value}
+                  accessibilityRole="button"
+                  hitSlop={touchTargetHitSlop}
                   style={[
                     styles.optionCard,
+                    touchTargetStyle,
                     {
                       borderColor: active
                         ? theme.buttonPrimaryBg
@@ -413,8 +486,11 @@ export default function SettingsScreen() {
                   : "No successful sync recorded yet."}
             </Text>
             <Pressable
+              accessibilityRole="button"
+              hitSlop={touchTargetHitSlop}
               style={[
                 styles.syncNowButton,
+                touchTargetStyle,
                 { backgroundColor: theme.buttonPrimaryBg },
               ]}
               onPress={() => {
@@ -497,7 +573,11 @@ export default function SettingsScreen() {
           </Text>
 
           <Link href="/feedback" asChild>
-            <Pressable style={styles.row}>
+            <Pressable
+              accessibilityRole="button"
+              hitSlop={touchTargetHitSlop}
+              style={[styles.row, styles.rowTouchable]}
+            >
               <View style={styles.rowCopy}>
                 <Text style={[styles.label, { color: theme.textPrimary }]}>
                   Send Feedback
@@ -522,8 +602,11 @@ export default function SettingsScreen() {
         <View style={styles.section}>
           <Text style={[styles.sectionTitle, { color: theme.textPrimary }]}>Privacy & Data</Text>
           <Pressable
+            accessibilityRole="button"
+            hitSlop={touchTargetHitSlop}
             style={[
               styles.clearDataButton,
+              touchTargetStyle,
               {
                 backgroundColor: theme.surface,
                 borderColor: theme.status.error,
@@ -545,8 +628,11 @@ export default function SettingsScreen() {
             </Text>
             <Link href="/notification-debug" asChild>
               <Pressable
+                accessibilityRole="button"
+                hitSlop={touchTargetHitSlop}
                 style={[
                   styles.debugButton,
+                  touchTargetStyle,
                   { backgroundColor: theme.surface, borderColor: theme.border },
                 ]}
               >
@@ -559,8 +645,11 @@ export default function SettingsScreen() {
             </Link>
             <Link href="/qa-smoke-checklist" asChild>
               <Pressable
+                accessibilityRole="button"
+                hitSlop={touchTargetHitSlop}
                 style={[
                   styles.debugButton,
+                  touchTargetStyle,
                   { backgroundColor: theme.surface, borderColor: theme.border },
                 ]}
               >
@@ -574,8 +663,11 @@ export default function SettingsScreen() {
             {APP_ENVIRONMENT !== "production" && (
               <Link href="/offline-queue-inspector" asChild>
                 <Pressable
+                  accessibilityRole="button"
+                  hitSlop={touchTargetHitSlop}
                   style={[
                     styles.debugButton,
+                    touchTargetStyle,
                     { backgroundColor: theme.surface, borderColor: theme.border },
                   ]}
                 >
@@ -623,7 +715,7 @@ const styles = StyleSheet.create({
   actionRow: {
     flexDirection: "row",
     flexWrap: "wrap",
-    gap: 10,
+    gap: 12,
   },
   actionButton: {
     borderRadius: 10,
@@ -635,6 +727,12 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     alignItems: "center",
     gap: 12,
+  },
+  // Ensures rows containing interactive controls keep a minimum height and
+  // vertical breathing room so actions do not overlap under zoom.
+  rowTouchable: {
+    minHeight: MIN_TOUCH_TARGET_SIZE,
+    paddingVertical: 6,
   },
   rowCopy: {
     flex: 1,
@@ -651,7 +749,8 @@ const styles = StyleSheet.create({
   },
   timeoutOptions: {
     flexDirection: "row",
-    gap: 8,
+    flexWrap: "wrap",
+    gap: 10,
   },
   timeoutOption: {
     borderWidth: 1,
@@ -660,7 +759,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
   },
   optionGroup: {
-    gap: 10,
+    gap: 12,
   },
   optionCard: {
     borderWidth: 1,

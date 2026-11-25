@@ -23,10 +23,15 @@ export class JobCancelledError extends Error {
  * Implementation of CancellationToken that checks in-memory cancellation state
  */
 export class CancellationTokenImpl implements CancellationToken {
+  private readonly abortController: AbortController;
+
   constructor(
     private readonly jobId: string,
     private readonly cancellationStore: CancellationStore,
-  ) {}
+    abortController: AbortController,
+  ) {
+    this.abortController = abortController;
+  }
 
   /**
    * Check if cancellation has been requested for this job
@@ -45,6 +50,15 @@ export class CancellationTokenImpl implements CancellationToken {
       throw new JobCancelledError(this.jobId);
     }
   }
+
+  /**
+   * AbortSignal that is aborted when cancellation is requested for this job.
+   * Pass this to downstream external calls (e.g. fetch) so they are cancelled
+   * and do not continue unbounded work after an operator cancels the job.
+   */
+  get signal(): AbortSignal {
+    return this.abortController.signal;
+  }
 }
 
 /**
@@ -53,6 +67,7 @@ export class CancellationTokenImpl implements CancellationToken {
  */
 export class CancellationStore {
   private readonly cancellations = new Map<string, boolean>();
+  private readonly abortControllers = new Map<string, AbortController>();
 
   /**
    * Request cancellation for a job
@@ -60,6 +75,10 @@ export class CancellationStore {
    */
   requestCancellation(jobId: string): void {
     this.cancellations.set(jobId, true);
+    const controller = this.abortControllers.get(jobId);
+    if (controller && !controller.signal.aborted) {
+      controller.abort();
+    }
   }
 
   /**
@@ -77,6 +96,7 @@ export class CancellationStore {
    */
   clearCancellation(jobId: string): void {
     this.cancellations.delete(jobId);
+    this.abortControllers.delete(jobId);
   }
 
   /**
@@ -85,7 +105,12 @@ export class CancellationStore {
    * @returns A new CancellationToken instance
    */
   createToken(jobId: string): CancellationToken {
-    return new CancellationTokenImpl(jobId, this);
+    let controller = this.abortControllers.get(jobId);
+    if (!controller) {
+      controller = new AbortController();
+      this.abortControllers.set(jobId, controller);
+    }
+    return new CancellationTokenImpl(jobId, this, controller);
   }
 
   /**

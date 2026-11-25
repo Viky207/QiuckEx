@@ -25,6 +25,13 @@ inputs:
     description: Stellar network the deployment must target (staging/preview must be testnet)
     required: false
     default: "testnet"
+  attestation_digest:
+    description: >
+      Image digest (e.g. sha256:...) to verify build provenance for before deploying.
+      When set, `gh attestation verify` must succeed or the deployment is aborted.
+      Production callers must pass the digest produced by the release workflow.
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -41,6 +48,29 @@ runs:
           exit 1
         fi
         echo "STELLAR_NETWORK=${STELLAR_NETWORK} (environment=${ENVIRONMENT})"
+
+    - name: Verify build provenance attestation
+      if: inputs.attestation_digest != ''
+      shell: bash
+      env:
+        ATTESTATION_DIGEST: ${{ inputs.attestation_digest }}
+        IMAGE_TAG: ${{ inputs.image_tag }}
+        GIT_SHA: ${{ inputs.git_sha }}
+        GH_TOKEN: ${{ inputs.deploy_token }}
+      run: |
+        # Fail closed: never promote an artifact whose provenance cannot be verified.
+        if [ -z "${ATTESTATION_DIGEST}" ]; then
+          echo "::error::attestation_digest is empty; refusing to deploy unverified artifact"
+          exit 1
+        fi
+        echo "Verifying provenance for ${IMAGE_TAG} (digest=${ATTESTATION_DIGEST}) ..."
+        if ! gh attestation verify "oci://${IMAGE_TAG}" \
+          --repo "${GITHUB_REPOSITORY}" \
+          --source-digest "${GIT_SHA}"; then
+          echo "::error::Provenance verification failed for ${IMAGE_TAG} (digest=${ATTESTATION_DIGEST}); aborting deployment"
+          exit 1
+        fi
+        echo "Provenance verified for ${IMAGE_TAG} (digest=${ATTESTATION_DIGEST})"
 
     - name: Trigger deployment
       shell: bash
@@ -91,4 +121,4 @@ runs:
     - name: Log release metadata
       shell: bash
       run: |
-        echo "::notice title=Release [${{ inputs.environment }}]::image=${{ inputs.image_tag }} | sha=${{ inputs.git_sha }} | env=${{ inputs.environment }} | preview_scope=${{ inputs.preview_scope }} | network=${{ inputs.stellar_network }} | ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        echo "::notice title=Release [${{ inputs.environment }}]::image=${{ inputs.image_tag }} | sha=${{ inputs.git_sha }} | env=${{ inputs.environment }} | preview_scope=${{ inputs.preview_scope }} | network=${{ inputs.stellar_network }} | attestation_digest=${{ inputs.attestation_digest }} | ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)"

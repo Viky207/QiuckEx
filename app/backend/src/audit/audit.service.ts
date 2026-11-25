@@ -1,7 +1,69 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { AuditLog, QueryAuditLogsDto } from './audit.model';
-import { randomUUID } from 'crypto';
+import { randomUUID, createHash } from 'crypto';
 import { SupabaseService } from '../supabase/supabase.service';
+
+/**
+ * Audit action recorded whenever an admin background-job enqueue request is
+ * evaluated for idempotency. The metadata shape is intentionally limited to
+ * non-sensitive identifiers so dedupe decisions stay auditable without
+ * leaking secrets or personal data.
+ */
+export const ADMIN_JOB_IDEMPOTENCY_AUDIT_ACTION = 'admin.job.enqueue.idempotency';
+
+/**
+ * Default audit-log retention window, in days. Audit rows older than this
+ * window are deleted by {@link AuditService.applyRetention}. This value is
+ * published in the field-level privacy and retention reference
+ * (`docs/privacy/field-inventory.md`); keep the two in sync.
+ */
+export const AUDIT_LOG_RETENTION_DAYS = 90;
+
+/**
+ * Metadata keys that must never be persisted in audit logs because they hold
+ * secrets, signing material, or unnecessary personal data. Any matching key is
+ * redacted before the entry is stored or exported.
+ */
+export const AUDIT_METADATA_REDACTED_KEYS: readonly string[] = [
+  'password',
+  'passwd',
+  'secret',
+  'token',
+  'accessToken',
+  'refreshToken',
+  'apiKey',
+  'authorization',
+  'cookie',
+  'signature',
+  'privateKey',
+  'cardNumber',
+  'cvv',
+  'ssn',
+  'email',
+  'phone',
+];
+
+const REDACTED_PLACEHOLDER = '[redacted]';
+=======
+
+export interface AdminJobIdempotencyAuditInput {
+  /** Logical operation, e.g. `reconcile` or `cleanup`. */
+  operation: string;
+  /** Resource the operation targets, e.g. `orders` or `sessions`. */
+  resource: string;
+  /** Stable hash of the request parameters (never the raw parameters). */
+  parameterHash: string;
+  /** Whether an existing run was reused instead of starting a new one. */
+  reused: boolean;
+  /** Identifier of the run that was reused, when applicable. */
+  reusedJobId?: string;
+  /** Identifier of the newly created run, when applicable. */
+  jobId?: string;
+  /** Scoped idempotency key supplied by the caller, when present. */
+  idempotencyKey?: string;
+  /** Human-readable reason for the dedupe decision. */
+  reason?: string;
+}
 
 @Injectable()
 export class AuditService {
@@ -9,6 +71,93 @@ export class AuditService {
   private logs: AuditLog[] = [];
 
   constructor(private readonly supabaseService: SupabaseService) {}
+
+  /**
+   * Builds the audit metadata for an idempotent admin job enqueue decision.
+   * Only non-sensitive identifiers are included; raw parameters and secrets
+   * are never recorded.
+   */
+  static buildJobIdempotencyMetadata(
+    input: AdminJobIdempotencyAuditInput,
+  ): Record<string, unknown> {
+    const metadata: Record<string, unknown> = {
+      operation: input.operation,
+      resource: input.resource,
+      parameterHash: input.parameterHash,
+      reused: input.reused,
+    };
+    if (input.reusedJobId) metadata.reusedJobId = input.reusedJobId;
+    if (input.jobId) metadata.jobId = input.jobId;
+    if (input.idempotencyKey) metadata.idempotencyKey = input.idempotencyKey;
+    if (input.reason) metadata.reason = input.reason;
+    return metadata;
+  }
+
+  /**
+   * Computes a stable, non-reversible hash of job request parameters so that
+   * dedupe decisions can be audited without persisting raw parameters.
+   */
+  static hashJobParameters(params: unknown): string {
+    const serialized = AuditService.stableStringify(params);
+    return createHash('sha256').update(serialized).digest('hex');
+  }
+
+  /**
+   * Recursively redacts sensitive keys from audit metadata so secrets, signing
+   * material, and unnecessary personal data are never persisted. Unknown
+   * fields are preserved as-is; only known-sensitive keys are redacted.
+   */
+  static redactMetadata(
+    metadata: Record<string, unknown> | undefined,
+  ): Record<string, unknown> | undefined {
+    if (!metadata) return metadata;
+    const redacted: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(metadata)) {
+      if (AUDIT_METADATA_REDACTED_KEYS.includes(key)) {
+        redacted[key] = REDACTED_PLACEHOLDER;
+      } else if (value && typeof value === 'object' && !Array.isArray(value)) {
+        redacted[key] = AuditService.redactMetadata(
+          value as Record<string, unknown>,
+        );
+      } else {
+        redacted[key] = value;
+      }
+    }
+    return redacted;
+  }
+
+  private static stableStringify(value: unknown): string {
+    if (value === null || typeof value !== 'object') {
+      return JSON.stringify(value) ?? 'null';
+    }
+    if (Array.isArray(value)) {
+      return `[${value.map((item) => AuditService.stableStringify(item)).join(',')}]`;
+    }
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, item]) => item !== undefined)
+      .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
+    return `{${entries
+      .map(([key, item]) => `${JSON.stringify(key)}:${AuditService.stableStringify(item)}`)
+      .join(',')}}`;
+  }
+
+  /**
+   * Records an auditable idempotency decision for an admin background-job
+   * enqueue request. Used by JobQueueService.
+   */
+  async logJobIdempotencyDecision(
+    actor: string,
+    input: AdminJobIdempotencyAuditInput,
+    requestId?: string,
+  ): Promise<void> {
+    await this.log(
+      actor,
+      ADMIN_JOB_IDEMPOTENCY_AUDIT_ACTION,
+      `${input.operation}:${input.resource}`,
+      AuditService.buildJobIdempotencyMetadata(input),
+      requestId,
+    );
+  }
 
   async log(
     actor: string,
@@ -22,7 +171,7 @@ export class AuditService {
       actor,
       action,
       target,
-      metadata,
+      metadata: AuditService.redactMetadata(metadata),
       requestId,
       createdAt: new Date(),
     };
@@ -49,6 +198,29 @@ export class AuditService {
         `Audit store unavailable, keeping in-memory copy only: ${(error as Error).message}`,
       );
     }
+  }
+
+  async logScopeChange(params: {
+    actor: string;
+    keyId: string;
+    before: string[];
+    after: string[];
+    success: boolean;
+    requestId?: string;
+    reason?: string;
+  }): Promise<void> {
+    const { actor, keyId, before, after, success, requestId, reason } = params;
+    const metadata: Record<string, unknown> = {
+      keyId,
+      beforeScopes: [...before],
+      afterScopes: [...after],
+      outcome: success ? 'success' : 'failure',
+    };
+    if (reason) {
+      metadata.reason = reason;
+    }
+
+    await this.log(actor, 'api_key.scopes.update', keyId, metadata, requestId);
   }
 
   async query(dto: QueryAuditLogsDto) {
@@ -95,17 +267,31 @@ export class AuditService {
     return header + rows;
   }
 
-  async applyRetention(days: number = 90) {
+  /**
+   * Deletes audit logs older than the retention window (default
+   * {@link AUDIT_LOG_RETENTION_DAYS}). Rows at or after the cutoff are kept.
+   * The in-memory fallback and the persistent store are both pruned; a store
+   * failure is logged but does not throw so retention sweeps stay best-effort.
+   */
+  async applyRetention(days: number = AUDIT_LOG_RETENTION_DAYS) {
     const cutoff = new Date();
     cutoff.setDate(cutoff.getDate() - days);
     
     const initialCount = this.logs.length;
-    this.logs = this.logs.filter(log => log.createdAt > cutoff);
+    this.logs = this.logs.filter(log => log.createdAt >= cutoff);
     const deletedCount = initialCount - this.logs.length;
 
     try {
       const client = this.supabaseService.getClient();
-      await client.from('admin_audit_logs').delete().lt('created_at', cutoff.toISOString());
+      const { error } = await client
+        .from('admin_audit_logs')
+        .delete()
+        .lt('created_at', cutoff.toISOString());
+      if (error) {
+        this.logger.warn(
+          `Failed to apply audit retention in store: ${error.message}`,
+        );
+      }
     } catch (error) {
       this.logger.warn(
         `Failed to apply audit retention in store: ${(error as Error).message}`,

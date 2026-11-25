@@ -217,7 +217,7 @@ export class SorobanEventIndexerService {
           continue;
         }
 
-        const inserted = await this.persistEvent(event);
+        const inserted = await this.persistEvent(event, contractId);
         if (inserted) {
           persisted++;
           this.eventEmitter.emit(`stellar.${event.eventType}`, event);
@@ -311,12 +311,15 @@ export class SorobanEventIndexerService {
     return { records, nextCursor };
   }
 
-  private async persistEvent(event: QuickExContractEvent): Promise<boolean> {
+  private async persistEvent(
+    event: QuickExContractEvent,
+    contractId?: string,
+  ): Promise<boolean> {
     switch (event.eventType) {
       case "EscrowDeposited":
       case "EscrowWithdrawn":
       case "EscrowRefunded":
-        return this.escrowRepo.upsertEvent(event as EscrowEvent);
+        return this.persistEscrowEvent(event as EscrowEvent, contractId);
       case "PrivacyToggled":
         return this.privacyRepo.upsertEvent(event);
       case "ContractPaused":
@@ -330,6 +333,49 @@ export class SorobanEventIndexerService {
         this.logger.debug(`Event ${(event as QuickExContractEvent).eventType} not persisted.`);
         return false;
     }
+  }
+
+  /**
+   * Persists an escrow event through the guarded (monotonic) upsert path.
+   *
+   * A late or duplicated event that would regress a receipt to an earlier
+   * status is rejected by the repository; the conflict evidence is retained
+   * and the canonical state is left untouched. Duplicate events are no-ops.
+   */
+  private async persistEscrowEvent(
+    event: EscrowEvent,
+    contractId?: string,
+  ): Promise<boolean> {
+    const repository = this.escrowRepo as EscrowEventRepository & {
+      upsertEventGuarded?: (
+        event: EscrowEvent,
+      ) => Promise<{ inserted: boolean; conflict?: boolean; reason?: string }>;
+    };
+
+    if (!repository.upsertEventGuarded) {
+      return this.escrowRepo.upsertEvent(event);
+    }
+
+    const result = await repository.upsertEventGuarded(event);
+    if (result.conflict) {
+      this.logger.warn(
+        `Rejected regressive escrow event ${event.eventType} ` +
+          `paging_token=${event.pagingToken ?? "unknown"}` +
+          `${contractId ? ` contract=${contractId}` : ""}: ${result.reason ?? "status regression"}`,
+      );
+      await this.recordAnomaly(
+        contractId ?? event.contractId ?? "unknown",
+        "out_of_order",
+        undefined,
+        undefined,
+        {
+          eventType: event.eventType,
+          pagingToken: event.pagingToken ?? null,
+          reason: result.reason ?? "status regression",
+        },
+      );
+    }
+    return result.inserted;
   }
 
   async listUnparsedEvents(
@@ -379,6 +425,14 @@ export class SorobanEventIndexerService {
     return this.replayBatch(records);
   }
 
+  /**
+   * Returns the durable checkpoint for a contract so operators can inspect
+   * progress during stall diagnosis. Read-only: never mutates the checkpoint.
+   */
+  async getCheckpoint(contractId: string) {
+    return this.checkpointRepo.getCheckpoint(contractId);
+  }
+
   async replayBatch(records: UnparsedSorobanEventRecord[]): Promise<ReplayUnparsedResult> {
     let replayed = 0;
     let stillUnparsed = 0;
@@ -387,7 +441,7 @@ export class SorobanEventIndexerService {
       const event = this.parser.parse(record.raw);
       if (event) {
         try {
-          const inserted = await this.persistEvent(event);
+          const inserted = await this.persistEvent(event, record.raw.contract_id);
           await this.unparsedRepo.markReplayed(record.pagingToken);
           if (inserted) {
             this.eventEmitter.emit(`stellar.${event.eventType}`, event);

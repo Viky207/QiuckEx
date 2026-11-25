@@ -15,8 +15,57 @@ import type {
 } from "./types/contract-event.types";
 
 /**
+ * Canonical receipt statuses, ordered from least to most advanced.
+ * Terminal statuses (FINALIZED, REFUNDED, CLEANED) can never be left.
+ */
+export const RECEIPT_STATUS_RANK: Readonly<Record<string, number>> = Object.freeze({
+  PENDING: 0,
+  PAID: 1,
+  DISPUTED: 2,
+  FINALIZED: 3,
+  REFUNDED: 3,
+  CLEANED: 4,
+});
+
+const TERMINAL_RECEIPT_STATUSES: ReadonlySet<string> = new Set([
+  "FINALIZED",
+  "REFUNDED",
+  "CLEANED",
+]);
+
+/**
+ * Returns true when moving a receipt from `from` to `to` is a monotonic
+ * (non-regressing) transition. Unknown statuses are treated as non-transitionable
+ * so that unexpected values cannot clobber canonical state.
+ */
+export function canTransitionReceipt(from: string, to: string): boolean {
+  if (from === to) {
+    return true;
+  }
+  const fromRank = RECEIPT_STATUS_RANK[from];
+  const toRank = RECEIPT_STATUS_RANK[to];
+  if (fromRank === undefined || toRank === undefined) {
+    return false;
+  }
+  if (TERMINAL_RECEIPT_STATUSES.has(from)) {
+    return false;
+  }
+  return toRank > fromRank;
+}
+
+/**
+ * Returns true when an observation carries the same status as the canonical
+ * state, i.e. replaying it is an idempotent no-op.
+ */
+export function isDuplicateObservation(canonical: string | null, observed: string | null): boolean {
+  return canonical !== null && observed !== null && canonical === observed;
+}
+
+/**
  * Persists escrow domain events to Supabase.
  * All inserts use ON CONFLICT DO NOTHING so replaying the same event is safe.
+ * Receipt status transitions are enforced monotonically: regressions are
+ * recorded as conflict evidence instead of overwriting canonical state.
  */
 @Injectable()
 export class EscrowEventRepository {
@@ -75,6 +124,23 @@ export class EscrowEventRepository {
       amount_disputed: "amount" in event && (event.eventType === "DisputeResolved" || event.eventType === "ArbiterVoteCast") ? (event as DisputeResolvedEvent).amount.toString() : null,
     };
 
+    const observedStatus = this.extractReceiptStatus(event);
+    if (observedStatus !== null) {
+      const canonicalStatus = await this.readCanonicalStatus(event.commitment);
+
+      if (isDuplicateObservation(canonicalStatus, observedStatus)) {
+        this.logger.debug(
+          `Idempotent receipt status observation ${observedStatus} commitment=${event.commitment}`,
+        );
+        return false;
+      }
+
+      if (canonicalStatus !== null && !canTransitionReceipt(canonicalStatus, observedStatus)) {
+        await this.recordStatusConflict(event, observedStatus, canonicalStatus);
+        return false;
+      }
+    }
+
     const { data, error } = await client
       .from("escrow_events")
       .upsert(row, {
@@ -94,5 +160,74 @@ export class EscrowEventRepository {
       `Persisted ${event.eventType} commitment=${event.commitment} ledger=${event.ledgerSequence}`,
     );
     return Boolean(data?.length);
+  }
+
+  /**
+   * Extracts the receipt status carried by an event, if any.
+   */
+  private extractReceiptStatus(event: EscrowEvent): string | null {
+    if ("status" in event && typeof (event as EscrowCleanedEvent).status === "string") {
+      return (event as EscrowCleanedEvent).status;
+    }
+    return null;
+  }
+
+  /**
+   * Reads the current canonical receipt status for a commitment.
+   * Returns null when no status has been recorded yet.
+   */
+  private async readCanonicalStatus(commitment: string): Promise<string | null> {
+    const client = this.supabase.getClient();
+    const { data, error } = await client
+      .from("escrow_events")
+      .select("status, ledger_sequence")
+      .eq("commitment", commitment)
+      .not("status", "is", null)
+      .order("ledger_sequence", { ascending: false })
+      .limit(1);
+
+    if (error) {
+      this.logger.error(
+        `Failed to read canonical receipt status for commitment ${commitment}: ${error.message}`,
+      );
+      throw error;
+    }
+
+    const latest = data?.[0] as { status?: string | null } | undefined;
+    return latest?.status ?? null;
+  }
+
+  /**
+   * Records a regressing observation as conflict evidence without touching
+   * canonical state. Never throws on conflict-write failure so that a single
+   * bad observation cannot stall ingestion.
+   */
+  private async recordStatusConflict(
+    event: EscrowEvent,
+    observedStatus: string,
+    canonicalStatus: string,
+  ): Promise<void> {
+    const client = this.supabase.getClient();
+    const { error } = await client.from("receipt_status_conflicts").insert({
+      event_id: event.eventId,
+      event_type: event.eventType,
+      commitment: event.commitment,
+      observed_status: observedStatus,
+      canonical_status: canonicalStatus,
+      tx_hash: event.txHash,
+      ledger_sequence: event.ledgerSequence,
+      observed_at: new Date(Number(event.contractTimestamp) * 1000).toISOString(),
+    });
+
+    if (error) {
+      this.logger.error(
+        `Failed to record receipt status conflict for commitment ${event.commitment}: ${error.message}`,
+      );
+      return;
+    }
+
+    this.logger.warn(
+      `Rejected regressing receipt status ${observedStatus} (canonical ${canonicalStatus}) commitment=${event.commitment}`,
+    );
   }
 }

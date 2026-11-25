@@ -1,58 +1,34 @@
-# Contributing Guide
+# Contributing
 
-Welcome to the Stella Wave project! This guide will help you set up your development environment, understand our workflow, and contribute effectively.
+Thanks for contributing! Please read this guide before opening a pull request.
 
-## Quick Start: One-Click Dev Environment
+## Getting started
 
-We use VS Code Dev Containers for a seamless onboarding experience. After cloning the repo, open it in VS Code and select "Reopen in Container" when prompted. The container will set up all dependencies for Soroban and Backend development.
+1. Fork the repository and create a feature branch.
+2. Install dependencies and run the existing test suite locally.
+3. Make focused changes that address a single issue.
+4. Open a pull request describing the change and linking the issue.
 
-## Environment Setup
+## Code style
 
-1. **Clone the repository:**
-   ```sh
-   git clone <repo-url>
-   cd QiuckEx
-   ```
-2. **Open in VS Code.**
-3. **Install the [Dev Containers extension](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers) if prompted.**
-4. **Reopen in Container.**
+- Follow the existing patterns, naming, and module structure.
+- Keep changes surgical; avoid unrelated refactors.
+- Do not commit secrets, signing material, or unnecessary personal data.
 
-The container will install:
-- Node.js (LTS)
-- pnpm
-- Rust toolchain (for Soroban)
-- Soroban CLI
-- Docker (for local services)
-- All backend/frontend dependencies
+## Tests
 
-## Manual Environment Setup (Without Dev Containers)
+- Add focused automated coverage for any changed behavior, including the relevant failure or boundary case.
+- Preserve existing public contracts unless a deliberate migration is included.
 
-If you prefer to set up the environment manually on your host machine:
+## Contract budget regression tests
 
-### 1. TypeScript/Node
-1. Install Node.js (LTS).
-2. Install `pnpm` globally (`npm i -g pnpm`).
-3. Run `pnpm install` in the repository root.
-4. Start the frontend/backend servers via TurboRepo:
-   ```bash
-   pnpm turbo run dev
-   ```
+The contract test suite includes budget regression cases that exercise worst-case call paths under the declared limits (CPU instructions and storage growth). These tests are reproducible and run in contract CI.
 
-### 2. Rust/Soroban
-1. Install Rust via `rustup`:
-   ```bash
-   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-   rustup default stable
-   rustup target add wasm32-unknown-unknown
-   ```
-2. Build the contracts:
-   ```bash
-   cd app/contract
-   cargo build --target wasm32-unknown-unknown --release
-   ```
+- Exceeding a declared budget limit fails the CI job.
+- Budget thresholds are checked into the repository alongside the tests.
+- **Changing a budget threshold requires an explicit review note** in the pull request explaining why the limit changed and what worst-case input justifies the new value. Threshold changes without a review note should be rejected.
 
-### 3. Mobile App
-See the [Mobile App Contributor Guide](app/mobile/CONTRIBUTOR-GUIDE.md) for Expo CLI setup, Android/iOS emulator configuration, running on a physical device, and running Jest/Maestro tests.
+## Pull requests
 
 ## Branch Naming
 
@@ -88,6 +64,18 @@ pnpm labels:sync -- --prune # also delete labels not in the file
 
 `.github/workflows/sync-labels.yml` runs the same script daily and on any change to
 the file, so the repository and the file cannot drift apart silently.
+
+### CI job conventions
+
+Every job in `.github/workflows/*.yml` declares a `timeout-minutes` bound
+(and network-heavy steps add their own step-level timeout on top of it), so a
+hung install, test run, or external call fails fast instead of consuming a
+runner indefinitely. Jobs that can fail in a way that isn't obvious from the
+job name (deploys, gates, long test suites) write a short failure summary to
+`$GITHUB_STEP_SUMMARY` — what failed and where to look next (a runbook under
+`docs/`, an uploaded artifact) — instead of leaving the reader to open raw
+logs. No step logs or echoes credentials; secrets are only ever referenced
+via `${{ secrets.* }}` inside `env:`.
 
 The vocabulary is deliberately small:
 

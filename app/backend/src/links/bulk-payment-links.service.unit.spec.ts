@@ -3,6 +3,7 @@ import { BulkPaymentLinksService } from './bulk-payment-links.service';
 import { LinksService } from './links.service';
 import { BulkPaymentLinkItemDto } from './dto/bulk-payment-link.dto';
 import { FeatureFlagsService } from '../feature-flags/feature-flags.service';
+import { LinkValidationError, LinkErrorCode } from './errors';
 
 describe('BulkPaymentLinksService', () => {
   let service: BulkPaymentLinksService;
@@ -96,7 +97,7 @@ describe('BulkPaymentLinksService', () => {
       expect(mockLinksService.generateMetadata).toHaveBeenCalledTimes(100);
     });
 
-    it('should handle partial failures and report errors', async () => {
+    it('should preserve successful links and report rejected rows on partial failure', async () => {
       const items: BulkPaymentLinkItemDto[] = [
         { amount: 100, asset: 'XLM' },
         { amount: -1, asset: 'XLM' }, // This will fail validation
@@ -110,9 +111,19 @@ describe('BulkPaymentLinksService', () => {
         })
         .mockRejectedValueOnce(new Error('Invalid amount'));
 
-      await expect(service.generateBulkLinks(items)).rejects.toThrow(
-        'Failed to generate 1 link(s)',
-      );
+      const result = await service.generateBulkLinks(items);
+
+      expect(result.success).toBe(false);
+      expect(result.total).toBe(1);
+      expect(result.links).toHaveLength(1);
+      expect(result.rejected).toEqual([
+        {
+          row: 2,
+          field: 'unknown',
+          code: 'LINK_GENERATION_FAILED',
+          message: 'Invalid amount',
+        },
+      ]);
     });
 
     it('should stop generation when kill switch is active', async () => {
@@ -159,7 +170,7 @@ XLM,user1`;
       const csvContent = '';
 
       await expect(service.generateFromCSV(csvContent)).rejects.toThrow(
-        'No valid payment link items found in CSV',
+        'Upload a CSV file with a header row and at least one invoice row.',
       );
     });
 
@@ -181,7 +192,7 @@ XLM,user1`;
       expect(result.total).toBe(2);
     });
 
-    it('should skip rows with invalid amounts', async () => {
+    it('should reject invalid rows while keeping valid rows, mapped to their source row number', async () => {
       const csvContent = `amount,asset
 100,XLM
 invalid,USDC
@@ -195,8 +206,76 @@ invalid,USDC
 
       const result = await service.generateFromCSV(csvContent);
 
-      expect(result.success).toBe(true);
-      expect(result.total).toBe(2); // Skips the invalid row
+      expect(result.success).toBe(false);
+      expect(result.total).toBe(2);
+      expect(result.rejected).toEqual([
+        {
+          row: 3, // header is row 1, so "invalid,USDC" is row 3
+          field: 'amount',
+          code: 'INVALID_AMOUNT',
+          message: '"invalid" is not a valid positive amount.',
+        },
+      ]);
+    });
+
+    it('should map a row that fails link validation back to its CSV row with a stable code', async () => {
+      const csvContent = `amount,asset,username
+100,XLM,ok_user
+200,XLM,x`;
+
+      mockLinksService.generateMetadata
+        .mockResolvedValueOnce({
+          amount: '100.0000000',
+          asset: 'XLM',
+          canonical: 'amount=100.0000000&asset=XLM&username=ok_user',
+          username: 'ok_user',
+        })
+        .mockRejectedValueOnce(
+          new LinkValidationError(
+            LinkErrorCode.INVALID_USERNAME,
+            'Username must be at least 3 characters long',
+            'username',
+          ),
+        );
+
+      const result = await service.generateFromCSV(csvContent);
+
+      expect(result.success).toBe(false);
+      expect(result.total).toBe(1);
+      expect(result.rejected).toEqual([
+        {
+          row: 3,
+          field: 'username',
+          code: 'INVALID_USERNAME',
+          message: 'Username must be at least 3 characters long',
+        },
+      ]);
+    });
+
+    it('should report column-count-mismatch rows by their source row while generating the rest', async () => {
+      const csvContent = `amount,asset
+100,XLM
+200
+300,XLM`;
+
+      mockLinksService.generateMetadata.mockResolvedValue({
+        amount: '100.0000000',
+        asset: 'XLM',
+        canonical: 'amount=100.0000000&asset=XLM',
+      });
+
+      const result = await service.generateFromCSV(csvContent);
+
+      expect(result.success).toBe(false);
+      expect(result.total).toBe(2);
+      expect(result.rejected).toEqual([
+        {
+          row: 3,
+          field: 'unknown',
+          code: 'COLUMN_COUNT_MISMATCH',
+          message: 'Expected 2 column(s) but found 1.',
+        },
+      ]);
     });
 
     it('should parse acceptedAssets with pipe separator', async () => {

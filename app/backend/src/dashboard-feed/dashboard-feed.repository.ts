@@ -23,6 +23,7 @@ export class DashboardFeedRepository {
   /**
    * Fetch payment feed items for the given address.
    * Ordered by created_at DESC, id DESC for deterministic pagination.
+   * Cursors are opaque and encode both the timestamp and the id tie-breaker.
    */
   async getPayments(
     address: string,
@@ -38,8 +39,7 @@ export class DashboardFeedRepository {
       .order('created_at', { ascending: false })
       .order('id', { ascending: false });
 
-    if (after) query = query.gt('created_at', after);
-    if (before) query = query.lt('created_at', before);
+    query = this.applyCursor(query, 'created_at', after, before);
 
     const { data, error } = await query.limit(limit + 1);
     if (error) throw error;
@@ -95,8 +95,7 @@ export class DashboardFeedRepository {
       .order('created_at', { ascending: false })
       .order('id', { ascending: false });
 
-    if (after) query = query.gt('created_at', after);
-    if (before) query = query.lt('created_at', before);
+    query = this.applyCursor(query, 'created_at', after, before);
 
     const { data, error } = await query.limit(limit + 1);
     if (error) throw error;
@@ -122,8 +121,7 @@ export class DashboardFeedRepository {
       .order('createdAt', { ascending: false })
       .order('id', { ascending: false });
 
-    if (after) query = query.gt('createdAt', after);
-    if (before) query = query.lt('createdAt', before);
+    query = this.applyCursor(query, 'createdAt', after, before);
 
     const { data, error } = await query.limit(limit + 1);
     if (error) throw error;
@@ -149,8 +147,7 @@ export class DashboardFeedRepository {
       .order('updated_at', { ascending: false })
       .order('id', { ascending: false });
 
-    if (after) query = query.gt('updated_at', after);
-    if (before) query = query.lt('updated_at', before);
+    query = this.applyCursor(query, 'updated_at', after, before);
 
     const { data, error } = await query.limit(limit + 1);
     if (error) throw error;
@@ -176,14 +173,77 @@ export class DashboardFeedRepository {
       .order('created_at', { ascending: false })
       .order('id', { ascending: false });
 
-    if (after) query = query.gt('created_at', after);
-    if (before) query = query.lt('created_at', before);
+    query = this.applyCursor(query, 'created_at', after, before);
 
     const { data, error } = await query.limit(limit + 1);
     if (error) throw error;
     if (!data || data.length === 0) return [];
 
     return (data as Row[]).slice(0, limit).map((row) => this.mapUsername(row));
+  }
+
+  // ── Cursor helpers ───────────────────────────────────────────────────────
+
+  /**
+   * Encode an opaque cursor from a timestamp and the id tie-breaker.
+   * The payload is base64url-encoded JSON so callers treat it as opaque.
+   */
+  static encodeCursor(timestamp: string, id: string | number): string {
+    const payload = JSON.stringify({ t: timestamp, i: String(id) });
+    return Buffer.from(payload, 'utf8').toString('base64url');
+  }
+
+  /**
+   * Decode an opaque cursor. Legacy timestamp-only cursors (plain ISO strings)
+   * are still accepted and treated as having no id tie-breaker, preserving
+   * backward compatibility with previously issued cursors.
+   */
+  static decodeCursor(cursor: string): { timestamp: string; id: string | null } {
+    try {
+      const decoded = Buffer.from(cursor, 'base64url').toString('utf8');
+      const parsed = JSON.parse(decoded) as { t?: unknown; i?: unknown };
+      if (parsed && typeof parsed.t === 'string') {
+        return {
+          timestamp: parsed.t,
+          id: parsed.i != null ? String(parsed.i) : null,
+        };
+      }
+    } catch {
+      // Not an encoded cursor — fall through to legacy handling.
+    }
+    return { timestamp: cursor, id: null };
+  }
+
+  /**
+   * Apply composite keyset predicates for deterministic pagination.
+   * Ordering is (timestamp DESC, id DESC), so:
+   *   after  → timestamp < t OR (timestamp = t AND id < i)
+   *   before → timestamp > t OR (timestamp = t AND id > i)
+   * Legacy timestamp-only cursors fall back to a plain timestamp comparison.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private applyCursor(query: any, column: string, after?: string, before?: string): any {
+    if (after) {
+      const { timestamp, id } = DashboardFeedRepository.decodeCursor(after);
+      if (id != null) {
+        query = query.or(
+          `${column}.lt.${timestamp},and(${column}.eq.${timestamp},id.lt.${id})`,
+        );
+      } else {
+        query = query.lt(column, timestamp);
+      }
+    }
+    if (before) {
+      const { timestamp, id } = DashboardFeedRepository.decodeCursor(before);
+      if (id != null) {
+        query = query.or(
+          `${column}.gt.${timestamp},and(${column}.eq.${timestamp},id.gt.${id})`,
+        );
+      } else {
+        query = query.gt(column, timestamp);
+      }
+    }
+    return query;
   }
 
   // ── Mappers ──────────────────────────────────────────────────────────────

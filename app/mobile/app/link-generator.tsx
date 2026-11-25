@@ -1,7 +1,7 @@
 import { StrKey } from "@stellar/stellar-base";
 import * as Clipboard from "expo-clipboard";
 import Constants from "expo-constants";
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
     AccessibilityInfo,
@@ -18,6 +18,10 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 
 import { QRPreviewModal } from "../components/QRPreviewModal";
+import {
+  createSubmissionGuard,
+  createSubmissionKey,
+} from "../utils/submissionGuard";
 import { useTheme } from "../src/theme/ThemeContext";
 import { useNetworkStatus } from "../hooks/use-network-status";
 
@@ -65,6 +69,10 @@ export default function LinkGeneratorScreen() {
   const [canonicalData, setCanonicalData] = useState<string | null>(null);
 
   const [qrModalVisible, setQrModalVisible] = useState(false);
+  const generationGuardRef = useRef(createSubmissionGuard<string>());
+  const submissionScopeRef = useRef(
+    `mobile-${Math.random().toString(36).slice(2)}`,
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -142,6 +150,21 @@ export default function LinkGeneratorScreen() {
 
   const { isConnected } = useNetworkStatus();
 
+  const submissionKey = useMemo(
+    () =>
+      createSubmissionKey(
+        {
+          amount: Number(form.amount),
+          asset: recipientAssetCode,
+          destination: form.destination,
+          memo: form.memo,
+          acceptedAssets: merchantAcceptedAssets ?? [],
+        },
+        submissionScopeRef.current,
+      ),
+    [form.amount, recipientAssetCode, form.destination, form.memo, merchantAcceptedAssets],
+  );
+
   const handleGenerate = async () => {
     if (isConnected === false) {
       const message = "Offline mode: you cannot generate payment links while offline.";
@@ -156,11 +179,22 @@ export default function LinkGeneratorScreen() {
       return;
     }
 
+    const attempt = generationGuardRef.current.begin(submissionKey);
+    if (attempt.status === "duplicate") return;
+    if (attempt.status === "replay") {
+      setCanonicalData(attempt.value);
+      AccessibilityInfo.announceForAccessibility("Payment link generated successfully");
+      return;
+    }
+
     setLoading(true);
     try {
       const res = await fetch(`${API_BASE_URL}/links/metadata`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": submissionKey,
+        },
         body: JSON.stringify({
           amount: Number(form.amount),
           asset: recipientAssetCode,
@@ -176,11 +210,14 @@ export default function LinkGeneratorScreen() {
       }
 
       const result = json as LinkMetadataSuccess;
-      if (result.success) {
-        setCanonicalData(result.data.canonical);
-        AccessibilityInfo.announceForAccessibility("Payment link generated successfully");
+      if (!result.success) {
+        throw new Error("Generation failed.");
       }
+      attempt.settle({ ok: true, value: result.data.canonical });
+      setCanonicalData(result.data.canonical);
+      AccessibilityInfo.announceForAccessibility("Payment link generated successfully");
     } catch (e: any) {
+      attempt.settle({ ok: false });
       AccessibilityInfo.announceForAccessibility(`Error generating payment link: ${e.message}`);
       Alert.alert("Error", e.message);
     } finally {

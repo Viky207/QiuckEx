@@ -8,7 +8,123 @@
  *
  * It never imports or runs the backend, so it works on a fresh clone.
  */
-import { PATHS, fileExists, listControllerFiles, readText, unique } from "./shared.mjs";
+import {
+  PATHS,
+  fileExists,
+  listControllerFiles,
+  missingSections,
+  readText,
+  unique,
+} from "./shared.mjs";
+
+/**
+ * Glossary drift - issue #588.
+ *
+ * The glossary is the single source of truth for product and protocol terms.
+ * A term with two preferred meanings, a canonical link that points at a file
+ * that no longer exists, or a missing requested/settlement/conversion
+ * distinction all make the glossary worse than none at all, so they fail CI.
+ */
+export const GLOSSARY_PATH = "docs/glossary.md";
+
+/** Terms whose distinction the glossary must state explicitly. */
+export const REQUIRED_DISTINCTIONS = ["requested asset", "settlement asset", "conversion"];
+
+/**
+ * Parse the glossary into entries. Each entry is a level-3 heading
+ * (`### Term`) followed by a body; the body must contain exactly one
+ * `**Preferred:**` line and at least one `**Canonical:**` link.
+ */
+export function parseGlossary(text) {
+  const entries = [];
+  const lines = text.split(/\r?\n/);
+  let current = null;
+  for (const line of lines) {
+    const heading = line.match(/^###\s+(.+?)\s*$/);
+    if (heading) {
+      if (current) entries.push(current);
+      current = { term: heading[1], body: [] };
+      continue;
+    }
+    if (current) current.body.push(line);
+  }
+  if (current) entries.push(current);
+  return entries.map((entry) => {
+    const body = entry.body.join("\n");
+    const preferred = [...body.matchAll(/^\s*\*\*Preferred:\*\*\s*(.+?)\s*$/gm)].map((m) => m[1]);
+    const canonical = [...body.matchAll(/^\s*\*\*Canonical:\*\*\s*\[[^\]]*\]\(([^)]+)\)/gm)].map(
+      (m) => m[1],
+    );
+    return { term: entry.term, preferred, canonical };
+  });
+}
+
+/** A canonical link resolves when it points at a file that exists in the repo. */
+export function canonicalLinkResolves(root, link) {
+  const target = link.split("#")[0].trim();
+  if (!target || /^[a-z]+:\/\//i.test(target)) return false;
+  return fileExists(root, target.replace(/^\.?\//, ""));
+}
+
+export function checkGlossary(root) {
+  const errors = [];
+  const warnings = [];
+  const summary = { terms: 0, preferred: 0, canonical: 0 };
+
+  if (!fileExists(root, GLOSSARY_PATH)) {
+    return { errors: [`${GLOSSARY_PATH} is missing`], warnings, summary };
+  }
+
+  const text = readText(root, GLOSSARY_PATH);
+  const entries = parseGlossary(text);
+  summary.terms = entries.length;
+
+  if (entries.length === 0) {
+    errors.push(`${GLOSSARY_PATH} defines no terms - add at least one "### Term" entry.`);
+  }
+
+  const seen = new Set();
+  for (const entry of entries) {
+    if (seen.has(entry.term.toLowerCase())) {
+      errors.push(`${GLOSSARY_PATH}: term "${entry.term}" is defined more than once.`);
+    }
+    seen.add(entry.term.toLowerCase());
+
+    if (entry.preferred.length === 0) {
+      errors.push(`${GLOSSARY_PATH}: term "${entry.term}" has no **Preferred:** definition.`);
+    } else if (entry.preferred.length > 1) {
+      errors.push(
+        `${GLOSSARY_PATH}: term "${entry.term}" has ${entry.preferred.length} **Preferred:** definitions - a term must have exactly one preferred meaning.`,
+      );
+    } else {
+      summary.preferred += 1;
+    }
+
+    if (entry.canonical.length === 0) {
+      errors.push(`${GLOSSARY_PATH}: term "${entry.term}" has no **Canonical:** link.`);
+    } else {
+      const broken = entry.canonical.filter((link) => !canonicalLinkResolves(root, link));
+      if (broken.length > 0) {
+        errors.push(
+          `${GLOSSARY_PATH}: term "${entry.term}" has a canonical link that does not resolve: ${broken.join(", ")}.`,
+        );
+      } else {
+        summary.canonical += 1;
+      }
+    }
+  }
+
+  const lower = text.toLowerCase();
+  for (const term of REQUIRED_DISTINCTIONS) {
+    if (!lower.includes(term)) {
+      errors.push(
+        `${GLOSSARY_PATH}: the distinction between requested asset, settlement asset, and conversion is incomplete - "${term}" is not defined.`,
+      );
+    }
+  }
+
+  return { errors, warnings, summary };
+}
 
 /** Controller prefixes, as declared in @Controller('...'). */
 export function extractControllerPrefixes(sources) {
@@ -115,6 +231,82 @@ export function checkContractDrift(root) {
  * the contract map calls out explicitly, because a client that prepends /api
  * would break every route at once.
  */
+/**
+ * Migration authoring and rollback review - issue #583.
+ *
+ * Every forward migration needs a way back. This check pairs each
+ * `*.sql` migration with a rollback counterpart (`*.down.sql` or
+ * `*_rollback.sql`) and accepts a migration without one only when the guide
+ * marks it explicitly irreversible. It also verifies the guide documents the
+ * current verification commands.
+ */
+export function checkMigrationRollbacks(root) {
+  const errors = [];
+  const warnings = [];
+  const summary = { migrations: 0, withRollback: 0, irreversible: 0, missing: 0 };
+
+  if (!fileExists(root, MIGRATION_GUIDE)) {
+    return {
+      errors: [`${MIGRATION_GUIDE} is missing - it must document migration authoring and rollback review`],
+      warnings,
+      summary,
+    };
+  }
+
+  const guide = readText(root, MIGRATION_GUIDE);
+  for (const command of MIGRATION_VERIFICATION_COMMANDS) {
+    if (!guide.includes(command)) {
+      errors.push(`${MIGRATION_GUIDE} does not document the verification command "${command}"`);
+    }
+  }
+
+  const files = listFiles(root, MIGRATIONS_DIR).filter((file) => file.endsWith(".sql"));
+  const forward = files.filter((file) => !isRollbackFile(file));
+  const rollbacks = new Set(files.filter(isRollbackFile).map(rollbackBase));
+  summary.migrations = forward.length;
+
+  for (const file of forward) {
+    const base = file.replace(/\.sql$/, "");
+    if (rollbacks.has(base)) {
+      summary.withRollback += 1;
+      continue;
+    }
+    if (isMarkedIrreversible(guide, file)) {
+      summary.irreversible += 1;
+      continue;
+    }
+    summary.missing += 1;
+    errors.push(
+      `${MIGRATIONS_DIR}/${file}: no rollback script (expected ${base}.down.sql) and it is not marked irreversible in ${MIGRATION_GUIDE}. Add a rollback or document why the change cannot be reversed.`,
+    );
+  }
+
+  return { errors, warnings, summary };
+}
+
+/** A rollback script is a `.down.sql` or `_rollback.sql` sibling. */
+export function isRollbackFile(file) {
+  return /(\.down|_rollback)\.sql$/.test(file);
+}
+
+/** The forward-migration base name a rollback file belongs to. */
+export function rollbackBase(file) {
+  return file.replace(/(\.down|_rollback)\.sql$/, "");
+}
+
+/**
+ * A migration is explicitly irreversible when the guide names its file (or
+ * base name) on a line that also says "irreversible". Naming the file keeps
+ * the exception auditable instead of blanket-exempting a directory.
+ */
+export function isMarkedIrreversible(guide, file) {
+  const base = file.replace(/\.sql$/, "");
+  return guide
+    .split("\n")
+    .filter((line) => /irreversible/i.test(line))
+    .some((line) => line.includes(file) || line.includes(base));
+}
+
 export function checkGlobalPrefixInvariant(root) {
   const errors = [];
   if (!fileExists(root, PATHS.mainEntry)) {
@@ -137,3 +329,174 @@ export function checkGlobalPrefixInvariant(root) {
   }
   return { errors, warnings: [], summary: { globalPrefix: usesGlobalPrefix } };
 }
+
+/**
+ * Soroban error-code documentation - issue #573.
+ *
+ * Clients must be able to tell a retryable network failure from a stable
+ * contract rejection. The error mapping table is the contract for that, so it
+ * must cover every code the client mapper knows about, classify each one
+ * explicitly, and give a safe user-facing interpretation.
+ */
+export const SOROBAN_DOCS_PATH = "app/contract/documentation/soroban.md";
+export const ERROR_MAPPER_PATH = "app/mobile/utils/contract-error-mapper.ts";
+
+/** The QuickexErrorCode members declared in the client error mapper. */
+export function extractQuickexErrorCodes(source) {
+  const codes = [];
+  const enumMatch = source.match(/enum\s+QuickexErrorCode\s*\{([\s\S]*?)\}/);
+  if (enumMatch) {
+    for (const match of enumMatch[1].matchAll(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=/gm)) {
+      codes.push(match[1]);
+    }
+  }
+  // A union type (`type QuickexErrorCode = "A" | "B"`) is equally valid.
+  const unionMatch = source.match(/type\s+QuickexErrorCode\s*=\s*([\s\S]*?);/);
+  if (unionMatch) {
+    for (const match of unionMatch[1].matchAll(/["'`]([A-Za-z_][A-Za-z0-9_]*)["'`]/g)) {
+      codes.push(match[1]);
+    }
+  }
+  return unique(codes);
+}
+
+/**
+ * Parse the error mapping table. A row is a markdown table line whose first
+ * cell is a code; the remaining cells carry the classification and the
+ * user-facing interpretation.
+ */
+export function parseSorobanErrorTable(text) {
+  const rows = [];
+  for (const line of text.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("|")) continue;
+    const cells = trimmed
+      .replace(/^\|/, "")
+      .replace(/\|$/, "")
+      .split("|")
+      .map((cell) => cell.trim());
+    if (cells.length < 3) continue;
+    const code = cells[0].replace(/[`*]/g, "").trim();
+    // Skip the header row and the separator row.
+    if (!code || /^code$/i.test(code) || /^-+$/.test(code)) continue;
+    if (/^:?-+:?$/.test(cells[0])) continue;
+    rows.push({ code, cells });
+  }
+  return rows;
+}
+
+export function checkSorobanErrorDocs(root) {
+  const errors = [];
+  const warnings = [];
+  const summary = { codes: 0, documented: 0, retryable: 0, nonRetryable: 0 };
+
+  if (!fileExists(root, SOROBAN_DOCS_PATH)) {
+    return { errors: [`${SOROBAN_DOCS_PATH} is missing`], warnings, summary };
+  }
+  if (!fileExists(root, ERROR_MAPPER_PATH)) {
+    return { errors: [`${ERROR_MAPPER_PATH} is missing`], warnings, summary };
+  }
+
+  const codes = extractQuickexErrorCodes(readText(root, ERROR_MAPPER_PATH));
+  summary.codes = codes.length;
+  if (codes.length === 0) {
+    errors.push(
+      `${ERROR_MAPPER_PATH}: no QuickexErrorCode members found - the error mapper must declare its codes.`,
+    );
+  }
+
+  const rows = parseSorobanErrorTable(readText(root, SOROBAN_DOCS_PATH));
+  const byCode = new Map();
+  for (const row of rows) {
+    if (byCode.has(row.code)) {
+      errors.push(`${SOROBAN_DOCS_PATH}: error code "${row.code}" is documented more than once.`);
+      continue;
+    }
+    byCode.set(row.code, row);
+  }
+
+  for (const code of codes) {
+    const row = byCode.get(code);
+    if (!row) {
+      errors.push(
+        `${SOROBAN_DOCS_PATH}: error code "${code}" from ${ERROR_MAPPER_PATH} is missing from the error mapping table.`,
+      );
+      continue;
+    }
+    summary.documented += 1;
+
+    const body = row.cells.slice(1).join(" ").toLowerCase();
+    const retryable = /\bretryable\b/.test(body);
+    const nonRetryable = /\bnon-retryable\b/.test(body);
+    if (!retryable && !nonRetryable) {
+      errors.push(
+        `${SOROBAN_DOCS_PATH}: error code "${code}" has no explicit retryable/non-retryable classification.`,
+      );
+    } else if (retryable && nonRetryable) {
+      errors.push(
+        `${SOROBAN_DOCS_PATH}: error code "${code}" is classified as both retryable and non-retryable.`,
+      );
+    } else if (retryable) {
+      summary.retryable += 1;
+    } else {
+      summary.nonRetryable += 1;
+    }
+
+    // The interpretation is the last cell; it must be present and non-empty.
+    const interpretation = row.cells[row.cells.length - 1].replace(/[`*]/g, "").trim();
+    if (!interpretation || interpretation === "-") {
+      errors.push(
+        `${SOROBAN_DOCS_PATH}: error code "${code}" has no user-facing interpretation.`,
+      );
+    }
+  }
+
+  return { errors, warnings, summary };
+}
+
+/**
+ * Verified-asset onboarding guide - issue #572.
+ *
+ * Asset listing decisions need a repeatable checklist. The guide must cover
+ * issuer proof, review ownership, the registry update path, and cache
+ * invalidation so an operator can onboard or delist an asset without guessing.
+ */
+export const ASSET_ONBOARDING_PATH = "docs/ASSET-ONBOARDING-GUIDE.md";
+
+export const ASSET_ONBOARDING_SECTIONS = [
+  "Issuer proof",
+  "Review ownership",
+  "Registry update",
+  "Cache invalidation",
+  "Delisting",
+];
+
+export function checkAssetOnboardingGuide(root) {
+  const errors = [];
+  const warnings = [];
+  const summary = { sections: ASSET_ONBOARDING_SECTIONS.length, present: 0 };
+
+  if (!fileExists(root, ASSET_ONBOARDING_PATH)) {
+    return { errors: [`${ASSET_ONBOARDING_PATH} is missing`], warnings, summary };
+  }
+
+  const text = readText(root, ASSET_ONBOARDING_PATH);
+  const missing = missingSections(text, ASSET_ONBOARDING_SECTIONS);
+  summary.present = ASSET_ONBOARDING_SECTIONS.length - missing.length;
+  for (const section of missing) {
+    errors.push(
+      `${ASSET_ONBOARDING_PATH}: required section "${section}" is missing - the onboarding guide must cover issuer proof, review ownership, the registry update path, cache invalidation, and delisting.`,
+    );
+  }
+
+  return { errors, warnings, summary };
+}
+
+/** Every contract check, in the order runCheck reports them. */
+export const CONTRACT_CHECKS = [
+  ["contract drift", checkContractDrift],
+  ["global prefix invariant", checkGlobalPrefixInvariant],
+  ["glossary", checkGlossary],
+  ["soroban error docs", checkSorobanErrorDocs],
+  ["asset onboarding guide", checkAssetOnboardingGuide],
+];

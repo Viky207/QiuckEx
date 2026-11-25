@@ -35,9 +35,7 @@ jobs:
   sync:
     name: Apply label definitions
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      issues: write
+    timeout-minutes: 10
     steps:
       - name: Checkout code
         uses: actions/checkout@v4

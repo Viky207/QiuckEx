@@ -1,4 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
+import {
+  PaymentStatusBadge,
+  normalizePaymentStatus,
+  type PaymentStatus,
+} from './PaymentStatusBadge';
 
 export interface TransactionDetail {
   hash: string;
@@ -12,6 +17,7 @@ export interface TransactionDetail {
   fee: string;
   shielded?: boolean;
   network?: 'testnet' | 'mainnet';
+  status?: PaymentStatus | string;
 }
 
 interface TransactionDetailDrawerProps {
@@ -135,6 +141,7 @@ export default function TransactionDetailDrawer({
   if (!transaction) return null;
 
   const shielded = transaction.shielded === true;
+  const status = normalizePaymentStatus(transaction.status);
 
   return (
     <div className="fixed inset-0 z-50 flex" role="presentation">
@@ -163,6 +170,9 @@ export default function TransactionDetailDrawer({
           </button>
         </div>
 
+        <Row label="Status">
+          <PaymentStatusBadge status={status} />
+        </Row>
         <Row label="Transaction hash">
           <span className="font-mono text-xs">{transaction.hash}</span>
           <CopyButton value={transaction.hash} />

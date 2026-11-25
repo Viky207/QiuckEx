@@ -25,6 +25,117 @@ Decoupled event handling using `@nestjs/event-emitter`.
 | `recurring.payment.executed` | Fired when a recurring payment succeeds | `{ linkId: string, executionId: string, transactionHash: string, periodNumber: number }` |
 | `recurring.payment.failed` | Fired when a recurring payment fails | `{ linkId: string, executionId: string, failureReason: string, retryCount: number, permanent: boolean }` |
 
+### Receipt Reconciliation Events
+
+| Event Name | Description | Payload Schema |
+| :--- | :--- | :--- |
+| `receipt_status_conflict` | Fired when an observation would regress a receipt's canonical status | `{ receiptId: string, txHash: string, currentStatus: string, observedStatus: string, source: string, observedAt: string }` |
+
+## Event Compatibility Contract
+
+Indexer consumers depend on stable event names (topics) and payload shapes across contract changes. The compatibility test suite pins each public state-transition event so that any breaking change fails CI and requires an explicit versioning decision.
+
+### Pinned events
+
+Each public state-transition event is asserted for its topic name, schema version, indexed identifiers, and payload shape:
+
+| Event Name (topic) | Version | Indexed Identifiers | Payload Fields |
+| :--- | :--- | :--- | :--- |
+| `username_claimed` | `1` | `username` | `username`, `publicKey`, `timestamp` |
+| `payment_received` | `1` | `txHash` | `txHash`, `amount`, `sender` |
+| `recurring.link.created` | `1` | `linkId` | `linkId`, `username?`, `destination?` |
+| `recurring.link.updated` | `1` | `linkId` | `linkId`, `changes` |
+| `recurring.link.cancelled` | `1` | `linkId` | `linkId`, `username?`, `destination?` |
+| `recurring.link.paused` | `1` | `linkId` | `linkId`, `username?`, `destination?` |
+| `recurring.link.resumed` | `1` | `linkId` | `linkId`, `username?`, `destination?` |
+| `recurring.link.completed` | `1` | `linkId` | `linkId`, `totalExecuted` |
+| `recurring.payment.due` | `1` | `linkId`, `executionId` | `linkId`, `executionId`, `amount`, `asset`, `periodNumber` |
+| `recurring.payment.executed` | `1` | `linkId`, `executionId` | `linkId`, `executionId`, `transactionHash`, `periodNumber` |
+| `recurring.payment.failed` | `1` | `linkId`, `executionId` | `linkId`, `executionId`, `failureReason`, `retryCount`, `permanent` |
+| `receipt_status_conflict` | `1` | `receiptId`, `txHash` | `receiptId`, `txHash`, `currentStatus`, `observedStatus`, `source`, `observedAt` |
+
+### Compatibility rules
+
+- **Topic stability:** Renaming an event topic is a breaking change. The compatibility test asserts the exact topic string for every pinned event.
+- **Payload stability:** Adding, removing, renaming, or retyping a payload field is a breaking change. The compatibility test asserts the exact field set and types for every pinned event.
+- **Indexed identifiers:** The set of indexed identifiers is part of the public contract; changing it is a breaking change.
+- **Versioning decision:** Any breaking change must bump the event's `version` and be accompanied by an explicit migration note. Until then, the compatibility test fails and blocks the change.
+
+## Receipt Status Transitions
+
+Receipt reconciliation enforces monotonic status transitions at the persistence boundary. A late or duplicated chain event must never overwrite a newer receipt state with an earlier status.
+
+### Canonical status ordering
+
+Statuses are ranked from least to most advanced:
+
+| Rank | Status | Meaning |
+| :--- | :--- | :--- |
+| 0 | `pending` | Receipt observed but not yet confirmed |
+| 1 | `confirmed` | Transaction included in a block |
+| 2 | `finalized` | Transaction reached finality |
+| 3 | `failed` | Terminal failure state |
+
+### Allowed transitions
+
+| From | Allowed To |
+| :--- | :--- |
+| `pending` | `confirmed`, `finalized`, `failed` |
+| `confirmed` | `finalized`, `failed` |
+| `finalized` | *(none — terminal)* |
+| `failed` | *(none — terminal)* |
+
+Any transition not listed above is rejected. In particular, a lower-ranked observation (e.g. `confirmed` arriving after `finalized`) is never applied to the canonical receipt state.
+
+### Out-of-order and duplicate events
+
+- **Out-of-order events:** When an observation's status ranks lower than the receipt's current canonical status, the canonical state is left unchanged and the observation is recorded as conflict evidence (see below). A `receipt_status_conflict` event is emitted for downstream consumers.
+- **Duplicate events:** An observation whose status equals the current canonical status is idempotent — no state change, no conflict record, and no event. Re-delivery of the same chain event is therefore safe.
+- **Forward transitions:** Observations that advance the status along an allowed transition update the canonical state and are recorded as normal reconciliation history.
+
+### Conflict evidence
+
+Rejected observations are retained rather than dropped, so operators can audit late or duplicated chain events.
+
+Table: `receipt_status_conflicts`
+
+| Field | Type | Description |
+| :--- | :--- | :--- |
+| `id` | uuid | Primary key |
+| `receiptId` | string | Receipt whose canonical state was protected |
+| `txHash` | string | Transaction hash of the conflicting observation |
+| `currentStatus` | string | Canonical status at the time of the observation |
+| `observedStatus` | string | Status carried by the rejected observation |
+| `source` | string | Origin of the observation (e.g. `chain-listener`, `reconciler`) |
+| `observedAt` | timestamp | When the observation was produced |
+| `createdAt` | timestamp | When the conflict was recorded |
+
+Each recorded conflict also emits a `receipt_status_conflict` event with the same identifying fields so that alerting and dashboards can react without polling the table.
+
+## Multi-Step Escrow Event Ordering
+
+Some escrow operations perform more than one state update in a single call (for example, releasing funds and then marking the escrow settled). Indexers may infer lifecycle order from the emitted events, so the following contract is guaranteed.
+
+### Ordering guarantees
+
+- **Committed state only:** An event is emitted only after the state change it describes has been committed. Events never describe state that was rolled back.
+- **Stable ordering:** For a given operation, events are emitted in a fixed, documented order. The order is deterministic across retries and does not depend on handler registration order.
+- **No partial sequences on failure:** If any step of a multi-step operation fails, the operation is rolled back and **no** lifecycle events from that operation are emitted. Consumers never observe a prefix of a lifecycle sequence for a failed operation.
+
+### Multi-event operations
+
+| Operation | Emitted events (in order) |
+| :--- | :--- |
+| Escrow release | `escrow.released` → `escrow.settled` |
+| Escrow refund | `escrow.refunded` → `escrow.settled` |
+| Escrow dispute resolution | `escrow.disputed` → `escrow.resolved` → `escrow.settled` |
+
+### Payload consistency
+
+- Every event in a multi-step sequence carries the same `escrowId` and `operationId` so consumers can correlate the sequence.
+- Payloads reflect the committed state at the time of emission; a later event in the sequence reflects the state after all preceding steps have been applied.
+- Events are emitted at most once per committed operation; retries of a failed operation emit a fresh, complete sequence only after the retry commits.
+
 ## How to add new handlers
 1. Inject `NotificationService` (or create a new service).
 2. Use the `@OnEvent('event_name', { async: true })` decorator.

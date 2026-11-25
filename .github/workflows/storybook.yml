@@ -23,30 +23,40 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: app/frontend
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.0
+          run_install: false
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - run: npm install --no-audit --no-fund
-      - run: npm run build-storybook
+          cache: pnpm
+          cache-dependency-path: |
+            pnpm-lock.yaml
+            app/frontend/package.json
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run build-storybook
       - uses: actions/upload-pages-artifact@v3
         if: github.event_name != 'pull_request'
         with:
           path: app/frontend/storybook-static
+      - name: Summarize failure
+        if: failure()
+        run: |
+          echo "### :x: Storybook build failed" >> "$GITHUB_STEP_SUMMARY"
+          echo "See the failed step above for details." >> "$GITHUB_STEP_SUMMARY"
 
   deploy:
     if: github.event_name != 'pull_request'
     needs: build
     runs-on: ubuntu-latest
-    permissions:
-      pages: write
-      id-token: write
+    timeout-minutes: 10
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

@@ -34,8 +34,12 @@ export class PaymentLinkController {
   @ApiQuery({ name: "amount", description: "Payment amount", example: 100 })
   @ApiQuery({
     name: "asset",
-    description: "Asset code (default: XLM)",
-    example: "XLM",
+    description:
+      "Asset identity (default: native XLM). Accepts a canonical identifier of the form " +
+      "`network:type:code:issuer` (e.g. `public:credit_alphanum4:USDC:GA5Z...`). " +
+      "A bare code such as `XLM` is treated as the native asset; a bare non-native code " +
+      "is resolved only when unambiguous, otherwise the request is rejected.",
+    example: "public:native:XLM:",
     required: false,
   })
   @ApiQuery({
@@ -46,8 +50,11 @@ export class PaymentLinkController {
   })
   @ApiQuery({
     name: "acceptedAssets",
-    description: "Comma-separated list of accepted assets",
-    example: "XLM,USDC",
+    description:
+      "Comma-separated list of accepted asset identities. Each entry uses the same " +
+      "canonical `network:type:code:issuer` form as `asset`; bare codes are accepted " +
+      "only for the native asset. Duplicate codes from distinct issuers are kept distinct.",
+    example: "public:native:XLM:,public:credit_alphanum4:USDC:GA5Z...",
     required: false,
   })
   @ApiResponse({
@@ -80,13 +87,16 @@ export class PaymentLinkController {
     }
 
     const acceptedAssetsArray = acceptedAssets
-      ? acceptedAssets.split(",").map((a) => a.trim())
+      ? acceptedAssets
+          .split(",")
+          .map((a) => a.trim())
+          .filter((a) => a.length > 0)
       : undefined;
 
     return this.paymentLinkService.getPaymentLinkStatus({
       username,
       amount: amountNum,
-      asset: asset || "XLM",
+      asset: asset && asset.trim().length > 0 ? asset.trim() : "XLM",
       memo,
       acceptedAssets: acceptedAssetsArray,
     });

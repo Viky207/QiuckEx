@@ -3,10 +3,29 @@ import { Injectable } from '@nestjs/common';
 /**
  * Service responsible for redacting sensitive information from logs and crash reports.
  * Ensures no secrets, keys, or PII are included in captured data.
+ *
+ * The rules below are the executable counterpart of the field-level privacy and
+ * retention inventory (see `docs/privacy/field-inventory.md`). Every field
+ * category the inventory marks as "redact before logging" must have a matching
+ * rule here, and any field the inventory flags as "unknown / needs review" must
+ * be treated as sensitive until reviewed rather than assumed absent.
+ *
+ * Inventory categories covered by this service:
+ * - Stellar keys: public keys (`G...`) and signing material (`S...`) -> redacted.
+ * - Credentials: bearer tokens, JWTs, API keys, secrets, passwords -> redacted.
+ * - Personal data: email addresses, IP addresses (v4/v6), phone numbers,
+ *   payment card numbers -> redacted.
+ * - Infrastructure: authorization headers, database connection strings,
+ *   environment variable values -> redacted.
+ *
+ * When adding a new field category to the inventory, add the corresponding
+ * pattern here and extend `redaction.service.spec.ts` with a positive case and
+ * a boundary case (e.g. value that must NOT be redacted).
  */
 @Injectable()
 export class RedactionService {
-  // Patterns for sensitive data that should be redacted
+  // Patterns for sensitive data that should be redacted.
+  // Order matters: more specific patterns must precede broader ones.
   private readonly sensitivePatterns = [
     // Stellar keys
     { pattern: /G[A-Z0-9]{55}/gi, replacement: '[REDACTED_PUBLIC_KEY]' },
@@ -69,7 +88,14 @@ export class RedactionService {
   }
 
   /**
-   * Redact sensitive information from an object
+   * Redact sensitive information from an object.
+   *
+   * Keys matching the inventory's sensitive-key list (credentials, signing
+   * material, auth headers) are replaced wholesale with `[REDACTED]`; all other
+   * values are recursively redacted with {@link redact}. Unknown keys are still
+   * passed through `redact` so that unrecognized-but-sensitive values are not
+   * assumed safe.
+   *
    * @param obj - The object to redact
    * @returns A new object with redacted values
    */
@@ -94,7 +120,7 @@ export class RedactionService {
       const redacted: Record<string, unknown> = {};
       
       for (const [key, value] of Object.entries(obj)) {
-        // Redact known sensitive keys entirely
+        // Redact known sensitive keys entirely (see field inventory).
         const lowerKey = key.toLowerCase();
         if (
           lowerKey.includes('password') ||
@@ -106,6 +132,7 @@ export class RedactionService {
         ) {
           redacted[key] = '[REDACTED]';
         } else {
+          // Unknown keys are not assumed safe: values are still pattern-redacted.
           redacted[key] = this.redactObject(value);
         }
       }
@@ -117,7 +144,12 @@ export class RedactionService {
   }
 
   /**
-   * Redact sensitive information from an error object
+   * Redact sensitive information from an error object.
+   *
+   * Error names are preserved for diagnostics; messages and stack traces are
+   * redacted because they frequently embed request data (emails, tokens, keys)
+   * that the inventory classifies as sensitive.
+   *
    * @param error - The error to redact
    * @returns A redacted error representation
    */
@@ -130,7 +162,12 @@ export class RedactionService {
   }
 
   /**
-   * Redact sensitive information from log lines
+   * Redact sensitive information from log lines.
+   *
+   * Applied to every captured log line before it leaves the process so that
+   * retained telemetry matches the retention and deletion behavior documented
+   * in the field inventory.
+   *
    * @param logLines - Array of log lines
    * @returns Array of redacted log lines
    */

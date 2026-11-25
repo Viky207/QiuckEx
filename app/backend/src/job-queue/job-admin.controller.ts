@@ -14,6 +14,7 @@ import {
   Param,
   Query,
   Body,
+  Headers,
   UseGuards,
   ParseIntPipe,
   HttpCode,
@@ -21,12 +22,14 @@ import {
   NotFoundException,
   BadRequestException,
 } from '@nestjs/common';
+import { createHash } from 'crypto';
 import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth } from '@nestjs/swagger';
 import { JobQueueService } from './job-queue.service';
 import { JobRepository, JobFilters } from './job.repository';
 import { JobReplayRepository } from './job-replay.repository';
 import { JobType, JobStatus, Job } from './types';
 import { DerivedRecordRepairPayload } from './types';
+import { JobStatusProjection } from './job-status.projection';
 import { ApiKeyGuard } from '../auth/guards/api-key.guard';
 import { RequireScopes } from '../auth/decorators/require-scopes.decorator';
 
@@ -40,6 +43,59 @@ export class BulkRetryRequestDto {
 
 export class DerivedRecordRepairRequestDto implements DerivedRecordRepairPayload {
   transactionHashes!: string[];
+}
+
+/**
+ * Response for idempotent job-starting admin actions.
+ *
+ * `deduplicated` is true when an active run with the same scoped
+ * idempotency key already existed and was returned instead of starting
+ * a duplicate run.
+ */
+export interface IdempotentJobResponse {
+  jobId: string;
+  status: string;
+  deduplicated: boolean;
+}
+
+/**
+ * Build a scoped idempotency key for an admin job-starting action.
+ *
+ * The key is derived from the operation, the affected resource, and a
+ * stable hash of the request parameters so that:
+ * - identical requests map to the same key (deduplicated), and
+ * - requests with different parameters map to different keys (not conflated).
+ *
+ * When the caller supplies an `Idempotency-Key` header it is included in the
+ * scope so distinct operator intents remain distinguishable.
+ */
+export function buildScopedIdempotencyKey(
+  operation: string,
+  resource: string,
+  params: unknown,
+  headerKey?: string,
+): string {
+  const paramHash = createHash('sha256')
+    .update(stableStringify(params))
+    .digest('hex');
+  const scope = headerKey ? `hdr:${headerKey}` : 'nohdr';
+  return `admin:${operation}:${resource}:${scope}:${paramHash}`;
+}
+
+/**
+ * Deterministically serialize a value for hashing (sorted object keys).
+ */
+function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== 'object') {
+    return JSON.stringify(value) ?? 'undefined';
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map(stableStringify).join(',')}]`;
+  }
+  const entries = Object.keys(value as Record<string, unknown>)
+    .sort()
+    .map((k) => `${JSON.stringify(k)}:${stableStringify((value as Record<string, unknown>)[k])}`);
+  return `{${entries.join(',')}}`;
 }
 
 /**
@@ -91,13 +147,29 @@ export class JobAdminController {
   @RequireScopes('admin')
   @HttpCode(HttpStatus.ACCEPTED)
   @ApiOperation({ summary: 'Queue repair of derived transaction and receipt records' })
-  @ApiResponse({ status: 202, description: 'Repair job queued' })
-  async repairDerivedRecords(@Body() body: DerivedRecordRepairRequestDto) {
-    const jobId = await this.jobQueueService.enqueue(
+  @ApiResponse({ status: 202, description: 'Repair job queued or existing active run returned' })
+  async repairDerivedRecords(
+    @Body() body: DerivedRecordRepairRequestDto,
+    @Headers('idempotency-key') idempotencyKey?: string,
+  ): Promise<IdempotentJobResponse> {
+    const idempotencyKeyScoped = buildScopedIdempotencyKey(
+      'repair-derived-records',
+      'derived-records',
+      body,
+      idempotencyKey,
+    );
+
+    const result = await this.jobQueueService.enqueue(
       JobType.DERIVED_RECORD_REPAIR,
       body,
+      { idempotencyKey: idempotencyKeyScoped },
     );
-    return { jobId, status: 'queued' };
+
+    return {
+      jobId: result.jobId,
+      status: result.deduplicated ? 'existing' : 'queued',
+      deduplicated: result.deduplicated,
+    };
   }
 
   /**
@@ -155,6 +227,30 @@ export class JobAdminController {
     }
 
     return job;
+  }
+
+  /**
+   * Get safe retry status for a specific job
+   * 
+   * Returns an operator-facing projection containing only non-sensitive
+   * triage metadata: attempts, next retry time, stable failure code, and
+   * correlation ID. The job payload and any credentials are never included.
+   * 
+   * **Validates: Requirement 5.2 (safe status view)**
+   */
+  @Get(':id/status')
+  @RequireScopes('admin')
+  @ApiOperation({ summary: 'Get safe retry status for a job' })
+  @ApiResponse({ status: 200, description: 'Safe job status projection' })
+  @ApiResponse({ status: 404, description: 'Job not found' })
+  async getJobStatus(@Param('id') id: string): Promise<JobStatusProjection> {
+    const job = await this.jobQueueService.getJob(id);
+
+    if (!job) {
+      throw new NotFoundException(`Job not found: ${id}`);
+    }
+
+    return JobStatusProjection.fromJob(job);
   }
 
   /**
@@ -259,7 +355,10 @@ export class JobAdminController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Bulk retry jobs by type' })
   @ApiResponse({ status: 200, description: 'Bulk retry completed' })
-  async bulkRetry(@Body() request: BulkRetryRequestDto): Promise<BulkRetryResponse & { replayLogIds: string[] }> {
+  async bulkRetry(
+    @Body() request: BulkRetryRequestDto,
+    @Headers('idempotency-key') idempotencyKey?: string,
+  ): Promise<BulkRetryResponse & { replayLogIds: string[]; deduplicated: boolean }> {
     const filters: JobFilters = {
       type: request.type,
       status: request.status || JobStatus.FAILED,
@@ -270,11 +369,20 @@ export class JobAdminController {
 
     const retriedJobIds: string[] = [];
     const replayLogIds: string[] = [];
+    let deduplicated = false;
 
     for (const job of jobs) {
       // Only retry failed jobs (DLQ)
       if (job.status === JobStatus.FAILED) {
-        // Create replay log before updating job status
+        // Scope the idempotency key per job so a replayed bulk request
+        // does not create duplicate replay logs for the same job.
+        const jobIdempotencyKey = buildScopedIdempotencyKey(
+          'bulk-retry',
+          job.id,
+          { type: request.type, status: filters.status },
+          idempotencyKey,
+        );
+
         const replayLog = await this.jobReplayRepository.createReplayLog({
           jobId: job.id,
           jobType: job.type,
@@ -282,11 +390,16 @@ export class JobAdminController {
           previousAttempts: job.attempts,
           reason: 'Bulk replay triggered by operator',
           triggeredBy: 'api',
+          idempotencyKey: jobIdempotencyKey,
         });
 
-        if (replayLog) {
-          replayLogIds.push(replayLog.id);
+        if (!replayLog) {
+          // An active replay for this job already exists; skip duplicate work.
+          deduplicated = true;
+          continue;
         }
+
+        replayLogIds.push(replayLog.id);
 
         await this.jobRepository.updateJobStatus(job.id, JobStatus.PENDING, {
           failureReason: null,
@@ -300,6 +413,7 @@ export class JobAdminController {
       retriedCount: retriedJobIds.length,
       jobIds: retriedJobIds,
       replayLogIds,
+      deduplicated,
     };
   }
 

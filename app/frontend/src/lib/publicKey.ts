@@ -3,6 +3,7 @@
  * Used by analytics and activity feed hooks to resolve the user's
  * Stellar public key from localStorage or environment variables.
  */
+import { cacheInvalidator } from './cacheInvalidation';
 
 const DEFAULT_PUBLIC_KEY =
   "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
@@ -42,4 +43,35 @@ export function resolvePublicKey(): string {
   if (authenticatedPublicKey) return authenticatedPublicKey;
 
   return DEFAULT_PUBLIC_KEY;
+}
+
+/** Alias for `resolvePublicKey`, named for call sites that care this is the "currently active" account. */
+export const getActivePublicKey = resolvePublicKey;
+
+/**
+ * Switch the active wallet account and notify every account-scoped query/cache
+ * so they invalidate and refetch under the new key instead of showing stale rows.
+ */
+export function setActivePublicKey(publicKey: string): void {
+  const trimmed = publicKey.trim();
+  if (!PUBLIC_KEY_REGEX.test(trimmed)) {
+    throw new Error("setActivePublicKey requires a valid Stellar public key.");
+  }
+
+  if (typeof window !== "undefined") {
+    window.localStorage.setItem(PUBLIC_KEY_STORAGE_CANDIDATES[0], trimmed);
+  }
+
+  cacheInvalidator.invalidate("account_switched", { publicKey: trimmed });
+}
+
+/** Subscribe to active-account changes; returns an unsubscribe function. */
+export function subscribeToActivePublicKey(
+  listener: (publicKey: string) => void,
+): () => void {
+  return cacheInvalidator.subscribe((event) => {
+    if (event.type === "account_switched" && event.payload?.publicKey) {
+      listener(event.payload.publicKey);
+    }
+  });
 }

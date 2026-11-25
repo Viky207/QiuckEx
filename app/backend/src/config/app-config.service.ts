@@ -362,6 +362,33 @@ export class AppConfigService {
   }
 
   /**
+   * Days to retain terminal (completed/failed/cancelled) background job records
+   * before they become eligible for cleanup. Active jobs are never pruned.
+   */
+  get jobRetentionDays(): number {
+    return this.configService.get("JOB_RETENTION_DAYS", { infer: true });
+  }
+
+  /**
+   * Maximum number of terminal job records deleted per cleanup page/batch.
+   * Bounds the work performed by a single retention cleanup pass.
+   */
+  get jobRetentionCleanupBatchSize(): number {
+    return this.configService.get("JOB_RETENTION_CLEANUP_BATCH_SIZE", {
+      infer: true,
+    });
+  }
+
+  /**
+   * Maximum serialized size (bytes) of a webhook event payload. Events whose
+   * serialized form exceeds this bound are rejected before enqueue rather than
+   * being partially sent.
+   */
+  get webhookMaxPayloadBytes(): number {
+    return this.configService.get("WEBHOOK_MAX_PAYLOAD_BYTES", { infer: true });
+  }
+
+  /**
    * Abuse score threshold for flagging as suspicious (0-100)
    */
   get abuseSignalScoreThreshold(): number {
