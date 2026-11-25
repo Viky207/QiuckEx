@@ -1,11 +1,12 @@
 "use client";
 
-import { Suspense, useEffect, useMemo, useState, useCallback } from "react";
+import { Suspense, useEffect, useMemo, useRef, useState, useCallback } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import AnalyticsDashboard from "@/components/AnalyticsDashboard";
 import { NetworkBadge } from "@/components/NetworkBadge";
-import { fetchAnalytics, type AnalyticsData } from "@/hooks/analyticsApi";
+import { fetchAnalytics, clearAnalyticsCache, type AnalyticsData } from "@/hooks/analyticsApi";
+import { getActivePublicKey, subscribeToActivePublicKey } from "@/lib/publicKey";
 import {
   fetchUserBids,
   fetchUserListings,
@@ -16,6 +17,8 @@ import {
 import {
   appendUniqueActivityItems,
   fetchActivityFeed,
+  loadActivityFeedCursor,
+  saveActivityFeedCursor,
   type ActivityFeedResponse,
 } from "@/hooks/activityFeedApi";
 import {
@@ -69,24 +72,55 @@ function DashboardContent() {
   const [feedRetryCount, setFeedRetryCount] = useState(0);
   const [wizardOpen, setWizardOpen] = useState(false);
 
+  const [activePublicKey, setActivePublicKey] = useState(() => getActivePublicKey());
+  const activePublicKeyRef = useRef(activePublicKey);
+  activePublicKeyRef.current = activePublicKey;
+
+  // Switching accounts must drop any rows fetched for the previous key immediately,
+  // and any response already in flight for that previous key must be ignored once
+  // it resolves rather than overwriting the newly active account's view.
+  useEffect(() => {
+    return subscribeToActivePublicKey((nextPublicKey) => {
+      if (nextPublicKey === activePublicKeyRef.current) {
+        return;
+      }
+      clearAnalyticsCache();
+      setData(null);
+      setUserBids([]);
+      setUserListings([]);
+      setMetricsData(null);
+      setActivePublicKey(nextPublicKey);
+    });
+  }, []);
+
   const refreshActivity = useCallback(async () => {
+    const forPublicKey = activePublicKeyRef.current;
     setLoading(true);
     setError(null);
     try {
-      const refreshed = await fetchActivityFeed(20);
+      const refreshed = await fetchActivityFeed(20, undefined, forPublicKey);
+      if (activePublicKeyRef.current !== forPublicKey) {
+        return;
+      }
       setData((current) =>
         refreshed.degraded && current
           ? { ...current, degraded: true, error: refreshed.error }
           : refreshed,
       );
     } catch (err: unknown) {
+      if (activePublicKeyRef.current !== forPublicKey) {
+        return;
+      }
       setError(err instanceof Error ? err.message : "Activity could not be loaded.");
     } finally {
-      setLoading(false);
+      if (activePublicKeyRef.current === forPublicKey) {
+        setLoading(false);
+      }
     }
   }, []);
 
   const [metricsData, setMetricsData] = useState<AnalyticsData | null>(null);
+  const [metricsFreshness, setMetricsFreshness] = useState<AnalyticsFreshness | null>(null);
   const [metricsLoading, setMetricsLoading] = useState(true);
   const [metricsError, setMetricsError] = useState<string | null>(null);
   const [activityFilters, setActivityFilters] = useState<ActivityFilterState>({
@@ -96,27 +130,46 @@ function DashboardContent() {
   });
 
   const loadMetrics = useCallback(async () => {
+    const forPublicKey = activePublicKeyRef.current;
     setMetricsLoading(true);
     setMetricsError(null);
     try {
-      const data = await fetchAnalytics("30d");
+      const data = await fetchAnalytics("30d", forPublicKey);
+      if (activePublicKeyRef.current !== forPublicKey) {
+        return;
+      }
       setMetricsData(data);
+      setMetricsFreshness(getAnalyticsFreshness("30d") ?? null);
     } catch (err: unknown) {
+      if (activePublicKeyRef.current !== forPublicKey) {
+        return;
+      }
       const message = err instanceof Error ? err.message : "Failed to load backend metrics";
       setMetricsError(message);
     } finally {
-      setMetricsLoading(false);
+      if (activePublicKeyRef.current === forPublicKey) {
+        setMetricsLoading(false);
+      }
     }
   }, []);
 
   useEffect(() => {
     void loadMetrics();
-  }, [loadMetrics]);
+  }, [loadMetrics, activePublicKey]);
 
   useEffect(() => {
+    const forPublicKey = activePublicKeyRef.current;
     void refreshActivity();
-    void fetchUserBids().then(setUserBids);
-    void fetchUserListings().then(setUserListings);
+    void fetchUserBids(forPublicKey).then((bids) => {
+      if (activePublicKeyRef.current === forPublicKey) {
+        setUserBids(bids);
+      }
+    });
+    void fetchUserListings(forPublicKey).then((listings) => {
+      if (activePublicKeyRef.current === forPublicKey) {
+        setUserListings(listings);
+      }
+    });
 
     const unsubscribe = cacheInvalidator.subscribe((event) => {
       if (
@@ -125,11 +178,11 @@ function DashboardContent() {
         event.type === "activity_feed_cleared"
       ) {
         void refreshActivity();
-        void loadMetrics();
+        void loadMetrics({ forceRefresh: true });
       }
     });
     return () => unsubscribe();
-  }, [feedRetryCount, loadMetrics, refreshActivity]);
+  }, [feedRetryCount, loadMetrics, refreshActivity, activePublicKey]);
 
   useEffect(() => {
     if (!statusMessage) {
@@ -237,16 +290,26 @@ function DashboardContent() {
   const handleLoadMore = async () => {
     if (!data?.nextCursor || loadingMore) return;
     const previousData = data;
+    const forPublicKey = activePublicKeyRef.current;
     setLoadingMore(true);
     try {
-      const nextPage = await fetchActivityFeed(20, previousData.nextCursor);
+      const nextPage = await fetchActivityFeed(20, previousData.nextCursor, forPublicKey);
+      if (activePublicKeyRef.current !== forPublicKey) {
+        return;
+      }
       setData({
         ...nextPage,
         items: appendUniqueActivityItems(previousData.items, nextPage.items),
         nextCursor: nextPage.degraded ? previousData.nextCursor : nextPage.nextCursor,
-      });
+      };
+      setData(merged);
+      if (!nextPage.degraded) {
+        saveActivityFeedCursor(merged.nextCursor);
+      }
     } finally {
-      setLoadingMore(false);
+      if (activePublicKeyRef.current === forPublicKey) {
+        setLoadingMore(false);
+      }
     }
   };
 
@@ -435,12 +498,28 @@ function DashboardContent() {
                   <p className="text-4xl font-semibold text-foreground">
                     {formatCurrency(metricsData?.summary.totalVolume ?? 0)}
                   </p>
-                  <span className="rounded-full bg-emerald-400/10 px-2 py-1 text-xs font-semibold text-success">
-                    Live Backend Data
-                  </span>
+                  {metricsFreshness?.failed ? (
+                    <span className="rounded-full bg-danger/10 px-2 py-1 text-xs font-semibold text-danger">
+                      Unavailable
+                    </span>
+                  ) : metricsFreshness?.cached ? (
+                    <span className="rounded-full bg-amber-400/10 px-2 py-1 text-xs font-semibold text-amber-500">
+                      Cached
+                    </span>
+                  ) : (
+                    <span className="rounded-full bg-emerald-400/10 px-2 py-1 text-xs font-semibold text-success">
+                      Live Backend Data
+                    </span>
+                  )}
                 </div>
                 <p className="mt-2 text-xs text-subtle">
                   Avg tx size: {formatCurrency(metricsData?.summary.avgTxSize ?? 0)}
+                  {metricsFreshness ? (
+                    <>
+                      {" "}
+                      · As of {new Date(metricsFreshness.fetchedAt).toLocaleTimeString()}
+                    </>
+                  ) : null}
                 </p>
               </div>
 

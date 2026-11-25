@@ -61,6 +61,7 @@ jobs:
       - name: Install pnpm
         uses: pnpm/action-setup@v4
         with:
+          version: 10.33.0
           run_install: false
 
       - name: Set up Node.js
@@ -111,6 +112,83 @@ jobs:
           # `rc-validate` job: non-zero exit fails the gate.
           pnpm rc:validate "${ARGS[@]}"
 
+      # Deterministic WASM build metadata check (issue #626).
+      #
+      # Toolchain drift can produce different contract binaries without an
+      # obvious source change. This step records the toolchain and build
+      # configuration metadata, attaches it to the built WASM artifact, and
+      # compares the normalized output hash against the committed reference.
+      # A mismatch fails release validation. The generated metadata file is
+      # written under /tmp (never into the repo) so it cannot be silently
+      # committed; the guard below also fails if a stray metadata file appears
+      # in the working tree.
+      - name: Verify deterministic WASM build metadata
+        env:
+          RC_WASM_METADATA_OUT: /tmp/rc-wasm-build-metadata.json
+          RC_WASM_REFERENCE: app/contract/wasm-build-metadata.json
+        run: |
+          set -euo pipefail
+
+          # Guard: generated metadata must never be committed by accident.
+          if git ls-files --error-unmatch "$RC_WASM_METADATA_OUT" >/dev/null 2>&1; then
+            echo "::error::Generated WASM build metadata ($RC_WASM_METADATA_OUT) is tracked in git; it must not be committed."
+            exit 1
+          fi
+
+          # Record toolchain + build configuration metadata.
+          RUSTC_VERSION="$(rustc --version)"
+          CARGO_VERSION="$(cargo --version)"
+          TARGET="wasm32-unknown-unknown"
+          PROFILE="release"
+
+          # Build the contract deterministically.
+          ( cd app/contract && cargo build --target "$TARGET" --profile "$PROFILE" --locked )
+
+          WASM_PATH="$(find app/contract/target/$TARGET/$PROFILE -maxdepth 1 -name '*.wasm' -print -quit)"
+          if [ -z "$WASM_PATH" ] || [ ! -f "$WASM_PATH" ]; then
+            echo "::error::No WASM artifact produced under app/contract/target/$TARGET/$PROFILE"
+            exit 1
+          fi
+
+          # Normalized output hash: hash the WASM bytes only, so the metadata
+          # file itself (which contains the hash) is not part of the input.
+          WASM_SHA256="$(sha256sum "$WASM_PATH" | awk '{print $1}')"
+
+          # Attach metadata to the artifact (written outside the repo).
+          cat > "$RC_WASM_METADATA_OUT" <<EOF
+          {
+            "rustc": "$RUSTC_VERSION",
+            "cargo": "$CARGO_VERSION",
+            "target": "$TARGET",
+            "profile": "$PROFILE",
+            "wasm_sha256": "$WASM_SHA256"
+          }
+          EOF
+
+          echo "WASM build metadata written to $RC_WASM_METADATA_OUT"
+          cat "$RC_WASM_METADATA_OUT"
+
+          # Compare against the committed reference hash. A mismatch means the
+          # toolchain or build configuration drifted and must fail the gate.
+          if [ ! -f "$RC_WASM_REFERENCE" ]; then
+            echo "::error::Missing WASM build metadata reference: $RC_WASM_REFERENCE"
+            exit 1
+          fi
+
+          EXPECTED_SHA256="$(grep -o '"wasm_sha256"[[:space:]]*:[[:space:]]*"[0-9a-f]*"' "$RC_WASM_REFERENCE" | grep -o '[0-9a-f]\{64\}' | head -n1)"
+          if [ -z "$EXPECTED_SHA256" ]; then
+            echo "::error::Could not read wasm_sha256 from $RC_WASM_REFERENCE"
+            exit 1
+          fi
+
+          if [ "$WASM_SHA256" != "$EXPECTED_SHA256" ]; then
+            echo "::error::WASM hash mismatch: expected $EXPECTED_SHA256, got $WASM_SHA256"
+            echo "Toolchain or build configuration drifted; release validation failed."
+            exit 1
+          fi
+
+          echo "WASM hash matches reference: $WASM_SHA256"
+
       # The compatibility gate is a hard promotion blocker: a candidate with
       # breaking API changes must never be promoted. It runs after the main
       # gate so a failing compatibility check is reported separately from the
@@ -130,8 +208,14 @@ jobs:
           name: rc-validation-${{ github.run_id }}
           path: |
             /tmp/rc-*.log
-          retention-days: 14
+          retention-days: 90
           if-no-files-found: ignore
+
+      - name: Summarize failure
+        if: failure()
+        run: |
+          echo "### :x: Release candidate validation failed" >> "$GITHUB_STEP_SUMMARY"
+          echo "See the gate report artifact and https://github.com/${{ github.repository }}/blob/main/docs/DEPLOYMENT-RUNBOOK.md" >> "$GITHUB_STEP_SUMMARY"
 
   load-test:
     name: Payment-link load test (k6)
@@ -153,6 +237,7 @@ jobs:
 
       - name: Run payment-link creation load test
         if: env.BASE_URL != ''
+        timeout-minutes: 10
         run: k6 run --summary-export=k6-summary.json app/backend/test/load/payment-link-creation.js
 
       - name: Upload k6 summary
@@ -162,3 +247,9 @@ jobs:
           name: k6-summary-${{ github.run_id }}
           path: k6-summary.json
           if-no-files-found: ignore
+
+      - name: Summarize failure
+        if: failure()
+        run: |
+          echo "### :x: Payment-link load test failed" >> "$GITHUB_STEP_SUMMARY"
+          echo "A k6 threshold (p95 < 500ms, error rate < 1%) was breached, or the job timed out." >> "$GITHUB_STEP_SUMMARY"

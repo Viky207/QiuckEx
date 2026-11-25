@@ -14,6 +14,7 @@ jobs:
   test:
     name: Test Suite
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: app/contract
@@ -22,20 +23,22 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
       - name: Install pnpm
         uses: pnpm/action-setup@v4
         with:
           version: 10.33.0
           run_install: false
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
       - name: Install root dependencies
         working-directory: .
-        run: pnpm install --no-frozen-lockfile
+        run: pnpm install --frozen-lockfile
 
       - name: Check cross-network contract metadata drift
         working-directory: .
@@ -63,6 +66,11 @@ jobs:
         env:
           QUICKEX_BENCH_ARTIFACT_DIR: target/quickex-budget-report
 
+      - name: Enforce contract budget regression for worst-case inputs
+        run: cargo test -p quickex bench_worst_case_budget -- --nocapture
+        env:
+          QUICKEX_BENCH_ARTIFACT_DIR: target/quickex-budget-report
+
       - name: Upload contract budget report
         if: always()
         uses: actions/upload-artifact@v4
@@ -70,9 +78,16 @@ jobs:
           name: quickex-contract-budget-report
           path: app/contract/target/quickex-budget-report/
           if-no-files-found: ignore
+          retention-days: 7
 
       - name: Run tests
         run: cargo test
+
+      - name: Summarize failure
+        if: failure()
+        run: |
+          echo "### :x: Contract test suite failed" >> "$GITHUB_STEP_SUMMARY"
+          echo "See the failed step above for details." >> "$GITHUB_STEP_SUMMARY"
 
   upgrade-regression:
     name: Upgrade Regression (Soroban sandbox)
@@ -108,6 +123,7 @@ jobs:
   security:
     name: Supply Chain Security
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: app/contract
@@ -142,10 +158,86 @@ jobs:
       - name: Run cargo-audit (vulnerability database)
         run: cargo audit
 
+      - name: Summarize failure
+        if: failure()
+        run: |
+          echo "### :x: Supply chain security job failed" >> "$GITHUB_STEP_SUMMARY"
+          echo "A cargo-deny or cargo-audit finding is blocking the gate." >> "$GITHUB_STEP_SUMMARY"
+
+  # Builds the contract WASM twice, in two independent clean steps, and
+  # compares the sha256 of the raw release artifact. The release profile
+  # (codegen-units = 1, no debug info, symbols stripped, no embedded
+  # timestamps) is already deterministic, so no extra normalization of the
+  # artifact is needed before hashing — see app/contract/Cargo.toml.
+  wasm-reproducibility:
+    name: Verify WASM Reproducibility
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: app/contract
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: wasm32v1-none
+
+      - name: Print toolchain versions
+        run: |
+          rustc --version
+          cargo --version
+
+      - name: Build #1 (clean)
+        run: |
+          cargo clean
+          cargo build --target wasm32v1-none --release
+
+      - name: Hash build #1
+        id: build1
+        run: |
+          sha=$(sha256sum target/wasm32v1-none/release/quickex.wasm | awk '{print $1}')
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Build #1 SHA-256: $sha"
+
+      - name: Build #2 (independent clean build)
+        run: |
+          cargo clean
+          cargo build --target wasm32v1-none --release
+
+      - name: Hash build #2 and compare
+        run: |
+          sha2=$(sha256sum target/wasm32v1-none/release/quickex.wasm | awk '{print $1}')
+          sha1="${{ steps.build1.outputs.sha }}"
+          echo "Build #1 SHA-256: $sha1"
+          echo "Build #2 SHA-256: $sha2"
+          rustc --version
+          cargo --version
+          if [ "$sha1" != "$sha2" ]; then
+            echo "::error::Contract WASM is not reproducible: build #1 ($sha1) != build #2 ($sha2)"
+            {
+              echo "### :x: WASM reproducibility mismatch"
+              echo ""
+              echo "| build | sha256 |"
+              echo "|---|---|"
+              echo "| #1 | \`$sha1\` |"
+              echo "| #2 | \`$sha2\` |"
+              echo ""
+              echo "Toolchain: $(rustc --version), $(cargo --version)"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          echo "WASM build is reproducible: $sha1"
+
   mainnet-gate:
     name: Mainnet Deployment Gate
     runs-on: ubuntu-latest
-    needs: [ test, security, upgrade-regression ]
+    timeout-minutes: 15
+    needs: [ test, security, upgrade-regression, wasm-reproducibility ]
     defaults:
       run:
         working-directory: app/contract
@@ -178,9 +270,16 @@ jobs:
         working-directory: .
         run: bash app/contract/scripts/mainnet-gate.sh
 
+      - name: Summarize failure
+        if: failure()
+        run: |
+          echo "### :x: Mainnet deployment gate failed" >> "$GITHUB_STEP_SUMMARY"
+          echo "See https://github.com/${{ github.repository }}/blob/main/docs/DEPLOYMENT-RUNBOOK.md" >> "$GITHUB_STEP_SUMMARY"
+
   deploy:
     name: Deploy
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     needs: [ mainnet-gate ]
     if: github.ref == 'refs/heads/main'
     defaults:

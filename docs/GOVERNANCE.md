@@ -21,6 +21,7 @@ Companion maps: [CAPABILITY-MAP.md](./CAPABILITY-MAP.md) (what is actually built
 | [adr/README.md](./adr/README.md) + `adr/NNNN-*.md` | Irreversible protocol and custody decisions | `adr/README.md` index | `--only adr` |
 | [policies/DEPENDENCY-PROVENANCE-POLICY.md](./policies/DEPENDENCY-PROVENANCE-POLICY.md) | Where dependency code may come from, lockfile integrity, manifest ↔ lockfile agreement | `pnpm-lock.yaml` | `node scripts/deps/check.mjs --only provenance` / `--only lockfile` |
 | [policies/DEPENDENCY-LICENSE-POLICY.md](./policies/DEPENDENCY-LICENSE-POLICY.md) | Permitted dependency licences, deny list, review list, recorded exceptions | [policies/data/dependency-license-policy.json](./policies/data/dependency-license-policy.json) | `node scripts/deps/check.mjs --only license` |
+| [policies/RELEASE-ARTIFACT-RETENTION.md](./policies/RELEASE-ARTIFACT-RETENTION.md) | Ephemeral-vs-release artifact classes, retention windows by CI workflow | — | `retention-days` on each `.github/workflows/*.yml` `actions/upload-artifact` step |
 | [security.md](./security.md), [../RELEASE_READINESS_CHECKLIST.md](../RELEASE_READINESS_CHECKLIST.md) | Secret handling, release gating | `.secrets.baseline` | CI secret scanning |
 
 Machine-readable files are the **canonical** form; the prose documents explain them, and the backend mirrors them in

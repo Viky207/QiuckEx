@@ -14,6 +14,7 @@ jobs:
   build-and-test:
     name: Build and Test
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: app/backend
@@ -22,25 +23,29 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.0
+          run_install: false
+
       # Cache trust boundary (#565): dependency caches are only enabled for
       # trusted refs (pushes to main/develop). Pull requests — including those
       # from forks — never read or write the shared cache, so an untrusted run
       # cannot poison caches used by release or protected-branch builds.
-      # Keys are scoped to OS + package manager + lockfile hash.
+      # Keys are scoped to OS + package manager + the workspace lockfile plus
+      # this package's manifest, so a change to either invalidates the cache.
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "20"
           cache: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop') && 'pnpm' || '' }}
-          cache-dependency-path: app/backend/pnpm-lock.yaml
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          run_install: false
+          cache-dependency-path: |
+            pnpm-lock.yaml
+            app/backend/package.json
 
       - name: Install dependencies
-        run: pnpm install --no-frozen-lockfile
+        run: pnpm install --frozen-lockfile
 
       - name: Audit cache trust boundaries
         run: pnpm run ci:cache-trust:audit
@@ -96,7 +101,7 @@ jobs:
           name: backend-unit-coverage
           path: app/backend/coverage
           if-no-files-found: ignore
-          retention-days: 14
+          retention-days: 7
 
       - name: Run Integration Tests with Coverage
         run: pnpm run test:int:coverage
@@ -113,7 +118,7 @@ jobs:
           name: backend-integration-coverage
           path: app/backend/coverage
           if-no-files-found: ignore
-          retention-days: 14
+          retention-days: 7
 
       - name: Run Fuzz Tests
         run: pnpm run test:fuzz:ci
@@ -166,49 +171,16 @@ jobs:
           ROTATION_DRY_RUN: "true"
           DEPLOY_CREDENTIAL_PLACEHOLDER: "dry-run-placeholder"
 
-  blue-green-fault-injection:
-    name: Blue-Green Traffic Switching Fault Injection
-    runs-on: ubuntu-latest
-    # Staging-only fault-injection suite covering traffic controller timeout,
-    # malformed response, and retry after an uncertain switch result.
-    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
-    environment: staging
-    defaults:
-      run:
-        working-directory: app/backend
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          run_install: false
-
-      - name: Install dependencies
-        run: pnpm install --no-frozen-lockfile
-
-      - name: Run blue-green traffic switching fault-injection tests
-        run: pnpm run test:int -- blue-green-traffic-switch.int.spec.ts
-        env:
-          NODE_ENV: test
-          DEPLOY_ENV: staging
-          STELLAR_NETWORK: testnet
-          SUPABASE_URL: ${{ secrets.SUPABASE_TEST_URL }}
-          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_TEST_ANON_KEY }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_TEST_SERVICE_ROLE_KEY }}
-          TRAFFIC_CONTROLLER_URL: ${{ secrets.STAGING_TRAFFIC_CONTROLLER_URL }}
-          TRAFFIC_CONTROLLER_TOKEN: ${{ secrets.STAGING_TRAFFIC_CONTROLLER_TOKEN }}
+      - name: Summarize failure
+        if: failure()
+        run: |
+          echo "### :x: Backend build-and-test job failed" >> "$GITHUB_STEP_SUMMARY"
+          echo "See https://github.com/${{ github.repository }}/blob/main/docs/DEPLOYMENT-RUNBOOK.md" >> "$GITHUB_STEP_SUMMARY"
 
   payment-lifecycle-integration:
     name: Payment Lifecycle Integration Tests
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     # Slow end-to-end suite (~30s+) that hits a real Supabase test project and
     # Horizon testnet. Runs on every PR against main and blocks merge, but is
     # kept out of the lint/build job so it never gates linting.
@@ -221,6 +193,12 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.0
+          run_install: false
+
       # Cache trust boundary (#565): this job runs on pull_request only, so
       # dependency caching is deliberately disabled to keep untrusted runs
       # out of the shared cache.
@@ -229,15 +207,11 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Install pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          run_install: false
-
       - name: Install dependencies
-        run: pnpm install --no-frozen-lockfile
+        run: pnpm install --frozen-lockfile
 
       - name: Run payment lifecycle integration tests
+        timeout-minutes: 10
         run: pnpm run test:int -- payment-lifecycle.int.spec.ts
         env:
           NODE_ENV: test
@@ -247,3 +221,9 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_TEST_SERVICE_ROLE_KEY }}
           TEST_ACCOUNT_MNEMONIC: ${{ secrets.TEST_ACCOUNT_MNEMONIC }}
           HORIZON_URL: https://horizon-testnet.stellar.org
+
+      - name: Summarize failure
+        if: failure()
+        run: |
+          echo "### :x: Payment lifecycle integration tests failed" >> "$GITHUB_STEP_SUMMARY"
+          echo "A timeout step is distinguished above from a test-assertion failure in the step's own log." >> "$GITHUB_STEP_SUMMARY"

@@ -24,7 +24,26 @@ export const PATHS = {
   mobileConfig: "app/mobile/app.config.ts",
   accessibilityGuide: "docs/ACCESSIBILITY-TESTING-GUIDE.md",
   glossary: "docs/GLOSSARY.md",
+  troubleshootingGuide: "docs/API-TROUBLESHOOTING-GUIDE.md",
+  privacyFieldInventory: "docs/PRIVACY-FIELD-INVENTORY.md",
 };
+
+/**
+ * Required `##` sections for the webhook consumer quickstart.
+ *
+ * The quickstart must cover endpoint setup, signature verification (including
+ * a negative example), idempotent processing, retry behavior, and a local test
+ * event. Section identifiers are matched by leading number via
+ * `missingSections`, so renumbering does not break the gate.
+ */
+export const WEBHOOK_QUICKSTART_SECTIONS = [
+  "Endpoint setup",
+  "Signature verification",
+  "Negative example",
+  "Idempotent processing",
+  "Retry behavior",
+  "Local test event",
+];
 
 export function fromRoot(root, relative) {
   return join(root, relative);
@@ -70,6 +89,68 @@ export function listControllerFiles(root, dir = PATHS.controllers) {
 
 export function unique(values) {
   return [...new Set(values)];
+}
+
+/**
+ * Extract fenced code blocks from a markdown document.
+ *
+ * Returns blocks in document order with the fence info string (e.g. "json"),
+ * the 1-based line number of the opening fence, and the raw body. An unclosed
+ * fence is reported via `problems` rather than thrown so the gate can list
+ * every issue at once.
+ *
+ * @returns {{ blocks: Array<{info: string, line: number, body: string}>, problems: string[] }}
+ */
+export function fencedBlocks(markdown) {
+  const blocks = [];
+  const problems = [];
+  const lines = markdown.split("\n");
+
+  let open = null;
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const fence = line.match(/^\s*(`{3,}|~{3,})\s*(.*?)\s*$/);
+    if (!fence) {
+      if (open) open.body.push(line);
+      continue;
+    }
+    if (!open) {
+      open = { marker: fence[1][0], info: fence[2], line: index + 1, body: [] };
+      continue;
+    }
+    if (fence[1][0] === open.marker) {
+      blocks.push({ info: open.info, line: open.line, body: open.body.join("\n") });
+      open = null;
+    } else {
+      open.body.push(line);
+    }
+  }
+  if (open) problems.push(`Unclosed code fence opened at line ${open.line}.`);
+
+  return { blocks, problems };
+}
+
+/**
+ * Parse every fenced JSON example in a markdown document.
+ *
+ * A block is treated as JSON when its info string is `json` (optionally with
+ * extra attributes). Blocks that fail to parse are reported via `problems`
+ * with their line number instead of aborting the whole check.
+ *
+ * @returns {{ examples: Array<{line: number, value: unknown}>, problems: string[] }}
+ */
+export function jsonExamples(markdown) {
+  const { blocks, problems } = fencedBlocks(markdown);
+  const examples = [];
+  for (const block of blocks) {
+    if (!/^json\b/i.test(block.info)) continue;
+    try {
+      examples.push({ line: block.line, value: JSON.parse(block.body) });
+    } catch (error) {
+      problems.push(`Invalid JSON example at line ${block.line}: ${error.message}`);
+    }
+  }
+  return { examples, problems };
 }
 
 /** Every `##` heading in a markdown document, in order. */

@@ -182,42 +182,42 @@ function validateImageProvenance(provenance, options) {
   return { digest, sourceRepo: provenance.source_repo };
 }
 
-function validateDeployFreeze(freeze, options) {
-  const { now = Date.now(), requireOverride = false } = options;
-  if (freeze === undefined || freeze === null) {
-    if (requireOverride) throw new Error('Deploy freeze state is required when an override is claimed');
-    return;
+function validateReleaseManifest(manifest, options) {
+  const { imageDigest, wasmHash, commit } = options;
+  if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) {
+    throw new Error('Release manifest is required');
   }
-  if (typeof freeze !== 'object' || Array.isArray(freeze)) {
-    throw new Error('Deploy freeze state must be an object');
+  if (manifest.version !== 1) throw new Error('Release manifest must be version 1');
+  if (!/^[a-f0-9]{40}$/i.test(manifest.commit ?? '') || manifest.commit !== commit) {
+    throw new Error('Release manifest commit does not match the checked-out commit');
   }
-  if (typeof freeze.frozen !== 'boolean') throw new Error('Deploy freeze state must declare a boolean frozen flag');
-  if (!freeze.frozen) {
-    if (freeze.override !== undefined && freeze.override !== null) {
-      throw new Error('Deploy freeze override must not be present when the environment is not frozen');
+  if (!Array.isArray(manifest.artifacts) || manifest.artifacts.length === 0) {
+    throw new Error('Release manifest must list at least one artifact');
+  }
+  const digest = normalizeDigest(imageDigest);
+  const expectedWasm = String(wasmHash ?? '').toLowerCase();
+  const seen = new Set();
+  let matchedImage = false;
+  let matchedWasm = false;
+  for (const artifact of manifest.artifacts) {
+    if (!artifact || typeof artifact !== 'object') throw new Error('Release manifest artifacts must be objects');
+    const name = String(artifact.name ?? '');
+    if (!name) throw new Error('Release manifest artifacts must have a name');
+    if (seen.has(name)) throw new Error(`Duplicate release manifest artifact: ${name}`);
+    seen.add(name);
+    if (artifact.commit !== commit) {
+      throw new Error(`Release manifest artifact ${name} commit does not match the checked-out commit`);
     }
-    return;
+    const artifactDigest = normalizeDigest(artifact.digest);
+    if (!/^[a-f0-9]{64}$/.test(artifactDigest)) {
+      throw new Error(`Release manifest artifact ${name} digest must be a sha256 digest`);
+    }
+    if (artifact.type === 'container-image' && artifactDigest === digest) matchedImage = true;
+    if (artifact.type === 'wasm' && artifactDigest === expectedWasm) matchedWasm = true;
   }
-  const override = freeze.override;
-  if (override === undefined || override === null) {
-    throw new Error('Production promotion is blocked by an active deploy freeze');
-  }
-  if (typeof override !== 'object' || Array.isArray(override)) {
-    throw new Error('Deploy freeze override must be an object');
-  }
-  if (typeof override.actor !== 'string' || override.actor.trim() === '') {
-    throw new Error('Deploy freeze override must record the authorizing actor');
-  }
-  if (typeof override.reason !== 'string' || override.reason.trim() === '') {
-    throw new Error('Deploy freeze override must record a reason');
-  }
-  const overrideAt = Date.parse(override.timestamp);
-  if (!Number.isFinite(overrideAt) || overrideAt > now) {
-    throw new Error('Deploy freeze override must record a valid timestamp that is not in the future');
-  }
-  if (override.approved !== true) {
-    throw new Error('Deploy freeze override must be explicitly approved');
-  }
+  if (!matchedImage) throw new Error('Release manifest does not contain the deployed image digest');
+  if (!matchedWasm) throw new Error('Release manifest does not contain the deployed WASM hash');
+  return { commit, artifacts: manifest.artifacts.length };
 }
 
 function readReviewerKeys() {
@@ -251,7 +251,7 @@ function sha256(filePath) {
 
 function main() {
   const args = parseArgs(process.argv.slice(2));
-  for (const required of ['gate', 'testnet-manifest', 'audit-report', 'wasm', 'image-digest', 'image-signature', 'image-provenance', 'expected-source-repo']) {
+  for (const required of ['gate', 'testnet-manifest', 'audit-report', 'wasm', 'image-digest', 'image-signature', 'image-provenance', 'expected-source-repo', 'release-manifest']) {
     if (!args[required]) throw new Error(`--${required} is required`);
   }
   const gate = JSON.parse(fs.readFileSync(args.gate, 'utf8'));
@@ -279,13 +279,14 @@ function main() {
     commit,
     expectedSourceRepo: args['expected-source-repo'],
   });
+  const releaseManifest = JSON.parse(fs.readFileSync(args['release-manifest'], 'utf8'));
+  const manifestResult = validateReleaseManifest(releaseManifest, {
+    imageDigest: args['image-digest'],
+    wasmHash,
+    commit,
+  });
   console.log(`Image verification: digest=sha256:${signatureResult.digest} signer=${signatureResult.signer} source=${provenanceResult.sourceRepo} result=verified`);
-  const freeze = args['deploy-freeze'] ? JSON.parse(fs.readFileSync(args['deploy-freeze'], 'utf8')) : undefined;
-  validateDeployFreeze(freeze, { requireOverride: Boolean(args['deploy-freeze']) });
-  if (freeze?.frozen) {
-    console.log(`Mainnet deployment gate approved for ${commit} (WASM SHA-256 ${wasmHash}) under logged deploy freeze override by ${freeze.override.actor}.`);
-    return;
-  }
+  console.log(`Release manifest verified: commit=${manifestResult.commit} artifacts=${manifestResult.artifacts}`);
   console.log(`Mainnet deployment gate approved for ${commit} (WASM SHA-256 ${wasmHash}).`);
 }
 
@@ -303,6 +304,7 @@ module.exports = {
   validateGate,
   validateImageSignature,
   validateImageProvenance,
+  validateReleaseManifest,
   normalizeDigest,
   validateDeployFreeze,
 };

@@ -10,31 +10,50 @@ jobs:
   backend:
     name: Backend
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     defaults:
       run:
-        working-directory: backend
+        working-directory: app/backend
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.0
+          run_install: false
 
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: npm
-          cache-dependency-path: backend/package-lock.json
+          cache: pnpm
+          cache-dependency-path: |
+            pnpm-lock.yaml
+            app/backend/package.json
+
+      - name: Install dependencies
+        working-directory: .
+        run: pnpm install --frozen-lockfile
 
       - name: Verify contract metadata and deployment gates
-        if: matrix.package == '@quickex/backend'
+        working-directory: .
         run: |
           pnpm check:contract-metadata-drift
           node --test scripts/check-contract-metadata-drift.test.js scripts/verify-mainnet-deployment-gate.test.js scripts/rollback-migration.test.js
 
       - name: Lint
-        run: npm run lint
+        run: pnpm run lint
 
       - name: Unit tests with coverage
-        run: npm run test:unit -- --coverage
+        run: pnpm run test:unit -- --coverage
+
+      - name: Summarize failure
+        if: failure()
+        run: |
+          echo "### :x: Backend job failed" >> "$GITHUB_STEP_SUMMARY"
+          echo "See the failed step above for details." >> "$GITHUB_STEP_SUMMARY"
 
   # ── Database migration smoke test (issue #440) ──────────────────────────
   # Spins up a fresh temporary Supabase test schema, applies all migrations in
@@ -43,6 +62,7 @@ jobs:
   migration-smoke-test:
     name: Migration Smoke Test
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -94,6 +114,12 @@ jobs:
           node app/backend/scripts/verify-migrations.js
           node --test scripts/rollback-migration.test.js
 
+      - name: Summarize failure
+        if: failure()
+        run: |
+          echo "### :x: Migration smoke test failed" >> "$GITHUB_STEP_SUMMARY"
+          echo "See https://github.com/${{ github.repository }}/blob/main/docs/MIGRATION-RUNBOOK.md" >> "$GITHUB_STEP_SUMMARY"
+
   # -- Documentation gate (issue #295) ---------------------------------------
   # Validates that docs/openapi.json, the contract map, and the mobile env docs
   # still describe the API the repository implements. Static only, so it needs
@@ -101,6 +127,7 @@ jobs:
   docs-gate:
     name: Documentation Gate
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -115,30 +142,47 @@ jobs:
   frontend:
     name: Frontend
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
-        working-directory: frontend
+        working-directory: app/frontend
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.0
+          run_install: false
 
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
+          cache: pnpm
+          cache-dependency-path: |
+            pnpm-lock.yaml
+            app/frontend/package.json
 
       - name: Install dependencies
-        run: npm ci
+        working-directory: .
+        run: pnpm install --frozen-lockfile
 
       - name: Lint
-        run: npm run lint
+        run: pnpm run lint
+
+      - name: Summarize failure
+        if: failure()
+        run: |
+          echo "### :x: Frontend job failed" >> "$GITHUB_STEP_SUMMARY"
+          echo "See the failed step above for details." >> "$GITHUB_STEP_SUMMARY"
 
   # ── Secret scanning (lightweight check in main CI) ──────────────────────
   secret-scan:
     name: Secret Scan
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -187,7 +231,8 @@ jobs:
   scorecard:
     name: Release Quality Scorecard
     runs-on: ubuntu-latest
-    needs: [validate, migration-smoke-test, secret-scan]
+    timeout-minutes: 10
+    needs: [backend, migration-smoke-test, secret-scan]
     if: always()
     steps:
       - name: Checkout Code
@@ -209,3 +254,7 @@ jobs:
           path: |
             release-scorecard.md
             release-scorecard.json
+          # PR runs are ephemeral feedback; main-branch runs are release
+          # evidence and need to survive for the audit period. See
+          # docs/policies/RELEASE-ARTIFACT-RETENTION.md.
+          retention-days: ${{ github.event_name == 'pull_request' && 7 || 90 }}

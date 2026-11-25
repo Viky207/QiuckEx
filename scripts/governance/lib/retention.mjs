@@ -28,6 +28,26 @@ export const RETENTION_DOC_SECTIONS = [
   "9. References",
 ];
 
+export const FIELD_INVENTORY_DOC_SECTIONS = [
+  "1. Purpose",
+  "2. Field inventory",
+  "3. Unknown fields",
+  "4. Deletion behavior",
+  "5. References",
+];
+
+export const FIELD_CATEGORIES = ["profile", "payment", "telemetry", "operational"];
+export const FIELD_DELETION_BEHAVIORS = [
+  "hard_delete",
+  "pseudonymize",
+  "redact",
+  "aggregate_only",
+  "not_deletable",
+  "device_local",
+];
+export const UNKNOWN_FIELD_STATUSES = ["unknown", "under_review", "confirmed_absent"];
+=======
+
 export const DAY_MS = 24 * 60 * 60 * 1000;
 export const INDEFINITE = -1;
 
@@ -41,6 +61,14 @@ export function categoryIds(schedule) {
 
 export function findCategory(schedule, id) {
   return (schedule.categories ?? []).find((category) => category.id === id) ?? null;
+}
+
+export function fieldIds(inventory) {
+  return (inventory.fields ?? []).map((field) => field.id);
+}
+
+export function findField(inventory, id) {
+  return (inventory.fields ?? []).find((field) => field.id === id) ?? null;
 }
 
 function validateShapeAndSla(schedule, errors) {
@@ -194,6 +222,119 @@ function validateDocAndMirror(schedule, { docContent, mirrorContent = "" }, erro
   }
 }
 
+function validateFieldInventoryShape(inventory, errors) {
+  if (inventory.schemaVersion !== 1) {
+    errors.push(`field-inventory.json: unsupported schemaVersion ${inventory.schemaVersion}`);
+  }
+  if (!inventory.inventoryId || !inventory.inventoryVersion) {
+    errors.push("field-inventory.json: inventoryId and inventoryVersion are required");
+  }
+  const fields = inventory.fields ?? [];
+  if (fields.length === 0) {
+    errors.push("field-inventory.json: fields must not be empty");
+  }
+  for (const dupe of duplicates(fields.map((field) => field.id))) {
+    errors.push(`field-inventory.json: duplicate field id "${dupe}"`);
+  }
+  for (const field of fields) {
+    if (!FIELD_CATEGORIES.includes(field.category)) {
+      errors.push(
+        `field-inventory.json: field "${field.id}" has invalid category "${field.category}"`,
+      );
+    }
+    if (!field.purpose) {
+      errors.push(`field-inventory.json: field "${field.id}" must state its purpose`);
+    }
+    if (!field.storage) {
+      errors.push(`field-inventory.json: field "${field.id}" must name its storage`);
+    }
+    if (!FIELD_DELETION_BEHAVIORS.includes(field.deletionBehavior)) {
+      errors.push(
+        `field-inventory.json: field "${field.id}" has invalid deletionBehavior "${field.deletionBehavior}"`,
+      );
+    }
+    if (![true, false, "possible"].includes(field.containsPersonalData)) {
+      errors.push(
+        `field-inventory.json: field "${field.id}" containsPersonalData must be true/false/"possible"`,
+      );
+    }
+  }
+}
+
+/**
+ * Cross-check the field inventory against the canonical retention schedule.
+ *
+ * Fields that reference a retention category must point at a real category and
+ * agree with its deletion method. Fields with no known category are flagged for
+ * review (never silently assumed absent) unless explicitly marked
+ * `confirmed_absent`.
+ */
+export function validateFieldInventory(inventory, schedule, { docContent = "" } = {}) {
+  const errors = [];
+  const warnings = [];
+  validateFieldInventoryShape(inventory, errors);
+
+  const categories = schedule?.categories ?? [];
+  const categoryById = new Map(categories.map((category) => [category.id, category]));
+  const referenced = new Set();
+
+  for (const field of inventory.fields ?? []) {
+    const categoryId = field.retentionCategory;
+    if (categoryId) {
+      const category = categoryById.get(categoryId);
+      if (!category) {
+        errors.push(
+          `field-inventory.json: field "${field.id}" references unknown retention category "${categoryId}"`,
+        );
+      } else {
+        referenced.add(categoryId);
+        if (field.deletionBehavior !== category.method) {
+          errors.push(
+            `field-inventory.json: field "${field.id}" deletionBehavior "${field.deletionBehavior}" disagrees with category "${categoryId}" method "${category.method}"`,
+          );
+        }
+      }
+    } else {
+      const status = field.unknownStatus;
+      if (!UNKNOWN_FIELD_STATUSES.includes(status)) {
+        warnings.push(
+          `field-inventory.json: field "${field.id}" has no retentionCategory and is not flagged for review (unknownStatus)`,
+        );
+      } else if (status === "unknown" || status === "under_review") {
+        warnings.push(
+          `field-inventory.json: field "${field.id}" is flagged for review (${status})`,
+        );
+      }
+    }
+  }
+
+  for (const category of categories) {
+    if (!referenced.has(category.id)) {
+      warnings.push(
+        `field-inventory.json: retention category "${category.id}" has no mapped field`,
+      );
+    }
+  }
+
+  if (!docContent) {
+    errors.push(`${PATHS.fieldInventoryDoc}: document is missing`);
+  } else {
+    for (const section of missingSections(docContent, FIELD_INVENTORY_DOC_SECTIONS)) {
+      errors.push(`${PATHS.fieldInventoryDoc}: missing required section "${section}"`);
+    }
+    const tokens = [
+      ...fieldIds(inventory),
+      ...FIELD_CATEGORIES,
+      ...FIELD_DELETION_BEHAVIORS,
+    ];
+    for (const token of missingMentions(docContent, tokens)) {
+      errors.push(`${PATHS.fieldInventoryDoc}: does not document "${token}"`);
+    }
+  }
+
+  return { errors, warnings };
+}
+
 export function validateRetentionSchedule(schedule, context = {}) {
   const errors = [];
   const warnings = [];
@@ -220,6 +361,20 @@ export function checkRetentionSchedule(root) {
   }
   const result = validateRetentionSchedule(schedule, { docContent, mirrorContent });
   return { ...result, schedule };
+}
+
+/** Load + validate the field inventory against the retention schedule from disk. */
+export function checkFieldInventory(root) {
+  const inventory = readJson(root, PATHS.fieldInventory);
+  const schedule = readJson(root, PATHS.retentionSchedule);
+  let docContent = "";
+  try {
+    docContent = readText(root, PATHS.fieldInventoryDoc);
+  } catch {
+    docContent = "";
+  }
+  const result = validateFieldInventory(inventory, schedule, { docContent });
+  return { ...result, inventory, schedule };
 }
 
 // ── Planning (pure) ──────────────────────────────────────────────────────────

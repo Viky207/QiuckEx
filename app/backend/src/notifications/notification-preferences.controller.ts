@@ -12,6 +12,8 @@ import {
   Optional,
   Req,
   UnauthorizedException,
+  BadRequestException,
+  ForbiddenException,
 } from "@nestjs/common";
 import { EventEmitter2 } from "@nestjs/event-emitter";
 import { ApiTags, ApiOperation, ApiResponse, ApiParam } from "@nestjs/swagger";
@@ -23,6 +25,21 @@ import {
   NotificationPreferenceResponseDto,
 } from "./dto/notification-preferences.dto";
 import type { NotificationChannel } from "./types/notification.types";
+
+/** Supported notification channels. */
+const SUPPORTED_CHANNELS: readonly NotificationChannel[] = [
+  "email",
+  "telegram",
+  "push",
+  "webhook",
+];
+
+/** Supported notification frequency options. */
+const SUPPORTED_FREQUENCIES: readonly string[] = [
+  "instant",
+  "daily",
+  "weekly",
+];
 
 /**
  * REST API for managing per-wallet notification preferences.
@@ -56,11 +73,13 @@ export class NotificationPreferencesController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: "Update notification preferences for the current user" })
   @ApiResponse({ status: 200, type: [NotificationPreferenceResponseDto] })
+  @ApiResponse({ status: 400, description: "Invalid channel or frequency value" })
   async updateCurrentPreferences(
     @Req() request: { user?: { publicKey?: string } },
     @Body() dto: UpdateNotificationPreferencesDto,
   ): Promise<NotificationPreferenceResponseDto[]> {
     const publicKey = this.publicKeyFrom(request);
+    this.validatePreferences(dto.preferences);
     const preferences = await this.prefsRepo.updatePreferences(
       publicKey,
       dto.preferences.map((preference) => ({
@@ -105,10 +124,17 @@ export class NotificationPreferencesController {
   })
   @ApiParam({ name: "publicKey", description: "Stellar public key (G...)" })
   @ApiResponse({ status: 200, type: NotificationPreferenceResponseDto })
+  @ApiResponse({ status: 400, description: "Invalid channel or frequency value" })
+  @ApiResponse({ status: 403, description: "Cannot update another user's preferences" })
   async upsertPreference(
+    @Req() request: { user?: { publicKey?: string } },
     @Param("publicKey") publicKey: string,
     @Body() dto: UpsertNotificationPreferenceDto,
   ): Promise<NotificationPreferenceResponseDto> {
+    this.assertOwnership(request, publicKey);
+    this.validateChannel(dto.channel, "channel");
+    this.validateFrequency((dto as { frequency?: unknown }).frequency, "frequency");
+
     this.logger.log(
       `Upserting ${dto.channel} preference for ${publicKey.slice(0, 8)}...`,
     );
@@ -139,15 +165,100 @@ export class NotificationPreferencesController {
   @ApiParam({ name: "publicKey", description: "Stellar public key (G...)" })
   @ApiParam({ name: "channel", enum: ["email", "telegram", "push", "webhook"] })
   @ApiResponse({ status: 204, description: "Channel disabled" })
+  @ApiResponse({ status: 400, description: "Invalid channel value" })
+  @ApiResponse({ status: 403, description: "Cannot update another user's preferences" })
   async disableChannel(
+    @Req() request: { user?: { publicKey?: string } },
     @Param("publicKey") publicKey: string,
     @Param("channel") channel: NotificationChannel,
   ): Promise<void> {
+    this.assertOwnership(request, publicKey);
+    this.validateChannel(channel, "channel");
+
     this.logger.log(`Disabling ${channel} for ${publicKey.slice(0, 8)}...`);
     await this.prefsRepo.disableChannel(publicKey, channel);
   }
 
   // ---------------------------------------------------------------------------
+
+  private validatePreferences(
+    preferences: Array<{ channel?: unknown; frequency?: unknown }>,
+  ): void {
+    if (!Array.isArray(preferences)) {
+      throw new BadRequestException({
+        message: "Validation failed",
+        errors: [{ field: "preferences", message: "preferences must be an array" }],
+      });
+    }
+    const errors: Array<{ field: string; message: string }> = [];
+    preferences.forEach((preference, index) => {
+      const channelError = this.channelError(preference.channel);
+      if (channelError) {
+        errors.push({ field: `preferences[${index}].channel`, message: channelError });
+      }
+      const frequencyError = this.frequencyError(preference.frequency);
+      if (frequencyError) {
+        errors.push({ field: `preferences[${index}].frequency`, message: frequencyError });
+      }
+    });
+    if (errors.length > 0) {
+      throw new BadRequestException({ message: "Validation failed", errors });
+    }
+  }
+
+  private validateChannel(value: unknown, field: string): void {
+    const error = this.channelError(value);
+    if (error) {
+      throw new BadRequestException({
+        message: "Validation failed",
+        errors: [{ field, message: error }],
+      });
+    }
+  }
+
+  private validateFrequency(value: unknown, field: string): void {
+    const error = this.frequencyError(value);
+    if (error) {
+      throw new BadRequestException({
+        message: "Validation failed",
+        errors: [{ field, message: error }],
+      });
+    }
+  }
+
+  private channelError(value: unknown): string | null {
+    if (value === undefined || value === null) {
+      return "channel is required";
+    }
+    if (!SUPPORTED_CHANNELS.includes(value as NotificationChannel)) {
+      return `unsupported channel; expected one of: ${SUPPORTED_CHANNELS.join(", ")}`;
+    }
+    return null;
+  }
+
+  private frequencyError(value: unknown): string | null {
+    // Frequency is optional; only validate when provided.
+    if (value === undefined || value === null) {
+      return null;
+    }
+    if (typeof value !== "string" || !SUPPORTED_FREQUENCIES.includes(value)) {
+      return `unsupported frequency; expected one of: ${SUPPORTED_FREQUENCIES.join(", ")}`;
+    }
+    return null;
+  }
+
+  private assertOwnership(
+    request: { user?: { publicKey?: string } },
+    publicKey: string,
+  ): void {
+    const authenticated = request.user?.publicKey;
+    if (!authenticated) {
+      throw new UnauthorizedException("Authenticated public key is required");
+    }
+    if (authenticated !== publicKey) {
+      throw new ForbiddenException("Cannot update another user's notification preferences");
+    }
+  }
 
   private toResponse(pref: {
     id: string;
