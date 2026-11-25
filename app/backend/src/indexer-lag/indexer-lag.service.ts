@@ -69,6 +69,11 @@ export class IndexerLagService implements OnModuleInit {
     this.updateMetrics();
   }
 
+  /**
+   * Operator runbook: docs/runbooks/stalled-event-indexer.md
+   * Lag detection, checkpoint inspection, safe restart and dead-letter review.
+   * Destructive checkpoint edits require explicit approval and a backup.
+   */
   getStatus(): IndexerLagStatus {
     let lagLedgers: number | null = null;
     if (

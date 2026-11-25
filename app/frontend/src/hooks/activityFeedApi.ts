@@ -92,6 +92,48 @@ export interface ActivityFeedResponse {
   error?: string;
 }
 
+const CURSOR_STORAGE_PREFIX = "quickex.activityFeedCursor";
+
+function getActivityNetworkId(): string {
+  return process.env.NEXT_PUBLIC_STELLAR_NETWORK?.trim().toLowerCase() || "default";
+}
+
+function activityCursorStorageKey(publicKey: string, network: string): string {
+  return `${CURSOR_STORAGE_PREFIX}:${network}:${publicKey}`;
+}
+
+/**
+ * Persist the furthest-loaded activity feed cursor for the currently
+ * connected account + network, so returning to the dashboard can restore
+ * the feed instead of silently restarting from page one. Scoping the
+ * storage key by account+network means a cursor is only ever reused when
+ * both still match what was active when it was saved.
+ */
+export function saveActivityFeedCursor(cursor: string | undefined): void {
+  if (typeof window === "undefined") return;
+  try {
+    const key = activityCursorStorageKey(resolvePublicKey(), getActivityNetworkId());
+    if (!cursor) {
+      window.localStorage.removeItem(key);
+      return;
+    }
+    window.localStorage.setItem(key, cursor);
+  } catch {
+    // localStorage unavailable (private mode, quota, etc.) — safe to ignore.
+  }
+}
+
+/** Restore the last saved cursor for the currently connected account + network, if any. */
+export function loadActivityFeedCursor(): string | undefined {
+  if (typeof window === "undefined") return undefined;
+  try {
+    const key = activityCursorStorageKey(resolvePublicKey(), getActivityNetworkId());
+    return window.localStorage.getItem(key) ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function appendUniqueActivityItems(
   existing: ActivityFeedItem[],
   incoming: ActivityFeedItem[],
@@ -112,9 +154,9 @@ export function appendUniqueActivityItems(
 export async function fetchActivityFeed(
   limit = 20,
   cursor?: string,
+  publicKey: string = resolvePublicKey(),
 ): Promise<ActivityFeedResponse> {
   try {
-    const publicKey = resolvePublicKey();
     const url = new URL(`${getQuickexApiBase()}/payments/recent`);
     url.searchParams.set("address", publicKey);
     url.searchParams.set("limit", String(limit));

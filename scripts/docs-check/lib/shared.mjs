@@ -22,9 +22,30 @@ export const PATHS = {
   controllers: "app/backend/src",
   mobileReadme: "app/mobile/README.md",
   mobileConfig: "app/mobile/app.config.ts",
+  scorecardGenerator: "scripts/generate-release-scorecard.mjs",
+  scorecardGuide: "docs/RELEASE-SCORECARD-GUIDE.md",
   accessibilityGuide: "docs/ACCESSIBILITY-TESTING-GUIDE.md",
   glossary: "docs/GLOSSARY.md",
+  troubleshootingGuide: "docs/API-TROUBLESHOOTING-GUIDE.md",
+  privacyFieldInventory: "docs/PRIVACY-FIELD-INVENTORY.md",
 };
+
+/**
+ * Required `##` sections for the webhook consumer quickstart.
+ *
+ * The quickstart must cover endpoint setup, signature verification (including
+ * a negative example), idempotent processing, retry behavior, and a local test
+ * event. Section identifiers are matched by leading number via
+ * `missingSections`, so renumbering does not break the gate.
+ */
+export const WEBHOOK_QUICKSTART_SECTIONS = [
+  "Endpoint setup",
+  "Signature verification",
+  "Negative example",
+  "Idempotent processing",
+  "Retry behavior",
+  "Local test event",
+];
 
 export function fromRoot(root, relative) {
   return join(root, relative);
@@ -72,6 +93,68 @@ export function unique(values) {
   return [...new Set(values)];
 }
 
+/**
+ * Extract fenced code blocks from a markdown document.
+ *
+ * Returns blocks in document order with the fence info string (e.g. "json"),
+ * the 1-based line number of the opening fence, and the raw body. An unclosed
+ * fence is reported via `problems` rather than thrown so the gate can list
+ * every issue at once.
+ *
+ * @returns {{ blocks: Array<{info: string, line: number, body: string}>, problems: string[] }}
+ */
+export function fencedBlocks(markdown) {
+  const blocks = [];
+  const problems = [];
+  const lines = markdown.split("\n");
+
+  let open = null;
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const fence = line.match(/^\s*(`{3,}|~{3,})\s*(.*?)\s*$/);
+    if (!fence) {
+      if (open) open.body.push(line);
+      continue;
+    }
+    if (!open) {
+      open = { marker: fence[1][0], info: fence[2], line: index + 1, body: [] };
+      continue;
+    }
+    if (fence[1][0] === open.marker) {
+      blocks.push({ info: open.info, line: open.line, body: open.body.join("\n") });
+      open = null;
+    } else {
+      open.body.push(line);
+    }
+  }
+  if (open) problems.push(`Unclosed code fence opened at line ${open.line}.`);
+
+  return { blocks, problems };
+}
+
+/**
+ * Parse every fenced JSON example in a markdown document.
+ *
+ * A block is treated as JSON when its info string is `json` (optionally with
+ * extra attributes). Blocks that fail to parse are reported via `problems`
+ * with their line number instead of aborting the whole check.
+ *
+ * @returns {{ examples: Array<{line: number, value: unknown}>, problems: string[] }}
+ */
+export function jsonExamples(markdown) {
+  const { blocks, problems } = fencedBlocks(markdown);
+  const examples = [];
+  for (const block of blocks) {
+    if (!/^json\b/i.test(block.info)) continue;
+    try {
+      examples.push({ line: block.line, value: JSON.parse(block.body) });
+    } catch (error) {
+      problems.push(`Invalid JSON example at line ${block.line}: ${error.message}`);
+    }
+  }
+  return { examples, problems };
+}
+
 /** Every `##` heading in a markdown document, in order. */
 export function headings(markdown) {
   return markdown
@@ -92,6 +175,67 @@ export function missingSections(markdown, required) {
         heading.replace(/^[0-9]+\.\s*/, "") === needed.replace(/^[0-9]+\.\s*/, ""),
     );
   });
+}
+
+/**
+ * Field names emitted by the release scorecard generator.
+ *
+ * The generator is parsed as text (never imported) so the docs gate keeps its
+ * zero-execution guarantee. Only `name: "<identifier>"` object literals are
+ * considered, which is how the generator declares every scorecard field.
+ */
+export function scorecardFieldNames(source) {
+  const names = [];
+  const pattern = /\bname:\s*["']([A-Za-z][A-Za-z0-9_]*)["']/g;
+  let match;
+  while ((match = pattern.exec(source)) !== null) names.push(match[1]);
+  return unique(names);
+}
+
+/**
+ * Scorecard fields that are not documented in the guide.
+ *
+ * A field counts as documented when the guide mentions it as inline code
+ * (`` `field` ``) or as a table cell / heading token, so the guide can link
+ * each field to its generating check without a rigid layout.
+ */
+export function undocumentedScorecardFields(guide, fields) {
+  return fields.filter((field) => {
+    const escaped = field.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return !new RegExp(`(^|[^A-Za-z0-9_])${escaped}([^A-Za-z0-9_]|$)`).test(guide);
+  });
+}
+
+/**
+ * Threshold statements the guide must make, expressed as regexes so wording
+ * can evolve while the semantics stay pinned.
+ */
+export const SCORECARD_THRESHOLD_RULES = [
+  {
+    id: "pass-threshold",
+    description: "states the PASS score threshold",
+    pattern: /PASS[\s\S]{0,120}?(?:>=|≥|at least|minimum of)\s*90\b/i,
+  },
+  {
+    id: "warn-threshold",
+    description: "states the WARN score band",
+    pattern: /WARN[\s\S]{0,120}?(?:>=|≥|at least|minimum of)\s*70\b/i,
+  },
+  {
+    id: "blocked-threshold",
+    description: "states the BLOCKED score boundary",
+    pattern: /BLOCKED[\s\S]{0,120}?(?:<|below|under|less than)\s*70\b/i,
+  },
+  {
+    id: "grade-thresholds",
+    description: "states the A/B/C/D grade thresholds",
+    pattern: /grade[\s\S]{0,200}?A[\s\S]{0,40}?90[\s\S]{0,80}?B[\s\S]{0,40}?80[\s\S]{0,80}?C[\s\S]{0,40}?70/i,
+  },
+];
+
+/** Threshold rules the guide does not satisfy. */
+export function missingScorecardThresholds(guide) {
+  return SCORECARD_THRESHOLD_RULES.filter((rule) => !rule.pattern.test(guide));
 }
 
 /**

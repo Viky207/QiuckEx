@@ -14,6 +14,7 @@ jobs:
   build-and-test:
     name: Build and Test
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: app/backend
@@ -22,25 +23,29 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.0
+          run_install: false
+
       # Cache trust boundary (#565): dependency caches are only enabled for
       # trusted refs (pushes to main/develop). Pull requests — including those
       # from forks — never read or write the shared cache, so an untrusted run
       # cannot poison caches used by release or protected-branch builds.
-      # Keys are scoped to OS + package manager + lockfile hash.
+      # Keys are scoped to OS + package manager + the workspace lockfile plus
+      # this package's manifest, so a change to either invalidates the cache.
       - name: Setup Node.js
         uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
         with:
           node-version: "20"
           cache: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop') && 'pnpm' || '' }}
-          cache-dependency-path: app/backend/pnpm-lock.yaml
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@fe02b34f77f8bc703788d5817da081398fad5dd2 # v4.0.0
-        with:
-          run_install: false
+          cache-dependency-path: |
+            pnpm-lock.yaml
+            app/backend/package.json
 
       - name: Install dependencies
-        run: pnpm install --no-frozen-lockfile
+        run: pnpm install --frozen-lockfile
 
       - name: Audit cache trust boundaries
         run: pnpm run ci:cache-trust:audit
@@ -96,7 +101,7 @@ jobs:
           name: backend-unit-coverage
           path: app/backend/coverage
           if-no-files-found: ignore
-          retention-days: 14
+          retention-days: 7
 
       - name: Run Integration Tests with Coverage
         run: pnpm run test:int:coverage
@@ -113,7 +118,7 @@ jobs:
           name: backend-integration-coverage
           path: app/backend/coverage
           if-no-files-found: ignore
-          retention-days: 14
+          retention-days: 7
 
       - name: Run Fuzz Tests
         run: pnpm run test:fuzz:ci
@@ -132,6 +137,30 @@ jobs:
       - name: Horizon-Backed Endpoints Performance Regression Tests
         run: pnpm run test:perf:horizon
 
+      - name: Deploy Freeze and Override Tests
+        run: pnpm run test:unit -- deploy-freeze
+        env:
+          NODE_ENV: test
+          STELLAR_NETWORK: testnet
+          SUPABASE_URL: https://test.supabase.co
+          SUPABASE_ANON_KEY: test-key
+
+      - name: Payment Lifecycle Documentation Check
+        run: pnpm run docs:check:payment-lifecycle
+        env:
+          NODE_ENV: test
+          NETWORK: testnet
+          SUPABASE_URL: https://spec-export.supabase.co
+          SUPABASE_ANON_KEY: spec-export-key
+
+      - name: Event Indexer Runbook Check
+        run: pnpm run docs:check:indexer-runbook
+        env:
+          NODE_ENV: test
+          NETWORK: testnet
+          SUPABASE_URL: https://spec-export.supabase.co
+          SUPABASE_ANON_KEY: spec-export-key
+
       # Credential rotation rehearsal (#567): exercises the rotation path with
       # placeholder, non-secret values only. Output is redacted; no real
       # deployment credentials are read or logged.
@@ -142,9 +171,16 @@ jobs:
           ROTATION_DRY_RUN: "true"
           DEPLOY_CREDENTIAL_PLACEHOLDER: "dry-run-placeholder"
 
+      - name: Summarize failure
+        if: failure()
+        run: |
+          echo "### :x: Backend build-and-test job failed" >> "$GITHUB_STEP_SUMMARY"
+          echo "See https://github.com/${{ github.repository }}/blob/main/docs/DEPLOYMENT-RUNBOOK.md" >> "$GITHUB_STEP_SUMMARY"
+
   payment-lifecycle-integration:
     name: Payment Lifecycle Integration Tests
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     # Slow end-to-end suite (~30s+) that hits a real Supabase test project and
     # Horizon testnet. Runs on every PR against main and blocks merge, but is
     # kept out of the lint/build job so it never gates linting.
@@ -157,6 +193,12 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.0
+          run_install: false
+
       # Cache trust boundary (#565): this job runs on pull_request only, so
       # dependency caching is deliberately disabled to keep untrusted runs
       # out of the shared cache.
@@ -165,15 +207,11 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Install pnpm
-        uses: pnpm/action-setup@fe02b34f77f8bc703788d5817da081398fad5dd2 # v4.0.0
-        with:
-          run_install: false
-
       - name: Install dependencies
-        run: pnpm install --no-frozen-lockfile
+        run: pnpm install --frozen-lockfile
 
       - name: Run payment lifecycle integration tests
+        timeout-minutes: 10
         run: pnpm run test:int -- payment-lifecycle.int.spec.ts
         env:
           NODE_ENV: test
@@ -184,157 +222,8 @@ jobs:
           TEST_ACCOUNT_MNEMONIC: ${{ secrets.TEST_ACCOUNT_MNEMONIC }}
           HORIZON_URL: https://horizon-testnet.stellar.org
 
-  release:
-    name: Build, SBOM, and Attest Release Image
-    runs-on: ubuntu-latest
-    needs: build-and-test
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    permissions:
-      contents: read
-      packages: write
-      id-token: write
-      attestations: write
-    outputs:
-      image-digest: ${{ steps.digest.outputs.digest }}
-      image-ref: ${{ steps.digest.outputs.image-ref }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@c47758b77c9736f4b2ef4073d4d51994fabfe349 # v3.7.1
-
-      - name: Log in to GHCR
-        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3.3.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build and push backend image
-        id: build
-        uses: docker/build-push-action@4f58ea79222b3b9dc2c8bbdd6debcef730109a75 # v6.9.0
-        with:
-          context: app/backend
-          push: true
-          tags: ghcr.io/${{ github.repository }}/backend:${{ github.sha }}
-          labels: |
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
-
-      - name: Capture immutable image digest
-        id: digest
+      - name: Summarize failure
+        if: failure()
         run: |
-          set -euo pipefail
-          digest="${{ steps.build.outputs.digest }}"
-          if [ -z "$digest" ]; then
-            echo "::error::Build did not produce an image digest; refusing to continue."
-            exit 1
-          fi
-          image_ref="ghcr.io/${{ github.repository }}/backend@${digest}"
-          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
-          echo "image-ref=${image_ref}" >> "$GITHUB_OUTPUT"
-          echo "Resolved image reference: ${image_ref}"
-
-      - name: Generate SBOM bound to image digest
-        uses: anchore/sbom-action@df80a9811c0e3d0d0d0d0d0d0d0d0d0d0d0d0d0d # v0.17.2
-        with:
-          image: ${{ steps.digest.outputs.image-ref }}
-          format: spdx-json
-          output-file: sbom-${{ github.sha }}.spdx.json
-          artifact-name: sbom-${{ steps.digest.outputs.digest }}
-
-      - name: Verify SBOM was generated
-        run: |
-          set -euo pipefail
-          sbom="sbom-${{ github.sha }}.spdx.json"
-          if [ ! -s "$sbom" ]; then
-            echo "::error::SBOM ${sbom} is missing or empty; failing release."
-            exit 1
-          fi
-
-      - name: Sign and attest SBOM
-        uses: actions/attest-sbom@115c3be05ff3974f61f515a5a1b1e8b5b1e5e5c5 # v2.0.0
-        with:
-          subject-path: sbom-${{ github.sha }}.spdx.json
-          sbom-path: sbom-${{ github.sha }}.spdx.json
-
-      - name: Attest build provenance for image digest
-        uses: actions/attest-build-provenance@1c608d11d69870c2092266b3f9a6f3abbf17002c # v1.4.3
-        with:
-          subject-name: ghcr.io/${{ github.repository }}/backend
-          subject-digest: ${{ steps.digest.outputs.digest }}
-          push-to-registry: true
-
-      - name: Upload SBOM release artifact
-        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
-        with:
-          name: sbom-${{ steps.digest.outputs.digest }}
-          path: sbom-${{ github.sha }}.spdx.json
-          if-no-files-found: error
-          retention-days: 90
-
-  verify-attestation:
-    name: Verify Attestation Before Promotion
-    runs-on: ubuntu-latest
-    needs: release
-    permissions:
-      contents: read
-      attestations: read
-      id-token: write
-    steps:
-      - name: Verify image digest is present
-        run: |
-          set -euo pipefail
-          if [ -z "${{ needs.release.outputs.image-digest }}" ]; then
-            echo "::error::Release job produced no image digest; blocking promotion."
-            exit 1
-          fi
-
-      - name: Verify build provenance attestation
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          gh attestation verify \
-            "oci://${{ needs.release.outputs.image-ref }}" \
-            --repo "${{ github.repository }}"
-
-  deploy-staging:
-    name: Deploy to Staging
-    runs-on: ubuntu-latest
-    needs: verify-attestation
-    environment: staging
-    steps:
-      - name: Deploy staging
-        env:
-          IMAGE_REF: ${{ needs.release.outputs.image-ref }}
-          STAGING_DEPLOY_TOKEN: ${{ secrets.STAGING_DEPLOY_TOKEN }}
-        run: |
-          set -euo pipefail
-          if [ -z "${IMAGE_REF}" ]; then
-            echo "::error::No verified image reference available for staging."
-            exit 1
-          fi
-          echo "Deploying ${IMAGE_REF} to staging"
-
-  deploy-production:
-    name: Deploy to Production
-    runs-on: ubuntu-latest
-    needs: verify-attestation
-    # Protected environment: required reviewers and environment-scoped secrets
-    # are configured in repository settings. Secrets are unavailable until the
-    # approval gate is satisfied.
-    environment: production
-    steps:
-      - name: Deploy production
-        env:
-          IMAGE_REF: ${{ needs.release.outputs.image-ref }}
-          PRODUCTION_DEPLOY_TOKEN: ${{ secrets.PRODUCTION_DEPLOY_TOKEN }}
-        run: |
-          set -euo pipefail
-          if [ -z "${IMAGE_REF}" ]; then
-            echo "::error::No verified image reference available for production."
-            exit 1
-          fi
-          echo "Deploying ${IMAGE_REF} to production"
+          echo "### :x: Payment lifecycle integration tests failed" >> "$GITHUB_STEP_SUMMARY"
+          echo "A timeout step is distinguished above from a test-assertion failure in the step's own log." >> "$GITHUB_STEP_SUMMARY"

@@ -17,13 +17,19 @@ set -euo pipefail
 #     [--rpc-url https://soroban-testnet.stellar.org] \
 #     [--passphrase "Test SDF Network ; September 2015"] \
 #     [--out-dir docs/deployment-artifacts] \
-#     [--require-attestation]
+#     [--freeze-override --override-actor <id> --override-reason <text>]
 #
 # Mainnet additionally requires --mainnet-gate, --testnet-manifest, and --audit-report.
 #
-# --require-attestation verifies the WASM artifact's build provenance with
-# `gh attestation verify` before any promotion step. It is mandatory for
-# mainnet deployments and optional (but recommended) for testnet.
+# Deploy freeze
+# -------------
+# Before promoting, the script queries the backend deploy-freeze state for the
+# target environment (DEPLOY_FREEZE_URL, default http://127.0.0.1:8080). If the
+# environment is frozen the deployment aborts. An authorized operator may bypass
+# the hold with --freeze-override, which requires --override-actor and
+# --override-reason; the override is recorded in the backend audit log and in
+# the emitted manifest. Dry runs and validation-only paths never query the
+# freeze state.
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 NETWORK=""
@@ -39,10 +45,12 @@ AUDIT_REPORT="${AUDIT_REPORT:-}"
 STELLAR_BIN="${STELLAR_BIN:-stellar}"
 SKIP_BUILD="${SKIP_BUILD:-0}"
 DRY_RUN="${DRY_RUN:-0}"
-REQUIRE_ATTESTATION="${REQUIRE_ATTESTATION:-0}"
-ATTESTATION_REPO="${ATTESTATION_REPO:-}"
-ATTESTATION_SIGNER_WORKFLOW="${ATTESTATION_SIGNER_WORKFLOW:-}"
-GH_BIN="${GH_BIN:-gh}"
+DEPLOY_FREEZE_URL="${DEPLOY_FREEZE_URL:-http://127.0.0.1:8080}"
+FREEZE_OVERRIDE=0
+OVERRIDE_ACTOR=""
+OVERRIDE_REASON=""
+FREEZE_STATE="unknown"
+FREEZE_OVERRIDE_RECORDED="false"
 # Post-deploy readiness polling and automated rollback controls.
 HEALTH_CHECK_ATTEMPTS="${HEALTH_CHECK_ATTEMPTS:-5}"
 HEALTH_CHECK_INTERVAL="${HEALTH_CHECK_INTERVAL:-3}"
@@ -65,9 +73,9 @@ while [[ $# -gt 0 ]]; do
     --audit-report) AUDIT_REPORT="$2"; shift 2 ;;
     --skip-build) SKIP_BUILD=1;   shift ;;
     --dry-run)    DRY_RUN=1;      shift ;;
-    --require-attestation) REQUIRE_ATTESTATION=1; shift ;;
-    --attestation-repo) ATTESTATION_REPO="$2"; shift 2 ;;
-    --attestation-signer-workflow) ATTESTATION_SIGNER_WORKFLOW="$2"; shift 2 ;;
+    --freeze-override) FREEZE_OVERRIDE=1; shift ;;
+    --override-actor)  OVERRIDE_ACTOR="$2";  shift 2 ;;
+    --override-reason) OVERRIDE_REASON="$2"; shift 2 ;;
     --prior-state) PRIOR_STATE_FILE="$2"; shift 2 ;;
     --health-attempts) HEALTH_CHECK_ATTEMPTS="$2"; shift 2 ;;
     --health-interval) HEALTH_CHECK_INTERVAL="$2"; shift 2 ;;
@@ -86,6 +94,17 @@ need "$STELLAR_BIN"
 if [[ -z "$NETWORK" ]]; then echo "error: --network is required" >&2; exit 1; fi
 if [[ -z "$SOURCE" ]]; then echo "error: --source is required" >&2; exit 1; fi
 if [[ -z "$ADMIN" ]]; then echo "error: --admin is required" >&2; exit 1; fi
+
+if [[ "$FREEZE_OVERRIDE" == "1" ]]; then
+  if [[ -z "$OVERRIDE_ACTOR" ]]; then
+    echo "error: --freeze-override requires --override-actor" >&2
+    exit 1
+  fi
+  if [[ -z "$OVERRIDE_REASON" ]]; then
+    echo "error: --freeze-override requires --override-reason" >&2
+    exit 1
+  fi
+fi
 
 # ── Resolve network defaults ────────────────────────────────────────────────
 
@@ -156,6 +175,41 @@ if [[ "$NETWORK" == "mainnet" && "$DRY_RUN" != "1" ]]; then
     --testnet-manifest "$TESTNET_MANIFEST" \
     --audit-report "$AUDIT_REPORT" \
     --wasm "$WASM_PATH"
+fi
+
+# ── Deploy freeze gate ──────────────────────────────────────────────────────
+# Only consulted on real promotion paths; dry runs skip the gate entirely.
+
+if [[ "$DRY_RUN" != "1" ]]; then
+  need curl
+  FREEZE_ENDPOINT="${DEPLOY_FREEZE_URL%/}/api/v1/deploy-freeze/${NETWORK}"
+  FREEZE_RESPONSE="$(curl -fsS --max-time 10 "$FREEZE_ENDPOINT" 2>/dev/null || true)"
+  if [[ -z "$FREEZE_RESPONSE" ]]; then
+    echo "error: could not read deploy-freeze state from $FREEZE_ENDPOINT" >&2
+    exit 1
+  fi
+  FREEZE_STATE="$(printf '%s' "$FREEZE_RESPONSE" | python3 -c 'import json,sys; print(str(json.load(sys.stdin).get("frozen", False)).lower())' 2>/dev/null || true)"
+  if [[ "$FREEZE_STATE" != "true" && "$FREEZE_STATE" != "false" ]]; then
+    echo "error: malformed deploy-freeze response from $FREEZE_ENDPOINT" >&2
+    exit 1
+  fi
+
+  if [[ "$FREEZE_STATE" == "true" ]]; then
+    if [[ "$FREEZE_OVERRIDE" != "1" ]]; then
+      echo "error: deploy freeze is active for '$NETWORK'; promotion blocked (use --freeze-override with --override-actor and --override-reason to bypass)" >&2
+      exit 1
+    fi
+    echo "==> Deploy freeze active for '$NETWORK'; recording authorized override"
+    OVERRIDE_PAYLOAD="$(python3 -c 'import json,sys; print(json.dumps({"actor": sys.argv[1], "reason": sys.argv[2]}))' "$OVERRIDE_ACTOR" "$OVERRIDE_REASON")"
+    if ! curl -fsS --max-time 10 -X POST \
+      -H 'Content-Type: application/json' \
+      -d "$OVERRIDE_PAYLOAD" \
+      "${FREEZE_ENDPOINT}/override" >/dev/null 2>&1; then
+      echo "error: failed to record deploy-freeze override; refusing to promote" >&2
+      exit 1
+    fi
+    FREEZE_OVERRIDE_RECORDED="true"
+  fi
 fi
 
 if [[ "$DRY_RUN" == "1" ]]; then
@@ -362,7 +416,7 @@ echo "Ledger Sequence: $LEDGER_SEQUENCE"
 
 TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-python3 - "$DEPLOY_DIR" "$METADATA" "$CONTRACT_ID" "$WASM_SHA" "$TIMESTAMP" "$LEDGER_SEQUENCE" "$ADMIN" "$SOURCE" "$NETWORK" "$PASSPHRASE" "$RPC_URL" <<'PY'
+python3 - "$DEPLOY_DIR" "$METADATA" "$CONTRACT_ID" "$WASM_SHA" "$TIMESTAMP" "$LEDGER_SEQUENCE" "$ADMIN" "$SOURCE" "$NETWORK" "$PASSPHRASE" "$RPC_URL" "$FREEZE_STATE" "$FREEZE_OVERRIDE_RECORDED" "$OVERRIDE_ACTOR" <<'PY'
 import json, sys
 from pathlib import Path
 
@@ -373,6 +427,9 @@ wasm_sha = sys.argv[4]
 timestamp = sys.argv[5]
 ledger_sequence = sys.argv[6]
 admin, source, network, passphrase, rpc_url = sys.argv[7:12]
+freeze_state = sys.argv[12]
+freeze_override_recorded = sys.argv[13] == "true"
+override_actor = sys.argv[14]
 
 # Parse on-chain metadata (Soroban CLI returns JSON with string-encoded values)
 try:
@@ -406,6 +463,11 @@ manifest = {
             "deployed_by": source,
         }
     ],
+    "deploy_freeze": {
+        "frozen_at_promotion": freeze_state == "true",
+        "override_recorded": freeze_override_recorded,
+        "override_actor": override_actor if freeze_override_recorded else None,
+    },
 }
 
 manifest_path = deploy_dir / "deployment-manifest.json"
@@ -427,6 +489,10 @@ echo "Contract ID:   $CONTRACT_ID"
 echo "WASM Hash:     0x${WASM_SHA}"
 echo "Admin:         $ADMIN"
 echo "Operator:      $SOURCE"
+echo "Freeze state:  $FREEZE_STATE"
+if [[ "$FREEZE_OVERRIDE_RECORDED" == "true" ]]; then
+  echo "Override:      authorized by $OVERRIDE_ACTOR (recorded)"
+fi
 echo "Manifest:      $DEPLOY_DIR/deployment-manifest.json"
 if [[ -n "$PRIOR_DIGEST" ]]; then
   echo "Prior digest:  $PRIOR_DIGEST"

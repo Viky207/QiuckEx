@@ -1,5 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { createHmac } from 'crypto';
+import { createHmac, randomUUID } from 'crypto';
 
 export const WEBHOOK_PAYLOAD_TOO_LARGE = 'WEBHOOK_PAYLOAD_TOO_LARGE';
 
@@ -43,6 +43,7 @@ export class ContractChangeWebhookDispatcher {
     if (!webhooks.length) return results;
 
     const body = JSON.stringify({
+      id: randomUUID(),
       event: 'contract_registry.changed',
       occurredAt: new Date().toISOString(),
       payload,

@@ -94,6 +94,16 @@ disagree, which is exactly the state that would break a frozen-lockfile deploy.
 from the lockfile; `pnpm install` added it. Regenerating the lockfile is the
 only supported repair for drift — never hand-edit `pnpm-lock.yaml`.
 
+**CI install consistency.** Every workflow job that installs JavaScript
+dependencies pins `pnpm/action-setup` to the exact version this repository's
+`package.json#packageManager` declares (`10.33.0`), caches on the root
+`pnpm-lock.yaml` (plus the job's own `package.json` where the job is
+package-scoped), and installs with `pnpm install --frozen-lockfile`. A job
+that used a package-local npm install (bypassing this workspace's single
+committed lockfile) or an unpinned/mismatched pnpm version is a bug in that
+workflow, not an accepted exception — fix the job to match this pattern
+rather than adding a second lockfile.
+
 **Scope and limits.** The gate covers the pnpm workspace. Cargo dependencies
 for `app/contract` are pinned by `app/contract/Cargo.lock` and validated by
 `cargo build --locked`; the gate does not duplicate Cargo's integrity model.

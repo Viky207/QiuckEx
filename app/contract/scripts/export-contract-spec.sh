@@ -41,13 +41,19 @@ trap 'rm -f "$INTERFACE_FILE"' EXIT
 WASM_SHA="$(sha256sum "$WASM_PATH" | awk '{print $1}')"
 CONTRACT_VERSION="$(grep -oE 'pub const CURRENT_CONTRACT_VERSION: u32 = [0-9]+' "$ROOT_DIR/contracts/quickex/src/storage.rs" | grep -oE '[0-9]+$')"
 EVENT_SCHEMA_VERSION="$(grep -oE 'pub const EVENT_SCHEMA_VERSION: u32 = [0-9]+' "$ROOT_DIR/contracts/quickex/src/events.rs" | grep -oE '[0-9]+$')"
+ERRORS_FILE="${ERRORS_FILE:-$ROOT_DIR/contracts/quickex/src/errors.rs}"
+
+if [[ ! -f "$ERRORS_FILE" ]]; then
+  echo "contract errors source not found at $ERRORS_FILE" >&2
+  exit 1
+fi
 
 mkdir -p "$(dirname "$OUT_PATH")"
 
-python3 - "$OUT_PATH" "$CONTRACT_VERSION" "$EVENT_SCHEMA_VERSION" "$WASM_SHA" "$INTERFACE_FILE" <<'PY'
-import json, sys
+python3 - "$OUT_PATH" "$CONTRACT_VERSION" "$EVENT_SCHEMA_VERSION" "$WASM_SHA" "$INTERFACE_FILE" "$ERRORS_FILE" <<'PY'
+import json, re, sys
 
-out_path, contract_version, event_schema_version, wasm_sha, interface_file = sys.argv[1:6]
+out_path, contract_version, event_schema_version, wasm_sha, interface_file, errors_file = sys.argv[1:7]
 
 with open(interface_file) as f:
     interface = json.load(f)
@@ -56,6 +62,16 @@ functions = sorted(
     entry["function_v0"]["name"] for entry in interface if "function_v0" in entry
 )
 
+# Extract the contract error enum so client integrators can map error codes
+# back to stable names. Only explicit `Name = N` variants are collected.
+with open(errors_file) as f:
+    errors_source = f.read()
+
+errors = []
+for match in re.finditer(r'^\s*([A-Z][A-Za-z0-9_]*)\s*=\s*(\d+)\s*,', errors_source, re.MULTILINE):
+    errors.append({"code": int(match.group(2)), "name": match.group(1)})
+errors.sort(key=lambda entry: (entry["code"], entry["name"]))
+
 spec = {
     "kind": "quickex-contract-spec-v1",
     "contract_version": int(contract_version),
@@ -63,6 +79,7 @@ spec = {
     "wasm_sha256": wasm_sha,
     "functions": functions,
     "interface": interface,
+    "errors": errors,
 }
 
 with open(out_path, "w") as f:

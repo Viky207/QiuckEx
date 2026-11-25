@@ -18,6 +18,10 @@ interface Args {
   healthCheckCommand?: string;
   rollbackCommand?: string;
   rollbackVerifyCommand?: string;
+  freezeApiUrl?: string;
+  freezeOverrideToken?: string;
+  freezeOverrideActor?: string;
+  freezeOverrideReason?: string;
 }
 
 function parseArgs(argv: string[]): Args {
@@ -58,7 +62,70 @@ function parseArgs(argv: string[]): Args {
     healthCheckCommand: map.get('health-check-command'),
     rollbackCommand: map.get('rollback-command'),
     rollbackVerifyCommand: map.get('rollback-verify-command'),
+    freezeApiUrl: map.get('freeze-api-url') ?? process.env.QUICKEX_DEPLOY_FREEZE_API_URL,
+    freezeOverrideToken: map.get('freeze-override-token') ?? process.env.QUICKEX_DEPLOY_FREEZE_OVERRIDE_TOKEN,
+    freezeOverrideActor: map.get('freeze-override-actor') ?? process.env.QUICKEX_DEPLOY_FREEZE_OVERRIDE_ACTOR,
+    freezeOverrideReason: map.get('freeze-override-reason') ?? process.env.QUICKEX_DEPLOY_FREEZE_OVERRIDE_REASON,
   };
+}
+
+interface FreezeState {
+  frozen: boolean;
+  reason?: string;
+  updatedAt?: string;
+}
+
+async function fetchFreezeState(apiUrl: string, network: string): Promise<FreezeState> {
+  const url = `${apiUrl.replace(/\/$/, '')}/deploy-freeze?network=${encodeURIComponent(network)}`;
+  const response = await fetch(url, { headers: { Accept: 'application/json' } });
+  if (!response.ok) {
+    throw new Error(`Unable to read deploy-freeze state (status ${response.status})`);
+  }
+  const body = (await response.json()) as Partial<FreezeState>;
+  return { frozen: body.frozen === true, reason: body.reason, updatedAt: body.updatedAt };
+}
+
+async function assertNotFrozen(args: Args): Promise<void> {
+  if (!args.freezeApiUrl) {
+    if (args.network === 'mainnet' && !args.dryRun) {
+      throw new Error('Mainnet promotion requires --freeze-api-url (or QUICKEX_DEPLOY_FREEZE_API_URL) to verify deploy-freeze state');
+    }
+    return;
+  }
+
+  const state = await fetchFreezeState(args.freezeApiUrl, args.network);
+  if (!state.frozen) return;
+
+  if (!args.freezeOverrideToken) {
+    throw new Error(
+      `Deploy freeze is active for ${args.network}${state.reason ? ` (${state.reason})` : ''}; promotion aborted. ` +
+        'Clear the hold or supply --freeze-override-token with --freeze-override-actor and --freeze-override-reason.',
+    );
+  }
+  if (!args.freezeOverrideActor || !args.freezeOverrideReason) {
+    throw new Error('Deploy-freeze override requires --freeze-override-actor and --freeze-override-reason');
+  }
+
+  const overrideUrl = `${args.freezeApiUrl.replace(/\/$/, '')}/deploy-freeze/override`;
+  const response = await fetch(overrideUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Freeze-Override-Token': args.freezeOverrideToken,
+    },
+    body: JSON.stringify({
+      network: args.network,
+      actor: args.freezeOverrideActor,
+      reason: args.freezeOverrideReason,
+      contractName: args.contractName,
+    }),
+  });
+  if (!response.ok) {
+    throw new Error(`Deploy-freeze override rejected (status ${response.status})`);
+  }
+  process.stdout.write(
+    `Deploy-freeze override accepted for ${args.network}: actor=${args.freezeOverrideActor} reason=${args.freezeOverrideReason}\n`,
+  );
 }
 
 function run(command: string, args: string[], dryRun: boolean): string {
@@ -134,6 +201,8 @@ async function main() {
       throw new Error('QUICKEX_REGISTRY_MANIFEST_PRIVATE_KEY must use Ed25519');
     }
   }
+  await assertNotFrozen(args);
+
   if (args.network === 'mainnet' && !args.dryRun) {
     if (!args.mainnetGate || !args.testnetManifest || !args.auditReport) {
       throw new Error('Mainnet deployment requires --mainnet-gate, --testnet-manifest, and --audit-report');
@@ -300,4 +369,4 @@ if (require.main === module) {
   void main();
 }
 
-export { parseArgs, readPriorSlot, main };
+export { parseArgs, readPriorSlot, main, assertNotFrozen, fetchFreezeState };

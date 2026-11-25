@@ -11,7 +11,7 @@ The `evidence` object must contain:
 - `audit_report_sha256` and `audit_report_url` for an independent security audit, plus zero unresolved critical/high findings and verified mitigations for medium findings.
 - `invariant_suite` with `passed: true`, the exact release commit, and a CI run URL.
 - `testnet_burn_in` covering at least 14 completed days, at least 10,000 synthetic escrows, zero unhandled incidents, and an evidence URL.
-- `reproducible_build` with the exact commit and WASM hash plus a CI run URL.
+- `reproducible_build` with the exact commit and WASM hash plus a CI run URL — the `wasm-reproducibility` job in `.github/workflows/contract.yml` is the source of this evidence: it builds the contract WASM twice from a clean state in CI and fails the run (printing both sha256 hashes and the rustc/cargo toolchain versions) if they don't match. `mainnet-gate` depends on this job passing, in addition to `test`, `security`, and `upgrade-regression`.
 - `observability` with `pager_tested: true` and a runbook URL.
 
 Approvals sign the canonical JSON gate payload with its `approvals` property removed. At least two distinct trusted Ed25519 keys are required: one configured with role `security`, one with role `governance`. Approval signatures are separate from the deployment-manifest signing key. Gate approvals expire after seven days.

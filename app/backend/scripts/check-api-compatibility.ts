@@ -1,7 +1,10 @@
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from '../src/app.module';
 import { ApiCompatibilityService } from '../src/api-compatibility/api-compatibility.service';
-import { ApiCompatibilityReport } from '../src/api-compatibility/api-compatibility.types';
+import {
+  ApiCompatibilityChange,
+  ApiCompatibilityReport,
+} from '../src/api-compatibility/api-compatibility.types';
 
 interface CliOptions {
   baselinePath?: string;
@@ -64,6 +67,70 @@ Options:
 `);
 }
 
+const PAGINATION_PARAM_NAMES = new Set(['cursor', 'limit', 'pageSize', 'page_size']);
+const PAGINATION_ENVELOPE_FIELDS = new Set(['nextCursor', 'hasMore']);
+const PAGINATION_ERROR_CODES = new Set([
+  'INVALID_CURSOR',
+  'CURSOR_EXPIRED',
+  'EXPIRED_CURSOR',
+]);
+
+function isPaginationSensitiveChange(change: ApiCompatibilityChange): boolean {
+  const path = change.path ?? '';
+  const details = change.details ?? '';
+
+  // Cursor pagination request parameters (e.g. query.cursor, query.limit).
+  for (const param of PAGINATION_PARAM_NAMES) {
+    if (path.includes(param) || details.includes(param)) {
+      return true;
+    }
+  }
+
+  // Cursor pagination response envelope fields (nextCursor, hasMore).
+  for (const field of PAGINATION_ENVELOPE_FIELDS) {
+    if (path.includes(field) || details.includes(field)) {
+      return true;
+    }
+  }
+
+  // Documented invalid-cursor / expired-cursor error responses.
+  for (const code of PAGINATION_ERROR_CODES) {
+    if (path.includes(code) || details.includes(code)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function promotePaginationChanges(report: ApiCompatibilityReport): ApiCompatibilityReport {
+  const promoted: ApiCompatibilityChange[] = [];
+  const remainingNonBreaking: ApiCompatibilityChange[] = [];
+
+  for (const change of report.nonBreakingChanges) {
+    if (isPaginationSensitiveChange(change)) {
+      promoted.push({
+        ...change,
+        details: change.details
+          ? `${change.details} (cursor pagination contract)`
+          : 'Cursor pagination contract change',
+      });
+    } else {
+      remainingNonBreaking.push(change);
+    }
+  }
+
+  if (promoted.length === 0) {
+    return report;
+  }
+
+  return {
+    ...report,
+    breakingChanges: [...report.breakingChanges, ...promoted],
+    nonBreakingChanges: remainingNonBreaking,
+  };
+}
+
 function formatReport(report: ApiCompatibilityReport): string {
   const lines: string[] = [];
 
@@ -71,7 +138,13 @@ function formatReport(report: ApiCompatibilityReport): string {
   lines.push('========================');
   lines.push('');
 
-  if (report.breakingChanges.length === 0 && report.nonBreakingChanges.length === 0) {
+  const aliasDeprecations = report.aliasDeprecations ?? [];
+
+  if (
+    report.breakingChanges.length === 0 &&
+    report.nonBreakingChanges.length === 0 &&
+    aliasDeprecations.length === 0
+  ) {
     lines.push('No changes detected against the baseline.');
     return lines.join('\n');
   }
@@ -109,6 +182,14 @@ function formatReport(report: ApiCompatibilityReport): string {
     lines.push('');
   }
 
+  if (aliasDeprecations.length > 0) {
+    lines.push(`Alias deprecations (${aliasDeprecations.length}):`);
+    for (const entry of aliasDeprecations) {
+      lines.push(...formatAliasDeprecation(entry));
+    }
+    lines.push('');
+  }
+
   return lines.join('\n');
 }
 
@@ -122,13 +203,28 @@ async function main(): Promise<void> {
   try {
     const service = app.get(ApiCompatibilityService);
 
-    const report = await service.checkCompatibility({
+    const rawReport = await service.checkCompatibility({
       baselinePath: options.baselinePath,
       allowlistPath: options.allowlistPath,
     });
 
+    // Cursor pagination semantics (opaque cursors, page limits, continuation,
+    // and invalid/expired cursor errors) are part of the public contract.
+    // Any drift in those parameters, envelope fields, or error responses is
+    // treated as breaking so the documented behavior cannot silently change.
+    const report = promotePaginationChanges(rawReport);
+
     if (options.json) {
-      console.log(JSON.stringify(report, null, 2));
+      console.log(
+        JSON.stringify(
+          {
+            ...report,
+            aliasDeprecations: report.aliasDeprecations ?? [],
+          },
+          null,
+          2,
+        ),
+      );
     } else {
       console.log(formatReport(report));
     }

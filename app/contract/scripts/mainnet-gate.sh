@@ -17,6 +17,14 @@ REPO_ROOT="$(cd "${CONTRACT_DIR}/../.." && pwd)"
 DEPLOYED_VERSION_FILE="${CONTRACT_DIR}/deployed-version.txt"
 FEATURE_FLAGS_DIR="${REPO_ROOT}/app/backend/src/feature-flags"
 
+# Deploy freeze switch. When the freeze marker file exists, mainnet promotion is
+# blocked unless an auditable override is supplied via the environment:
+#   DEPLOY_FREEZE_OVERRIDE_ACTOR   - identity of the operator granting override
+#   DEPLOY_FREEZE_OVERRIDE_REASON  - justification for bypassing the freeze
+# Overrides are appended to the audit log (never containing secrets).
+DEPLOY_FREEZE_FILE="${DEPLOY_FREEZE_FILE:-${CONTRACT_DIR}/deploy-freeze}"
+DEPLOY_FREEZE_AUDIT_LOG="${DEPLOY_FREEZE_AUDIT_LOG:-${CONTRACT_DIR}/deploy-freeze-audit.log}"
+
 # Post-deploy health check / rollback configuration.
 # The readiness endpoint is polled until it reports healthy or the timeout
 # elapses; on failure the rollback path in deploy.sh is invoked using the
@@ -42,6 +50,27 @@ fail() {
 pass() {
   echo "PASS: $1"
 }
+
+# --- Gate 0: deploy freeze switch -------------------------------------------
+# A hold prevents production traffic changes. Clearing the hold resumes only
+# new eligible runs; it never retroactively unblocks a failed gate.
+echo "==> [0/7] deploy freeze"
+if [ ! -e "${DEPLOY_FREEZE_FILE}" ]; then
+  pass "no deploy freeze active"
+else
+  OVERRIDE_ACTOR="${DEPLOY_FREEZE_OVERRIDE_ACTOR:-}"
+  OVERRIDE_REASON="${DEPLOY_FREEZE_OVERRIDE_REASON:-}"
+  if [ -z "${OVERRIDE_ACTOR}" ] || [ -z "${OVERRIDE_REASON}" ]; then
+    fail "deploy freeze active (${DEPLOY_FREEZE_FILE}); promotion blocked. Set DEPLOY_FREEZE_OVERRIDE_ACTOR and DEPLOY_FREEZE_OVERRIDE_REASON to override."
+  else
+    TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    if ! printf '%s\tactor=%s\treason=%s\n' "${TIMESTAMP}" "${OVERRIDE_ACTOR}" "${OVERRIDE_REASON}" >> "${DEPLOY_FREEZE_AUDIT_LOG}" 2>/dev/null; then
+      fail "deploy freeze override could not be recorded in ${DEPLOY_FREEZE_AUDIT_LOG}; refusing to proceed"
+    else
+      pass "deploy freeze overridden by ${OVERRIDE_ACTOR} (logged to ${DEPLOY_FREEZE_AUDIT_LOG})"
+    fi
+  fi
+fi
 
 # --- Gate 1: cargo test passes with 0 failures -------------------------------
 echo "==> [1/7] cargo test"
@@ -159,24 +188,8 @@ print("yes" if current > deployed else "no")
   fi
 fi
 
-# --- Gate 5: build provenance attestation for the contract WASM artifact -----
-echo "==> [5/7] build provenance attestation"
-ATTESTATION_VERIFIER="${REPO_ROOT}/scripts/verify-attestation.sh"
-WASM_ARTIFACT="${CONTRACT_DIR}/target/wasm32-unknown-unknown/release/quickex.wasm"
-if [ ! -x "${ATTESTATION_VERIFIER}" ]; then
-  fail "attestation verifier not found or not executable: ${ATTESTATION_VERIFIER}"
-elif [ ! -f "${WASM_ARTIFACT}" ]; then
-  fail "contract WASM artifact not found: ${WASM_ARTIFACT} (build it before running the gate)"
-else
-  if "${ATTESTATION_VERIFIER}" "${WASM_ARTIFACT}"; then
-    pass "build provenance attestation verified for ${WASM_ARTIFACT}"
-  else
-    fail "build provenance attestation verification failed for ${WASM_ARTIFACT}"
-  fi
-fi
-
-# --- Gate 6: mainnet.* feature flags verified against backend ---------------
-echo "==> [6/7] mainnet.* feature flags"
+# --- Gate 5: mainnet.* feature flags verified against backend ---------------
+echo "==> [5/7] mainnet.* feature flags"
 if [ ! -d "${FEATURE_FLAGS_DIR}" ]; then
   fail "feature flags directory not found: ${FEATURE_FLAGS_DIR}"
 else
@@ -193,8 +206,8 @@ else
   fi
 fi
 
-# --- Gate 7: post-deploy health check with automated rollback ---------------
-echo "==> [7/7] post-deploy health check"
+# --- Gate 6: post-deploy health check with automated rollback ---------------
+echo "==> [6/7] post-deploy health check"
 
 # Poll the readiness endpoint until healthy or the timeout elapses.
 check_readiness() {

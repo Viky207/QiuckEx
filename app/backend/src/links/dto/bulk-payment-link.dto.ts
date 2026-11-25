@@ -200,11 +200,42 @@ export class BulkPaymentLinkResponseItemDto {
 }
 
 /**
+ * DTO describing a single rejected row from a bulk/CSV request, tied back
+ * to its original source row so the caller can act on it directly.
+ */
+export class BulkPaymentLinkRowErrorDto {
+  @ApiProperty({
+    description:
+      'Original row number as it appears in the uploaded file (1 = header row, so the first data row is 2). For a JSON request, this is the 1-indexed position in the submitted array.',
+    example: 2,
+  })
+  row!: number;
+
+  @ApiProperty({
+    description: 'The field that failed validation',
+    example: 'amount',
+  })
+  field!: string;
+
+  @ApiProperty({
+    description: 'Stable, machine-readable error code for this failure',
+    example: 'INVALID_AMOUNT',
+  })
+  code!: string;
+
+  @ApiProperty({
+    description: 'Human-readable explanation of the failure',
+    example: 'Amount must be a valid number',
+  })
+  message!: string;
+}
+
+/**
  * DTO for bulk payment link generation response
  */
 export class BulkPaymentLinkResponseDto {
   @ApiProperty({
-    description: 'Success status',
+    description: 'True only when every row succeeded with no rejections',
     example: true,
   })
   success!: boolean;
@@ -220,6 +251,13 @@ export class BulkPaymentLinkResponseDto {
     type: [BulkPaymentLinkResponseItemDto],
   })
   links!: BulkPaymentLinkResponseItemDto[];
+
+  @ApiProperty({
+    description:
+      'Rows rejected during validation or generation, mapped back to their source row number. Successful rows above are still returned even when this is non-empty.',
+    type: [BulkPaymentLinkRowErrorDto],
+  })
+  rejected!: BulkPaymentLinkRowErrorDto[];
 
   @ApiProperty({
     description: 'Processing time in milliseconds',

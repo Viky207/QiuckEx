@@ -21,6 +21,7 @@ process.env.SENTRY_DSN = process.env.SENTRY_DSN ?? "";
 
 import { AppModule } from "../src/app.module";
 import { AppConfigService } from "../src/config";
+import { ERROR_REGISTRY } from "../src/common/errors/error-registry";
 
 async function main() {
   const app = await NestFactory.create(AppModule, { logger: false });
@@ -43,9 +44,20 @@ async function main() {
     .addTag("stellar", "Verified assets, path preview, Soroban preflight")
     .addTag("contracts", "Contract registry publication and discovery")
     .addTag("developer", "Developer self-service: ping, webhook testing, key management, health score")
+    .addTag("docs", "Troubleshooting guide and privacy field inventory")
     .build();
 
   const document = SwaggerModule.createDocument(app, swaggerConfig);
+
+  // Reflect the canonical error-code registry in the exported spec so the
+  // troubleshooting guide can be validated against it. Only public, stable
+  // codes are exported; internal-only details are excluded.
+  const publicErrorCodes = Object.values(ERROR_REGISTRY)
+    .filter((entry) => entry.public && entry.stable)
+    .map((entry) => entry.code)
+    .sort();
+
+  document["x-error-codes"] = publicErrorCodes;
   const outPath = join(process.cwd(), "openapi.json");
   writeFileSync(outPath, JSON.stringify(document, null, 2));
   // eslint-disable-next-line no-console

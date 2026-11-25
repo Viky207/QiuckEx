@@ -1,0 +1,134 @@
+name: Testnet Contract Rehearsal
+
+# Manual-only, testnet-only wrapper around
+# app/contract/scripts/testnet-upgrade-rehearsal.sh. Never triggered by a
+# push, PR, or release event — a rehearsal must be deliberately requested
+# each time, against an explicitly named contract, with the operator typing
+# "testnet" to confirm they understand this runs real transactions on a
+# public test network.
+
+on:
+  workflow_dispatch:
+    inputs:
+      contract_id:
+        description: "Contract ID to rehearse against (required)"
+        required: true
+        type: string
+      confirm_testnet:
+        description: 'Type exactly "testnet" to confirm this is a testnet-only rehearsal'
+        required: true
+        type: string
+      source:
+        description: "Stellar CLI identity/source account to sign with"
+        required: true
+        type: string
+      new_version:
+        description: "Target schema version for the upgrade rehearsal (blank = metadata/health check only, no upgrade is executed)"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  rehearsal:
+    name: Run testnet rehearsal
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: app/contract
+    steps:
+      - name: Verify explicit testnet confirmation
+        run: |
+          if [ "${{ inputs.confirm_testnet }}" != "testnet" ]; then
+            echo "::error::confirm_testnet must be exactly 'testnet' — got '${{ inputs.confirm_testnet }}'. This workflow never runs against mainnet."
+            exit 1
+          fi
+          if [ -z "${{ inputs.contract_id }}" ]; then
+            echo "::error::contract_id is required"
+            exit 1
+          fi
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: wasm32v1-none
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "app/contract"
+
+      - name: Install Stellar CLI
+        run: cargo install --locked stellar-cli --version ^23 || cargo install --locked stellar-cli
+
+      - name: Build contract WASM (for upgrade hash)
+        if: inputs.new_version != ''
+        run: cargo build --target wasm32v1-none --release
+
+      - name: Run testnet rehearsal
+        id: rehearsal
+        timeout-minutes: 10
+        env:
+          # Hardcoded, not derived from any input: this workflow has no way
+          # to target mainnet even if asked to.
+          NETWORK: testnet
+          CONTRACT_ID: ${{ inputs.contract_id }}
+          SOURCE: ${{ inputs.source }}
+          NEW_VERSION: ${{ inputs.new_version }}
+          RUN_LOCAL_TESTS: "1"
+        run: |
+          set -o pipefail
+          ./scripts/testnet-upgrade-rehearsal.sh 2>&1 | tee /tmp/rehearsal.log
+
+      - name: Record outcome
+        if: always()
+        run: |
+          {
+            echo "## Testnet rehearsal"
+            echo ""
+            echo "- Network: testnet (fixed)"
+            echo "- Contract ID: \`${{ inputs.contract_id }}\`"
+            echo "- Target schema version: \`${{ inputs.new_version || 'none (health/metadata check only)' }}\`"
+            echo "- Outcome: ${{ steps.rehearsal.outcome }}"
+            echo ""
+            if [ -f docs/rehearsal-artifacts/latest/rehearsal-artifact.json ]; then
+              echo "### Rehearsal artifact"
+              echo ""
+              echo '```json'
+              cat docs/rehearsal-artifacts/latest/rehearsal-artifact.json
+              echo '```'
+            fi
+            echo ""
+            echo "### Raw transaction log"
+            echo ""
+            echo "The Stellar CLI's \`contract invoke\` output above records each call's"
+            echo "return value; it does not print a dedicated transaction hash for"
+            echo "every invocation unless run with \`-v\`. Full tx-hash capture per call"
+            echo "would require updating scripts/testnet-upgrade-rehearsal.sh itself,"
+            echo "which is out of scope for this workflow — the raw log is preserved as"
+            echo "an artifact below."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload rehearsal artifacts and log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: testnet-rehearsal-${{ github.run_id }}
+          path: |
+            app/contract/docs/rehearsal-artifacts/latest/
+            /tmp/rehearsal.log
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Summarize failure
+        if: failure()
+        run: |
+          echo "### :x: Testnet rehearsal failed" >> "$GITHUB_STEP_SUMMARY"
+          echo "See the raw transaction log artifact for details." >> "$GITHUB_STEP_SUMMARY"
